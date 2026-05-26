@@ -1,4 +1,4 @@
-// utils/db.js - SQLite (純 JS 版本，使用 sql.js)
+// utils/db.js - SQLite (純 JS 版本，使用 sql.js) — v16 整合版
 const initSqlJs = require('sql.js');
 const fs = require('fs');
 const path = require('path');
@@ -113,6 +113,21 @@ function initTables(w) {
     'ALTER TABLE products ADD COLUMN dine_in_price REAL DEFAULT 0',
     'ALTER TABLE products ADD COLUMN takeaway_price REAL DEFAULT 0',
     'ALTER TABLE products ADD COLUMN delivery_price REAL DEFAULT 0',
+    'ALTER TABLE products ADD COLUMN show_on_line INTEGER DEFAULT 1',
+    'ALTER TABLE products ADD COLUMN line_name TEXT DEFAULT ""',
+    'ALTER TABLE products ADD COLUMN line_price REAL DEFAULT 0',
+    'ALTER TABLE products ADD COLUMN line_description TEXT DEFAULT ""',
+    'ALTER TABLE products ADD COLUMN line_image_url TEXT DEFAULT ""',
+    'ALTER TABLE products ADD COLUMN line_category TEXT DEFAULT ""',
+    'ALTER TABLE products ADD COLUMN line_hot INTEGER DEFAULT 0',
+    'ALTER TABLE products ADD COLUMN line_promo INTEGER DEFAULT 0',
+    'ALTER TABLE products ADD COLUMN line_sold_out INTEGER DEFAULT 0',
+    'ALTER TABLE products ADD COLUMN sale_status TEXT DEFAULT \'available\'',
+    'ALTER TABLE products ADD COLUMN sold_out_until TEXT DEFAULT ""',
+    'ALTER TABLE products ADD COLUMN auto_restore_next_day INTEGER DEFAULT 1',
+    // v16 整合新增
+    'ALTER TABLE products ADD COLUMN line_category_id INTEGER DEFAULT 0',
+    'ALTER TABLE products ADD COLUMN product_barcode TEXT DEFAULT ""',
   ];
   prodMig.forEach(sql => { try { w._db.run(sql); w._save(); } catch {} });
 
@@ -135,30 +150,109 @@ function initTables(w) {
     created_at TEXT DEFAULT (datetime('now','localtime')),
     updated_at TEXT DEFAULT (datetime('now','localtime'))
   )`);
-  const catCount = w.get('SELECT COUNT(*) as c FROM categories');
-  if (!catCount || Number(catCount.c) === 0) {
-    w._db.run("INSERT INTO categories (name,icon,sort_order) VALUES ('主食','🍚',1)");
-    w._db.run("INSERT INTO categories (name,icon,sort_order) VALUES ('小菜','🥗',2)");
-    w._db.run("INSERT INTO categories (name,icon,sort_order) VALUES ('飲料','🧋',3)");
-    w._save();
-  }
 
   // ── inventory_logs ────────────────────────────────────
   w._db.run(`CREATE TABLE IF NOT EXISTS inventory_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    product_id INTEGER NOT NULL,
-    product_name TEXT NOT NULL,
-    action TEXT NOT NULL,
-    before_grams REAL DEFAULT 0,
-    change_grams REAL DEFAULT 0,
-    after_grams REAL DEFAULT 0,
-    before_units INTEGER DEFAULT 0,
-    after_units INTEGER DEFAULT 0,
-    reason TEXT DEFAULT '',
-    operator TEXT DEFAULT 'staff',
+    product_id INTEGER, product_name TEXT,
+    action TEXT, before_grams REAL DEFAULT 0,
+    change_grams REAL DEFAULT 0, after_grams REAL DEFAULT 0,
+    before_units INTEGER DEFAULT 0, after_units INTEGER DEFAULT 0,
+    reason TEXT DEFAULT '', operator TEXT DEFAULT 'staff',
     order_id TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now','localtime'))
   )`);
+
+  // ── ingredients（食材主表）────────────────────────────
+  w._db.run(`CREATE TABLE IF NOT EXISTS ingredients (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    name               TEXT NOT NULL UNIQUE,
+    unit               TEXT NOT NULL DEFAULT 'g',
+    total_stock        REAL DEFAULT 0,
+    frozen_stock       REAL DEFAULT 0,
+    thawing_stock      REAL DEFAULT 0,
+    refrigerated_stock REAL DEFAULT 0,
+    scrapped_total     REAL DEFAULT 0,
+    ingredient_barcode TEXT DEFAULT '',
+    notes              TEXT DEFAULT '',
+    created_at         TEXT DEFAULT (datetime('now','localtime')),
+    updated_at         TEXT DEFAULT (datetime('now','localtime'))
+  )`);
+
+  // ── ingredient_batches（批號管理）────────────────────
+  w._db.run(`CREATE TABLE IF NOT EXISTS ingredient_batches (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ingredient_id INTEGER NOT NULL,
+    batch_no      TEXT NOT NULL,
+    batch_barcode TEXT DEFAULT '',
+    purchase_date TEXT DEFAULT '',
+    quantity      REAL DEFAULT 0,
+    unit          TEXT DEFAULT 'g',
+    notes         TEXT DEFAULT '',
+    created_at    TEXT DEFAULT (datetime('now','localtime'))
+  )`);
+
+  // ── ingredient_logs（食材異動紀錄）───────────────────
+  w._db.run(`CREATE TABLE IF NOT EXISTS ingredient_logs (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    ingredient_id       INTEGER NOT NULL,
+    ingredient_name     TEXT NOT NULL,
+    batch_no            TEXT DEFAULT '',
+    log_type            TEXT NOT NULL,
+    before_frozen       REAL DEFAULT 0,
+    before_thawing      REAL DEFAULT 0,
+    before_refrigerated REAL DEFAULT 0,
+    change_amount       REAL DEFAULT 0,
+    after_frozen        REAL DEFAULT 0,
+    after_thawing       REAL DEFAULT 0,
+    after_refrigerated  REAL DEFAULT 0,
+    reason              TEXT DEFAULT '',
+    operator            TEXT DEFAULT 'staff',
+    related_order_id    TEXT DEFAULT '',
+    thaw_complete_time  TEXT DEFAULT '',
+    created_at          TEXT DEFAULT (datetime('now','localtime'))
+  )`);
+
+  // ── product_ingredient_formulas（商品扣料公式）───────
+  w._db.run(`CREATE TABLE IF NOT EXISTS product_ingredient_formulas (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id       INTEGER NOT NULL,
+    product_barcode  TEXT DEFAULT '',
+    ingredient_id    INTEGER NOT NULL,
+    amount_per_unit  REAL NOT NULL,
+    notes            TEXT DEFAULT '',
+    created_at       TEXT DEFAULT (datetime('now','localtime'))
+  )`);
+
+  // ── ingredients migration（低庫存警戒值）───────────────
+  const ingMig = [
+    'ALTER TABLE ingredients ADD COLUMN low_stock_threshold REAL DEFAULT 0',
+    "ALTER TABLE ingredients ADD COLUMN operator TEXT DEFAULT ''",
+  ];
+  ingMig.forEach(sql => { try { w._db.run(sql); w._save(); } catch {} });
+
+  // ── ingredient_thaw_batches（解凍批次管理）──────────────
+  w._db.run(`CREATE TABLE IF NOT EXISTS ingredient_thaw_batches (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    ingredient_id        INTEGER NOT NULL,
+    ingredient_name      TEXT NOT NULL,
+    amount               REAL NOT NULL,
+    unit                 TEXT DEFAULT 'g',
+    started_at           TEXT DEFAULT (datetime('now','localtime')),
+    expected_complete_at TEXT DEFAULT '',
+    completed_at         TEXT DEFAULT '',
+    status               TEXT DEFAULT 'thawing',
+    extended_count       INTEGER DEFAULT 0,
+    notes                TEXT DEFAULT '',
+    created_at           TEXT DEFAULT (datetime('now','localtime')),
+    updated_at           TEXT DEFAULT (datetime('now','localtime'))
+  )`);
+
+  // ── new ingredient columns migration ──────────────────
+  const ingMig2 = [
+    'ALTER TABLE ingredients ADD COLUMN default_thaw_hours REAL DEFAULT 0',
+  ];
+  ingMig2.forEach(sql => { try { w._db.run(sql); w._save(); } catch {} });
 
   // ── orders ────────────────────────────────────────────
   w._db.run(`CREATE TABLE IF NOT EXISTS orders (
@@ -179,32 +273,6 @@ function initTables(w) {
     'ALTER TABLE orders ADD COLUMN void_reason TEXT DEFAULT ""',
     'ALTER TABLE orders ADD COLUMN voided_at TEXT DEFAULT ""',
     'ALTER TABLE orders ADD COLUMN updated_at TEXT DEFAULT ""',
-  ];
-  orderMigrations.forEach(sql => { try { w._db.run(sql); w._save(); } catch {} });
-
-  // ── delivery_platforms ────────────────────────────────
-  w._db.run(`CREATE TABLE IF NOT EXISTS delivery_platforms (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    commission_rate REAL DEFAULT 0,
-    is_active INTEGER DEFAULT 1,
-    created_at TEXT DEFAULT (datetime('now','localtime')),
-    updated_at TEXT DEFAULT (datetime('now','localtime'))
-  )`);
-  const platCount = w.get('SELECT COUNT(*) as c FROM delivery_platforms');
-  if (!platCount || Number(platCount.c) === 0) {
-    const platforms = [
-      ['Uber Eats', 30], ['Foodpanda', 35], ['電話訂單', 0],
-      ['LINE訂單', 0], ['自送', 0], ['Lalamove', 0]
-    ];
-    platforms.forEach(([name, rate]) =>
-      w._db.run('INSERT INTO delivery_platforms (name,commission_rate) VALUES (?,?)', [name, rate])
-    );
-    w._save();
-  }
-
-  // ── orders extended migrations ────────────────────────
-  const orderExtMig = [
     'ALTER TABLE orders ADD COLUMN order_mode TEXT DEFAULT "dine_in"',
     'ALTER TABLE orders ADD COLUMN order_status TEXT DEFAULT "completed"',
     'ALTER TABLE orders ADD COLUMN table_number TEXT DEFAULT ""',
@@ -221,35 +289,43 @@ function initTables(w) {
     'ALTER TABLE orders ADD COLUMN discount_amount REAL DEFAULT 0',
     'ALTER TABLE orders ADD COLUMN platform_order_no TEXT DEFAULT ""',
     'ALTER TABLE orders ADD COLUMN delivery_status TEXT DEFAULT ""',
-    // v13 新增：同步欄位
     'ALTER TABLE orders ADD COLUMN uuid TEXT DEFAULT NULL',
     'ALTER TABLE orders ADD COLUMN sync_status TEXT DEFAULT "synced"',
     'ALTER TABLE orders ADD COLUMN device_id TEXT DEFAULT ""',
     'ALTER TABLE orders ADD COLUMN kitchen_status TEXT DEFAULT "pending"',
     'ALTER TABLE orders ADD COLUMN payment_status TEXT DEFAULT "paid"',
     'ALTER TABLE orders ADD COLUMN discount_type TEXT DEFAULT "none"',
+    'ALTER TABLE orders ADD COLUMN source TEXT DEFAULT "pos"',
+    'ALTER TABLE orders ADD COLUMN customer_line_id TEXT DEFAULT ""',
+    'ALTER TABLE orders ADD COLUMN payment_method TEXT DEFAULT "cash"',
+    'ALTER TABLE orders ADD COLUMN payment_category TEXT DEFAULT "cash"',
   ];
-  orderExtMig.forEach(sql => { try { w._db.run(sql); w._save(); } catch {} });
+  orderMigrations.forEach(sql => { try { w._db.run(sql); w._save(); } catch {} });
+
+  // ── payment_category 資料補全 migration ──────────────
+  // 對所有 payment_category 為空的舊訂單，依 payment_method 推算並填入
+  try {
+    w._db.run(`
+      UPDATE orders SET payment_category = CASE
+        WHEN payment_method IN ('cash','現金','現場付款') THEN 'cash'
+        ELSE 'non_cash'
+      END
+      WHERE payment_category IS NULL OR payment_category = ''
+    `);
+    w._save();
+  } catch(e) { console.error('[db] payment_category migration error:', e.message); }
 
   // ── order_logs ────────────────────────────────────────
   w._db.run(`CREATE TABLE IF NOT EXISTS order_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    order_id TEXT NOT NULL,
-    order_number TEXT NOT NULL,
-    action TEXT NOT NULL DEFAULT 'modify',
-    reason TEXT DEFAULT '',
-    operator TEXT DEFAULT 'staff',
-    before_data TEXT DEFAULT '',
-    after_data TEXT DEFAULT '',
-    before_total REAL DEFAULT 0,
-    after_total REAL DEFAULT 0,
-    amount_diff REAL DEFAULT 0,
-    before_payment TEXT DEFAULT '',
-    after_payment TEXT DEFAULT '',
-    before_received REAL DEFAULT 0,
-    after_received REAL DEFAULT 0,
-    before_change REAL DEFAULT 0,
-    after_change REAL DEFAULT 0,
+    order_id TEXT NOT NULL, order_number TEXT NOT NULL,
+    action TEXT NOT NULL DEFAULT 'modify', reason TEXT DEFAULT '',
+    operator TEXT DEFAULT 'staff', before_data TEXT DEFAULT '',
+    after_data TEXT DEFAULT '', before_total REAL DEFAULT 0,
+    after_total REAL DEFAULT 0, amount_diff REAL DEFAULT 0,
+    before_payment TEXT DEFAULT '', after_payment TEXT DEFAULT '',
+    before_received REAL DEFAULT 0, after_received REAL DEFAULT 0,
+    before_change REAL DEFAULT 0, after_change REAL DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now','localtime'))
   )`);
 
@@ -315,7 +391,7 @@ function initTables(w) {
     w._save();
   }
 
-  // ── devices（v13 新增）────────────────────────────────
+  // ── devices ───────────────────────────────────────────
   w._db.run(`CREATE TABLE IF NOT EXISTS devices (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     device_id TEXT UNIQUE NOT NULL,
@@ -325,26 +401,97 @@ function initTables(w) {
     created_at TEXT DEFAULT (datetime('now','localtime'))
   )`);
 
+  // ── delivery_platforms ────────────────────────────────
+  w._db.run(`CREATE TABLE IF NOT EXISTS delivery_platforms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    commission_rate REAL DEFAULT 0,
+    is_active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    updated_at TEXT DEFAULT (datetime('now','localtime'))
+  )`);
+  const platCount = w.get('SELECT COUNT(*) as c FROM delivery_platforms');
+  if (!platCount || Number(platCount.c) === 0) {
+    const platforms = [
+      ['Uber Eats', 30], ['Foodpanda', 35], ['電話訂單', 0],
+      ['LINE訂單', 0], ['自送', 0], ['Lalamove', 0]
+    ];
+    platforms.forEach(([name, rate]) =>
+      w._db.run('INSERT INTO delivery_platforms (name,commission_rate) VALUES (?,?)', [name, rate])
+    );
+    w._save();
+  }
+
+  // ── Seed categories ────────────────────────────────────
+  const catCount = w.get('SELECT COUNT(*) as c FROM categories');
+  if (!catCount || Number(catCount.c) === 0) {
+    [['主食','🍚',1],['小菜','🥗',2],['飲料','🧋',3]].forEach(([name,icon,sort]) =>
+      w._db.run('INSERT INTO categories (name,icon,sort_order,is_active) VALUES (?,?,?,1)', [name,icon,sort])
+    );
+    w._save();
+  }
+
   // ── Seed products ─────────────────────────────────────
   const count = w.get('SELECT COUNT(*) as c FROM products');
   if (!count || Number(count.c) === 0) {
+    // 取剛建立的分類 id
+    const catIdMap = {};
+    w.all('SELECT id,name FROM categories').forEach(c => { catIdMap[c.name] = c.id; });
     const items = [
       ['冷拌麻油腰子','主食',150,1],['滷肉飯','主食',60,2],['排骨飯','主食',120,3],
       ['雞腿便當','主食',130,4],['燙青菜','小菜',30,5],['滷蛋','小菜',20,6],
       ['豆腐','小菜',35,7],['紅燒豆腐','小菜',45,8],['珍珠奶茶','飲料',50,9],
       ['紅茶','飲料',25,10],['綠茶','飲料',25,11],['冬瓜茶','飲料',30,12],
     ];
-    items.forEach(([n,c,p,o]) => w._db.run(
-      'INSERT INTO products (name,category,price,sort_order) VALUES (?,?,?,?)', [n,c,p,o]
-    ));
+    items.forEach(([n,c,p,o]) => {
+      const cid = catIdMap[c] || 0;
+      w._db.run(
+        'INSERT INTO products (name,category,category_id,price,sort_order) VALUES (?,?,?,?,?)', [n,c,cid,p,o]
+      );
+    });
   }
 
+  // ── Settings defaults ─────────────────────────────────
   const sd = (k,v) => { if (!w.get('SELECT key FROM settings WHERE key=?',[k])) w._db.run('INSERT INTO settings (key,value) VALUES (?,?)',[k,v]); };
   sd('shop_name','阿義餐車'); sd('n8n_webhook_url',''); sd('line_channel_token','');
   sd('tax_rate','0'); sd('receipt_footer','感謝您的光臨！歡迎再次惠顧');
   sd('printer_enabled','0'); sd('printer_type','network');
   sd('printer_ip','192.168.1.100'); sd('printer_port','9100');
   sd('auto_print','0'); sd('auto_drawer','0');
+  // LINE 點餐設定
+  sd('shop_logo',''); sd('shop_cover',''); sd('shop_address','');
+  sd('shop_google_map',''); sd('shop_hours',''); sd('shop_announcement','');
+  sd('line_order_enabled','1'); sd('line_order_min_amount','0');
+  sd('n8n_new_order_webhook',''); sd('n8n_status_change_webhook','');
+  // v16 整合新增
+  sd('line_ordering_enabled','1');
+  sd('line_business_hours_enabled','0');
+  sd('line_business_hours', JSON.stringify({
+    mon:{open:'09:00',close:'21:00',enabled:true},
+    tue:{open:'09:00',close:'21:00',enabled:true},
+    wed:{open:'09:00',close:'21:00',enabled:true},
+    thu:{open:'09:00',close:'21:00',enabled:true},
+    fri:{open:'09:00',close:'21:00',enabled:true},
+    sat:{open:'09:00',close:'21:00',enabled:true},
+    sun:{open:'09:00',close:'21:00',enabled:false},
+  }));
+  sd('pickup_enabled','1');
+  sd('delivery_enabled','1');
+  sd('pickup_business_hours_enabled','0');
+  sd('delivery_business_hours_enabled','0');
+  sd('line_today_closed','0');
+  sd('line_today_closed_date','');
+  // LINE 預約設定
+  sd('same_day_preorder_minutes','30');
+  sd('next_day_preorder_hours','2');
+  sd('line_closed_weekdays','[]');
+  sd('line_closed_dates','[]');
+  // LINE 付款方式開關
+  sd('line_payment_cash_enabled','1');
+  sd('line_payment_linepay_enabled','1');
+  sd('line_payment_transfer_enabled','1');
+  sd('line_payment_platform_enabled','0');
+  sd('line_payment_credit_card_enabled','0');
   w._save();
 }
 

@@ -10,6 +10,8 @@
 const express = require('express');
 const router  = express.Router();
 const { getDb }  = require('../utils/db');
+const { toGrams, fromGrams } = require('../utils/unitConvert');
+const { getProductInventoryStatus } = require('../utils/inventoryHelper');
 const { v4: uuidv4 } = require('uuid');
 const fetch    = require('node-fetch');
 const { writeInventoryLog } = require('./inventory');
@@ -45,6 +47,26 @@ function deductInventory(db, items, orderId, action='sale') {
   items.forEach(item => {
     const pid = item.productId || item.product_id;
     if (!pid) return;
+    // 檢查商品是否有扣料公式 — 有的話只扣食材，不扣商品庫存
+    const formulas = db.all('SELECT f.*,i.name as ing_name FROM product_ingredient_formulas f LEFT JOIN ingredients i ON i.id=f.ingredient_id WHERE f.product_id=?', [pid]);
+    if (formulas.length > 0) {
+      // 扣食材冷藏可販售（amount_per_unit 存 g，需換算回食材單位後扣除）
+      formulas.forEach(f => {
+        const ing = db.get('SELECT * FROM ingredients WHERE id=?', [f.ingredient_id]);
+        if (!ing) return;
+        const perUnitG = Number(f.amount_per_unit) * Number(item.qty || 1); // g
+        // 換算成食材原始單位的扣除量
+        const deductInUnit = fromGrams(perUnitG, ing.unit || 'g');
+        const bRefrig = Number(ing.refrigerated_stock || 0);
+        const newRefrig = Math.max(0, bRefrig - deductInUnit);
+        const newTotal  = Math.max(0, Number(ing.total_stock || 0) - deductInUnit);
+        db.run("UPDATE ingredients SET refrigerated_stock=?,total_stock=?,updated_at=datetime('now','localtime') WHERE id=?", [newRefrig, newTotal, ing.id]);
+        db.run(`INSERT INTO ingredient_logs (ingredient_id,ingredient_name,log_type,before_refrigerated,change_amount,after_refrigerated,before_frozen,before_thawing,after_frozen,after_thawing,reason,related_order_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [ing.id, ing.name, 'sale_deduct', bRefrig, -deductInUnit, newRefrig, ing.frozen_stock, ing.thawing_stock, ing.frozen_stock, ing.thawing_stock, 'POS結帳扣料', orderId||'']);
+      });
+      return; // 不扣商品庫存
+    }
+    // 無扣料公式 → 沿用原本商品庫存邏輯
     const prod = db.get('SELECT * FROM products WHERE id=?', [pid]);
     if (!prod || !prod.inventory_enabled || !prod.allocated_grams) return;
     const deductG = prod.allocated_grams * item.qty;
@@ -301,15 +323,18 @@ router.post('/', async (req, res) => {
     if (!items || !Array.isArray(items) || !items.length)
       return res.status(400).json({ success: false, message: '購物車不能為空' });
 
-    // 庫存檢查
+    // 庫存檢查 — 使用統一 inventoryHelper
     for (const item of items) {
       const pid = item.productId || item.product_id;
       if (!pid) continue;
-      const prod = db.get('SELECT * FROM products WHERE id=?', [pid]);
-      if (!prod || !prod.inventory_enabled || !prod.allocated_grams) continue;
-      const avail = Math.floor(Number(prod.current_stock_grams) / Number(prod.allocated_grams));
-      if (item.qty > avail)
-        return res.status(400).json({ success: false, message: `${prod.name} 庫存不足（可賣 ${avail} 份）` });
+      const invStatus = getProductInventoryStatus(db, pid);
+      // null = 無庫存管理，跳過
+      if (!invStatus || invStatus.available_units === null) continue;
+      if (item.qty > invStatus.available_units)
+        return res.status(400).json({
+          success: false,
+          message: `${invStatus.product_name} 庫存不足（可賣 ${invStatus.available_units} 份）`
+        });
     }
 
     const subtotal    = items.reduce((s,i) => s + i.price * i.qty, 0);
