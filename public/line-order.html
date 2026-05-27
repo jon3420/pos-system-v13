@@ -529,7 +529,7 @@ async function renderLastOrderCard(){
     const isReady=d.order_status==='ready';
     card.className='last-order-card';
     card.setAttribute('data-order-no', no);  // v18: WSS update target
-    card.innerHTML=`<div class="loc-row"><span class="loc-no">📦 ${esc(no)}</span><span class="status-badge ${sc}" data-status="${d.order_status||o.status||''}">${si} ${esc(sl)}</span></div><div class="loc-time">🕒 ${esc(d.pickup_time||d.created_at||'')}</div><div class="loc-bottom"><span class="loc-amount">$${d.total||0}</span><span class="loc-hint">點此查看詳情 →</span></div>${isReady?'<div class="loc-ready-hint">🎉 餐點已備妥，請至現場出示訂單編號取餐</div>':''}`;
+    card.innerHTML=`<div class="loc-row"><span class="loc-no">📦 ${esc(no)}</span><span class="status-badge ${sc}" data-status="${d.order_status||''}">${si} ${esc(sl)}</span></div><div class="loc-time">🕒 ${esc(d.pickup_time||d.created_at||'')}</div><div class="loc-bottom"><span class="loc-amount">$${d.total||0}</span><span class="loc-hint">點此查看詳情 →</span></div>${isReady?'<div class="loc-ready-hint">🎉 餐點已備妥，請至現場出示訂單編號取餐</div>':''}`;
     card.style.display='block';
     card.onclick=()=>fetchAndShowDetail(no,ph);
   }catch{card.style.display='none';}
@@ -537,11 +537,21 @@ async function renderLastOrderCard(){
 
 async function fetchAndShowDetail(no,ph){
   try{
+    // v18修正：phone 可能未定義，此時僅用 order_number 查詢
+    const body = ph ? {order_number:no,phone:ph} : {order_number:no};
     const res=await fetch('/api/line-orders/query',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({order_number:no,phone:ph})}).then(r=>r.json());
+      body:JSON.stringify(body)}).then(r=>r.json());
     if(res.success&&res.orders?.length)openOrderDetail(res.orders[0]);
-    else toast('無法取得訂單詳情');
-  }catch{toast('網路錯誤');}
+    else{
+      // fallback：直接用 /status/:orderNo 取得基本資料
+      const sr=await fetch('/api/line-orders/status/'+encodeURIComponent(no)).then(r=>r.json());
+      if(sr.success&&sr.data)openOrderDetail({...sr.data,order_number:no,status:sr.data.order_status});
+      else toast('無法取得訂單詳情');
+    }
+  }catch(e){
+    console.error('[fetchAndShowDetail]',e);
+    toast('查詢失敗，請重試');
+  }
 }
 
 /* ── 查詢訂單 Sheet ── */
@@ -635,7 +645,7 @@ function buildOrderCardHTML(o,mode){
   const detailClick=`openOrderDetail(JSON.parse(this.dataset.order))`;
   const reorderClick=`reorder(JSON.parse(this.dataset.order))`;
   return `<div class="order-card">
-    <div class="oc-head"><div><div class="oc-no">📦 ${esc(o.order_number)}</div><div class="oc-time">${pt}</div></div><span class="status-badge ${sc}" data-status="${d.order_status||o.status||''}">${si} ${esc(sl)}</span></div>
+    <div class="oc-head"><div><div class="oc-no">📦 ${esc(o.order_number)}</div><div class="oc-time">${pt}</div></div><span class="status-badge ${sc}" data-status="${o.status||''}">${si} ${esc(sl)}</span></div>
     <div class="oc-summary">${summary||'（無商品摘要）'}</div>
     <div class="oc-bottom">
       <span class="oc-amount">💰 $${o.total||0}</span>
@@ -649,6 +659,9 @@ function buildOrderCardHTML(o,mode){
 
 /* ── 訂單詳情 ── */
 function openOrderDetail(o){
+  // v18：標記目前顯示的訂單，供 WSS 即時更新使用
+  const sucDetail=document.getElementById('sucDetail');
+  if(sucDetail) sucDetail.setAttribute('data-order-no', o.order_number||'');
   const si=SICON[o.status]||'📦',sl=SLABEL[o.status]||o.status,sc=SCLASS[o.status]||'';
   const isReady=o.status==='ready';
   const itemRows=(o.items||[]).map(i=>`<div class="od-row"><span class="od-label">${esc(i.name||'')} × ${i.qty||1}</span><span class="od-val">$${i.subtotal||0}</span></div>`).join('');
@@ -657,7 +670,7 @@ function openOrderDetail(o){
   document.getElementById('detailBody').innerHTML=`<div class="order-detail">
     ${isReady?'<div class="od-ready-hint">🎉 餐點已備妥，請至現場出示訂單編號取餐</div>':''}
     <div class="od-section">
-      <div class="od-row"><span class="od-label">訂單狀態</span><span class="od-val"><span class="status-badge ${sc}" data-status="${d.order_status||o.status||''}">${si} ${esc(sl)}</span></span></div>
+      <div class="od-row"><span class="od-label">訂單狀態</span><span class="od-val"><span class="status-badge ${sc}" data-status="${o.status||''}">${si} ${esc(sl)}</span></span></div>
       <div class="od-row"><span class="od-label">訂單編號</span><span class="od-val" style="font-size:11px">${esc(o.order_number)}</span></div>
       <div class="od-row"><span class="od-label">顧客姓名</span><span class="od-val">${esc(o.customer_name||'')}</span></div>
       <div class="od-row"><span class="od-label">電話</span><span class="od-val">***${esc(o.phone_last3||'')}</span></div>

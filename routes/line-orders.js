@@ -663,6 +663,16 @@ router.post('/query', (req, res) => {
     const rawName  = String(req.body.customer_name || '').trim();
     const rawOrderNo = String(req.body.order_number || '').trim();
 
+    // v18修正：若有 order_number 且沒有 phone，允許直接查單筆（供 LINE 查詢頁 detail 使用）
+    if (!rawPhone && rawOrderNo) {
+      const order = db.get(
+        "SELECT * FROM orders WHERE order_number=? AND source='line'",
+        [rawOrderNo]
+      );
+      if (!order) return res.status(404).json({ success: false, message: '查無此訂單' });
+      return res.json({ success: true, mode: 'single', orders: [safeOrder(order)] });
+    }
+
     if (!rawPhone)
       return res.status(400).json({ success: false, message: '請輸入電話或電話後三碼' });
 

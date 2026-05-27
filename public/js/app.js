@@ -3867,27 +3867,25 @@ function notifyInventoryChanged() {
       let msg;
       try { msg = JSON.parse(evt.data); } catch { return; }
 
-      // order_status_changed → 若訂單頁正在顯示，立即刷新
+      // order_status_changed → 無條件刷新訂單（不管在哪個頁面都要保持資料最新）
       if (msg.type === 'order_status_changed') {
         const updatedOrder = msg.order;
         console.log('[WSS] 收到 order_status_changed:', updatedOrder?.order_number, '→', updatedOrder?.order_status);
 
-        // 更新記憶中的訂單資料（如果 DOM 中已經渲染）
-        if (document.getElementById('orders-section')?.style.display !== 'none') {
-          // 目前在訂單頁 → 重新載入
-          if (typeof loadOrders === 'function') {
-            loadOrders(window.currentOrderTab === 'pos' ? 'pos' : null);
-          }
+        // v18修正：Web POS 用 page-orders class.active 控制顯示，不是 style.display
+        // 無論訂單頁是否顯示，都更新資料；若在訂單頁則立即重新渲染
+        if (typeof loadOrders === 'function') {
+          loadOrders(window.currentOrderTab === 'pos' ? 'pos' : null);
         }
 
-        // 若是 LINE 訂單且在 LINE 訂單子頁面 → 也刷新
-        const lineSection = document.getElementById('line-orders-section');
-        if (lineSection && lineSection.style.display !== 'none') {
-          if (typeof loadOrders === 'function') loadOrders();
+        // 若目前在訂單頁，更新狀態 badge（不需等 loadOrders 完成）
+        const ordersPage = document.getElementById('page-orders');
+        if (ordersPage?.classList.contains('active') && typeof showToast === 'function') {
+          showToast('🔄 訂單狀態更新：' + (updatedOrder?.order_number || '') + ' → ' + (updatedOrder?.order_status || ''));
         }
       }
 
-      // new_line_order → 若在訂單頁顯示通知
+      // new_line_order → 通知 + 刷新
       if (msg.type === 'new_line_order') {
         const o = msg.order;
         if (typeof showToast === 'function') {
