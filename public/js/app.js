@@ -995,8 +995,8 @@ function renderOrdersTable(orders) {
   const payLabel = { cash:'現金', card:'刷卡', linepay:'LINE', jkopay:'街口', transfer:'轉帳', platform:'平台' };
   const statusMap = { completed:['status-completed','正常'], modified:['status-modified','已修改'], void:['status-void','已作廢'] };
   const modeLabel = { dine_in:'🍽️ 內用', takeout:'🛍️ 外帶', delivery:'🛵 外送' };
-  const ostatusLabel = { pending:'待接單', preparing:'製作中', delivering:'配送中', completed:'已完成', cancelled:'已取消' };
-  const ostatusCls   = { pending:'ostatus-pending', preparing:'ostatus-preparing', delivering:'ostatus-delivering', completed:'ostatus-completed', cancelled:'ostatus-cancelled' };
+  const ostatusLabel = { pending:'待接單', accepted:'已接單', preparing:'製作中', ready:'可取餐', delivering:'配送中', completed:'已完成', cancelled:'已取消' };
+  const ostatusCls   = { pending:'ostatus-pending', accepted:'ostatus-accepted', preparing:'ostatus-preparing', ready:'ostatus-ready', delivering:'ostatus-delivering', completed:'ostatus-completed', cancelled:'ostatus-cancelled' };
 
   tbody.innerHTML = orders.map(o => {
     const [sCls, sLabel] = statusMap[o.status] || ['status-completed','正常'];

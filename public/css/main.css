@@ -1460,7 +1460,9 @@ body {
   font-weight: 700;
 }
 .ostatus-pending    { background: #1a1200; color: #ffb74d; }
+.ostatus-accepted   { background: #0a2a0a; color: #81c784; }
 .ostatus-preparing  { background: #0a1a2a; color: #64b5f6; }
+.ostatus-ready      { background: #1a0a2a; color: #ce93d8; }
 .ostatus-delivering { background: #1a0a2a; color: #ce93d8; }
 .ostatus-completed  { background: #0a2a0a; color: #4caf50; }
 .ostatus-cancelled  { background: #2a0a0a; color: #e53935; }
