@@ -3847,3 +3847,71 @@ function notifyInventoryChanged() {
     refreshInventoryForProducts();
   }
 }
+
+
+// ── v18：WSS Client — 接收後端 order_status_changed 後自動刷新訂單頁 ──────────
+(function initWebPosWss() {
+  let _wssRetry = 0;
+  function connectWss() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url   = proto + '//' + location.host + '/orders';
+    let ws;
+    try { ws = new WebSocket(url); } catch(e) { return; }
+
+    ws.onopen = () => {
+      _wssRetry = 0;
+      console.log('[WSS] Web POS 已連線:', url);
+    };
+
+    ws.onmessage = (evt) => {
+      let msg;
+      try { msg = JSON.parse(evt.data); } catch { return; }
+
+      // order_status_changed → 若訂單頁正在顯示，立即刷新
+      if (msg.type === 'order_status_changed') {
+        const updatedOrder = msg.order;
+        console.log('[WSS] 收到 order_status_changed:', updatedOrder?.order_number, '→', updatedOrder?.order_status);
+
+        // 更新記憶中的訂單資料（如果 DOM 中已經渲染）
+        if (document.getElementById('orders-section')?.style.display !== 'none') {
+          // 目前在訂單頁 → 重新載入
+          if (typeof loadOrders === 'function') {
+            loadOrders(window.currentOrderTab === 'pos' ? 'pos' : null);
+          }
+        }
+
+        // 若是 LINE 訂單且在 LINE 訂單子頁面 → 也刷新
+        const lineSection = document.getElementById('line-orders-section');
+        if (lineSection && lineSection.style.display !== 'none') {
+          if (typeof loadOrders === 'function') loadOrders();
+        }
+      }
+
+      // new_line_order → 若在訂單頁顯示通知
+      if (msg.type === 'new_line_order') {
+        const o = msg.order;
+        if (typeof showToast === 'function') {
+          showToast('🔔 LINE 新訂單：' + (o?.order_number || '') + ' / ' + (o?.customer_name || ''));
+        }
+        if (typeof loadOrders === 'function') {
+          loadOrders(window.currentOrderTab === 'pos' ? 'pos' : null);
+        }
+      }
+    };
+
+    ws.onclose = () => {
+      const delay = Math.min(1000 * Math.pow(2, _wssRetry++), 30000);
+      console.log('[WSS] 斷線，', delay, 'ms 後重連');
+      setTimeout(connectWss, delay);
+    };
+
+    ws.onerror = () => ws.close();
+  }
+
+  // DOMContentLoaded 後連線
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', connectWss);
+  } else {
+    connectWss();
+  }
+})();

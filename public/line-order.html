@@ -528,7 +528,8 @@ async function renderLastOrderCard(){
     const sc=SCLASS[d.order_status]||'';
     const isReady=d.order_status==='ready';
     card.className='last-order-card';
-    card.innerHTML=`<div class="loc-row"><span class="loc-no">📦 ${esc(no)}</span><span class="status-badge ${sc}">${si} ${esc(sl)}</span></div><div class="loc-time">🕒 ${esc(d.pickup_time||d.created_at||'')}</div><div class="loc-bottom"><span class="loc-amount">$${d.total||0}</span><span class="loc-hint">點此查看詳情 →</span></div>${isReady?'<div class="loc-ready-hint">🎉 餐點已備妥，請至現場出示訂單編號取餐</div>':''}`;
+    card.setAttribute('data-order-no', no);  // v18: WSS update target
+    card.innerHTML=`<div class="loc-row"><span class="loc-no">📦 ${esc(no)}</span><span class="status-badge ${sc}" data-status="${d.order_status||o.status||''}">${si} ${esc(sl)}</span></div><div class="loc-time">🕒 ${esc(d.pickup_time||d.created_at||'')}</div><div class="loc-bottom"><span class="loc-amount">$${d.total||0}</span><span class="loc-hint">點此查看詳情 →</span></div>${isReady?'<div class="loc-ready-hint">🎉 餐點已備妥，請至現場出示訂單編號取餐</div>':''}`;
     card.style.display='block';
     card.onclick=()=>fetchAndShowDetail(no,ph);
   }catch{card.style.display='none';}
@@ -634,7 +635,7 @@ function buildOrderCardHTML(o,mode){
   const detailClick=`openOrderDetail(JSON.parse(this.dataset.order))`;
   const reorderClick=`reorder(JSON.parse(this.dataset.order))`;
   return `<div class="order-card">
-    <div class="oc-head"><div><div class="oc-no">📦 ${esc(o.order_number)}</div><div class="oc-time">${pt}</div></div><span class="status-badge ${sc}">${si} ${esc(sl)}</span></div>
+    <div class="oc-head"><div><div class="oc-no">📦 ${esc(o.order_number)}</div><div class="oc-time">${pt}</div></div><span class="status-badge ${sc}" data-status="${d.order_status||o.status||''}">${si} ${esc(sl)}</span></div>
     <div class="oc-summary">${summary||'（無商品摘要）'}</div>
     <div class="oc-bottom">
       <span class="oc-amount">💰 $${o.total||0}</span>
@@ -656,7 +657,7 @@ function openOrderDetail(o){
   document.getElementById('detailBody').innerHTML=`<div class="order-detail">
     ${isReady?'<div class="od-ready-hint">🎉 餐點已備妥，請至現場出示訂單編號取餐</div>':''}
     <div class="od-section">
-      <div class="od-row"><span class="od-label">訂單狀態</span><span class="od-val"><span class="status-badge ${sc}">${si} ${esc(sl)}</span></span></div>
+      <div class="od-row"><span class="od-label">訂單狀態</span><span class="od-val"><span class="status-badge ${sc}" data-status="${d.order_status||o.status||''}">${si} ${esc(sl)}</span></span></div>
       <div class="od-row"><span class="od-label">訂單編號</span><span class="od-val" style="font-size:11px">${esc(o.order_number)}</span></div>
       <div class="od-row"><span class="od-label">顧客姓名</span><span class="od-val">${esc(o.customer_name||'')}</span></div>
       <div class="od-row"><span class="od-label">電話</span><span class="od-val">***${esc(o.phone_last3||'')}</span></div>
@@ -734,5 +735,71 @@ setInterval(refreshInventory,30000);
 
 init();
 </script>
+
+<script>
+// v18：WSS Client — 收到 order_status_changed 後更新已顯示的訂單狀態
+(function initLineOrderWss() {
+  let _retry = 0;
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = proto + '//' + location.host + '/orders';
+    let ws;
+    try { ws = new WebSocket(url); } catch { return; }
+
+    ws.onopen = () => { _retry = 0; };
+
+    ws.onmessage = (evt) => {
+      let msg;
+      try { msg = JSON.parse(evt.data); } catch { return; }
+      if (msg.type !== 'order_status_changed') return;
+
+      const o = msg.order;
+      if (!o) return;
+      const newStatus      = o.order_status || '';
+      const orderNumber    = o.order_number || '';
+      const si = (window.SICON  || {})[newStatus] || '📦';
+      const sl = (window.SLABEL || {})[newStatus] || newStatus;
+      const sc = (window.SCLASS || {})[newStatus] || '';
+
+      // 若目前詳情頁顯示的是這筆訂單 → 更新狀態 badge
+      // 找到目前顯示的訂單詳情容器
+      const sucDetail = document.getElementById('sucDetail');
+      const shownOrderNo = sucDetail ? sucDetail.getAttribute('data-order-no') : '';
+      if (shownOrderNo && shownOrderNo === orderNumber) {
+        const badge = sucDetail.querySelector('.status-badge[data-status]');
+        if (badge) {
+          badge.className = 'status-badge ' + sc;
+          badge.textContent = si + ' ' + sl;
+          badge.setAttribute('data-status', newStatus);
+        }
+        // 若是 ready → 顯示取餐提醒
+        const readyBanner = document.getElementById('_ready_banner');
+        if (readyBanner) {
+          readyBanner.style.display = newStatus === 'ready' ? 'block' : 'none';
+        }
+      }
+
+      // 更新訂單列表中的狀態（若有渲染）
+      const card = document.querySelector('[data-order-no="' + orderNumber + '"]');
+      if (card) {
+        const b = card.querySelector('.status-badge');
+        if (b) { b.className='status-badge '+sc; b.textContent=si+' '+sl; }
+      }
+    };
+
+    ws.onclose = () => {
+      const d = Math.min(1000 * Math.pow(2, _retry++), 30000);
+      setTimeout(connect, d);
+    };
+    ws.onerror = () => ws.close();
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', connect);
+  } else {
+    connect();
+  }
+})();
+</script>
+
 </body>
 </html>
