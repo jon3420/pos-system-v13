@@ -480,38 +480,108 @@ router.get('/online', (req, res) => {
     const counts = db.all(`SELECT order_status, COUNT(*) as cnt FROM orders WHERE source='line' GROUP BY order_status`);
     const statusCounts = {};
     counts.forEach(c => { statusCounts[c.order_status] = Number(c.cnt); });
+    // v18 debug：確認回傳的狀態是最新值
+    console.log('[GET /online] returning', orders.length, 'orders, statusCounts:', JSON.stringify(statusCounts));
+    if (orders.length <= 5) {
+      orders.forEach(o => console.log('[GET /online] order:', o.order_number, 'order_status=', o.order_status, 'uuid=', o.uuid));
+    }
     res.json({ success: true, data: orders, status_counts: statusCounts });
   } catch(e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
 // ── PATCH /api/online-orders/:id/status ───────────────────
-// v18修正：同時更新 order_status + kitchen_status，確保 Android/Web/LINE 全部讀到新狀態
+// v18 完整修正：
+//   1. 廣域 WHERE（id / uuid / order_number）確保不管 Android 傳什麼都能找到
+//   2. 回傳 db.run().changes，changes=0 → 直接 NO_ROWS_UPDATED
+//   3. UPDATE 後立即 SELECT 驗證欄位真的寫入
+//   4. 完整 console.log debug
 router.patch('/online/:id/status', (req, res) => {
   try {
     const db = getDb();
-    const { id } = req.params;
+    const rawId = req.params.id;           // Android 傳來的值（可能是 uuid 或 order_number）
     const { status, reject_reason } = req.body;
+
+    console.log('[PATCH /status] === UPDATE REQUEST ===');
+    console.log('[PATCH /status] rawId   :', rawId);
+    console.log('[PATCH /status] status  :', status);
+    console.log('[PATCH /status] body    :', JSON.stringify(req.body));
+
     const valid = ['pending','accepted','preparing','ready','completed','cancelled'];
     if (!valid.includes(status))
       return res.status(400).json({ success: false, message: '無效的狀態值' });
-    const order = db.get('SELECT * FROM orders WHERE id=? OR uuid=?', [id, id]);
-    if (!order) return res.status(404).json({ success: false, message: '訂單不存在' });
-    const now = new Date().toISOString();
-    // 同時更新 order_status 與 kitchen_status，避免欄位不一致導致 Android 重讀時狀態回滾
-    db.run(
-      `UPDATE orders SET order_status=?, kitchen_status=?, updated_at=? WHERE id=? OR uuid=?`,
-      [status, status, now, id, id]
+
+    // ── Step 1：廣域查詢（id / uuid / order_number 任一符合）──
+    const order = db.get(
+      `SELECT * FROM orders WHERE id=? OR uuid=? OR order_number=?`,
+      [rawId, rawId, rawId]
     );
-    const updated = db.get('SELECT * FROM orders WHERE id=? OR uuid=?', [id, id]);
-    // 驗證確實已更新
-    if (!updated || updated.order_status !== status) {
-      console.error(`[line-orders] PATCH status verify FAILED: id=${id} expected=${status} got=${updated?.order_status}`);
-      return res.status(500).json({ success: false, message: '狀態更新驗證失敗，請重試' });
+
+    console.log('[PATCH /status] FOUND ORDER:', order
+      ? `id=${order.id} uuid=${order.uuid} order_number=${order.order_number} current_status=${order.order_status}`
+      : 'null — NOT FOUND');
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        error: 'ORDER_NOT_FOUND',
+        message: `找不到訂單：${rawId}`,
+        hint: '請確認傳入的是 uuid 或 order_number'
+      });
     }
+
+    // 使用 DB 內的 id（確保 PRIMARY KEY 命中，不靠 uuid/order_number）
+    const dbId = order.id;
+    const now  = new Date().toISOString();
+
+    // ── Step 2：UPDATE（用 PRIMARY KEY，最精確）──
+    const result = db.run(
+      `UPDATE orders SET order_status=?, kitchen_status=?, updated_at=? WHERE id=?`,
+      [status, status, now, dbId]
+    );
+
+    console.log('[PATCH /status] UPDATE RESULT:', {
+      dbId,
+      changes: result.changes,
+      expectedStatus: status
+    });
+
+    if (!result.changes || result.changes === 0) {
+      console.error('[PATCH /status] ❌ NO_ROWS_UPDATED — changes=0, dbId=', dbId);
+      return res.status(500).json({
+        success: false,
+        error: 'NO_ROWS_UPDATED',
+        message: 'UPDATE 執行成功但影響 0 行，請確認訂單 ID',
+        dbId
+      });
+    }
+
+    // ── Step 3：立即 SELECT 驗證 ──
+    const updated = db.get(
+      `SELECT id, uuid, order_number, order_status, kitchen_status, updated_at FROM orders WHERE id=?`,
+      [dbId]
+    );
+
+    console.log('[PATCH /status] VERIFY ORDER:', updated);
+
+    if (!updated || updated.order_status !== status) {
+      console.error('[PATCH /status] ❌ VERIFY FAILED — expected:', status, 'got:', updated?.order_status);
+      return res.status(500).json({
+        success: false,
+        error: 'VERIFY_FAILED',
+        message: `寫入驗證失敗：期望 ${status}，資料庫仍為 ${updated?.order_status}`,
+        dbRow: updated
+      });
+    }
+
+    console.log('[PATCH /status] ✅ SUCCESS — order_status=', updated.order_status);
+
+    // ── Step 4：取完整訂單廣播 WSS + 回傳 ──
+    const fullOrder = db.get('SELECT * FROM orders WHERE id=?', [dbId]);
     try {
       const wss = req.app.get('wss');
       if (wss) {
-        const msg = JSON.stringify({ type: 'order_status_changed', order: updated });
+        // 廣播完整訂單（含 order_status），讓 Web POS 即時更新
+        const msg = JSON.stringify({ type: 'order_status_changed', order: fullOrder });
         wss.clients?.forEach(c => { if (c.readyState === 1) c.send(msg); });
       }
     } catch {}
@@ -522,7 +592,7 @@ router.patch('/online/:id/status', (req, res) => {
       new_status: status,
       reject_reason: reject_reason||''
     });
-    res.json({ success: true, data: updated });
+    res.json({ success: true, data: fullOrder });
   } catch(e) { res.status(500).json({ success: false, message: e.message }); }
 });
 

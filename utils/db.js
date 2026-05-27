@@ -42,9 +42,11 @@ function wrap(sqlDb) {
       const stmt = sqlDb.prepare(sql);
       stmt.run(Array.isArray(params) ? params : [params]);
       stmt.free();
+      // v18修正：加入 changes（受影響行數），用於 UPDATE/DELETE 後驗證是否真的修改了資料
+      const changes = sqlDb.getRowsModified ? sqlDb.getRowsModified() : 0;
       const r = sqlDb.exec('SELECT last_insert_rowid() as id');
       save();
-      return { lastInsertRowid: r[0]?.values[0][0] ?? null };
+      return { lastInsertRowid: r[0]?.values[0][0] ?? null, changes };
     },
 
     prepare(sql) {
