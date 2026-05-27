@@ -485,6 +485,7 @@ router.get('/online', (req, res) => {
 });
 
 // ── PATCH /api/online-orders/:id/status ───────────────────
+// v18修正：同時更新 order_status + kitchen_status，確保 Android/Web/LINE 全部讀到新狀態
 router.patch('/online/:id/status', (req, res) => {
   try {
     const db = getDb();
@@ -496,8 +497,17 @@ router.patch('/online/:id/status', (req, res) => {
     const order = db.get('SELECT * FROM orders WHERE id=? OR uuid=?', [id, id]);
     if (!order) return res.status(404).json({ success: false, message: '訂單不存在' });
     const now = new Date().toISOString();
-    db.run(`UPDATE orders SET order_status=?, updated_at=? WHERE id=? OR uuid=?`, [status, now, id, id]);
+    // 同時更新 order_status 與 kitchen_status，避免欄位不一致導致 Android 重讀時狀態回滾
+    db.run(
+      `UPDATE orders SET order_status=?, kitchen_status=?, updated_at=? WHERE id=? OR uuid=?`,
+      [status, status, now, id, id]
+    );
     const updated = db.get('SELECT * FROM orders WHERE id=? OR uuid=?', [id, id]);
+    // 驗證確實已更新
+    if (!updated || updated.order_status !== status) {
+      console.error(`[line-orders] PATCH status verify FAILED: id=${id} expected=${status} got=${updated?.order_status}`);
+      return res.status(500).json({ success: false, message: '狀態更新驗證失敗，請重試' });
+    }
     try {
       const wss = req.app.get('wss');
       if (wss) {
