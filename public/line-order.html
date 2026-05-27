@@ -311,6 +311,7 @@ function openSheet(id){
   document.getElementById(id).classList.add('show');
 }
 function closeSheet(id){
+  if(id==='detailSheet'&&typeof window._stopStatusPolling==='function') window._stopStatusPolling();
   document.getElementById(id)?.classList.remove('show');
   if(_topSheet===id){_topSheet=null;document.getElementById('overlay').classList.remove('show');}
 }
@@ -532,6 +533,8 @@ async function renderLastOrderCard(){
     card.innerHTML=`<div class="loc-row"><span class="loc-no">📦 ${esc(no)}</span><span class="status-badge ${sc}" data-status="${d.order_status||''}">${si} ${esc(sl)}</span></div><div class="loc-time">🕒 ${esc(d.pickup_time||d.created_at||'')}</div><div class="loc-bottom"><span class="loc-amount">$${d.total||0}</span><span class="loc-hint">點此查看詳情 →</span></div>${isReady?'<div class="loc-ready-hint">🎉 餐點已備妥，請至現場出示訂單編號取餐</div>':''}`;
     card.style.display='block';
     card.onclick=()=>fetchAndShowDetail(no,ph);
+    // v18：卡片顯示後啟動 polling 持續更新狀態
+    if(typeof window._startStatusPolling==='function') window._startStatusPolling(no);
   }catch{card.style.display='none';}
 }
 
@@ -659,9 +662,11 @@ function buildOrderCardHTML(o,mode){
 
 /* ── 訂單詳情 ── */
 function openOrderDetail(o){
-  // v18：標記目前顯示的訂單，供 WSS 即時更新使用
+  // v18：標記目前顯示的訂單，啟動 polling
   const sucDetail=document.getElementById('sucDetail');
   if(sucDetail) sucDetail.setAttribute('data-order-no', o.order_number||'');
+  // 啟動狀態 polling（10秒）
+  if(typeof window._startStatusPolling==='function') window._startStatusPolling(o.order_number||'');
   const si=SICON[o.status]||'📦',sl=SLABEL[o.status]||o.status,sc=SCLASS[o.status]||'';
   const isReady=o.status==='ready';
   const itemRows=(o.items||[]).map(i=>`<div class="od-row"><span class="od-label">${esc(i.name||'')} × ${i.qty||1}</span><span class="od-val">$${i.subtotal||0}</span></div>`).join('');
@@ -751,6 +756,42 @@ init();
 
 <script>
 // v18：WSS Client — 收到 order_status_changed 後更新已顯示的訂單狀態
+// v18：LINE 訂單狀態 polling — 每 10 秒刷新，確保 WSS 失效時也能同步
+(function initLineOrderPolling() {
+  let _pollTimer = null;
+  // 當詳情頁打開時啟動 polling
+  window._startStatusPolling = function(orderNo) {
+    if (_pollTimer) clearInterval(_pollTimer);
+    _pollTimer = setInterval(async () => {
+      if (!orderNo) return;
+      try {
+        const r = await fetch('/api/line-orders/status/' + encodeURIComponent(orderNo)).then(x=>x.json());
+        if (!r.success || !r.data) return;
+        const d = r.data;
+        const newStatus = d.order_status || '';
+        const si = (window.SICON||{})[newStatus]||'📦';
+        const sl = (window.SLABEL||{})[newStatus]||newStatus;
+        const sc = (window.SCLASS||{})[newStatus]||'';
+        // 更新詳情頁 badge
+        const sucDetail = document.getElementById('sucDetail');
+        if (sucDetail && sucDetail.getAttribute('data-order-no') === orderNo) {
+          const badge = sucDetail.querySelector('.status-badge[data-status]');
+          if (badge) { badge.className='status-badge '+sc; badge.textContent=si+' '+sl; badge.setAttribute('data-status',newStatus); }
+        }
+        // 更新首頁卡片
+        const card = document.querySelector('[data-order-no="'+orderNo+'"]');
+        if (card) {
+          const b = card.querySelector('.status-badge'); 
+          if (b) { b.className='status-badge '+sc; b.textContent=si+' '+sl; }
+        }
+      } catch {}
+    }, 10000);
+  };
+  window._stopStatusPolling = function() {
+    if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+  };
+})();
+
 (function initLineOrderWss() {
   let _retry = 0;
   function connect() {

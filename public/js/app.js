@@ -3849,6 +3849,33 @@ function notifyInventoryChanged() {
 }
 
 
+// ── v18：訂單頁自動 polling（每 10 秒，確保 WSS 失效時也能同步）──────────────
+(function initOrderPolling() {
+  let _pollInterval = null;
+  // 原本 showPage 函數的包裝，切到訂單頁時啟動 polling
+  const _origShowPage = typeof showPage === 'function' ? showPage : null;
+  if (_origShowPage) {
+    window._orderPollingShowPage = function(name) {
+      _origShowPage(name);
+      if (name === 'orders') {
+        if (!_pollInterval) {
+          _pollInterval = setInterval(() => {
+            if (typeof loadOrders === 'function') {
+              loadOrders(window.currentOrderTab === 'pos' ? 'pos' : null);
+            }
+          }, 10000); // 每 10 秒
+        }
+      } else {
+        if (_pollInterval) { clearInterval(_pollInterval); _pollInterval = null; }
+      }
+    };
+    // 替換全域 showPage（只在 DOMContentLoaded 後）
+    document.addEventListener('DOMContentLoaded', () => {
+      window.showPage = window._orderPollingShowPage;
+    });
+  }
+})();
+
 // ── v18：WSS Client — 接收後端 order_status_changed 後自動刷新訂單頁 ──────────
 (function initWebPosWss() {
   let _wssRetry = 0;

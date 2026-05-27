@@ -579,12 +579,21 @@ router.patch('/online/:id/status', (req, res) => {
     const fullOrder = db.get('SELECT * FROM orders WHERE id=?', [dbId]);
     try {
       const wss = req.app.get('wss');
-      if (wss) {
-        // 廣播完整訂單（含 order_status），讓 Web POS 即時更新
+      const clientCount = wss?.clients?.size ?? 0;
+      console.log('[PATCH /status] WSS broadcast — clients:', clientCount, 'order:', fullOrder?.order_number, 'status:', fullOrder?.order_status);
+      if (wss && clientCount > 0) {
         const msg = JSON.stringify({ type: 'order_status_changed', order: fullOrder });
-        wss.clients?.forEach(c => { if (c.readyState === 1) c.send(msg); });
+        let sent = 0;
+        wss.clients.forEach(c => {
+          if (c.readyState === 1) { c.send(msg); sent++; }
+        });
+        console.log('[PATCH /status] WSS sent to', sent, 'clients');
+      } else {
+        console.warn('[PATCH /status] ⚠️ No WSS clients connected — Web POS may not receive update');
       }
-    } catch {}
+    } catch(wssErr) {
+      console.error('[PATCH /status] WSS broadcast error:', wssErr.message);
+    }
     triggerN8nWebhook(db, 'line_order_status_changed', {
       order_number: order.order_number,
       customer_line_id: order.customer_line_id,
