@@ -148,7 +148,9 @@ initDb().then((db) => {
   app.use('/api/line-shop',     (req, res, next) => { req.url = '/shop'; lineOrderRouter(req, res, next); });
   app.use('/api/line-menu',     (req, res, next) => { req.url = '/menu'; lineOrderRouter(req, res, next); });
   app.use('/api/line-orders',   lineOrderRouter);
-  app.use('/api/online-orders', (req, res, next) => { req.url = '/online' + req.url; lineOrderRouter(req, res, next); });
+  // v18：直接掛載獨立的 online-orders 路由（不透過 line-orders 別名轉接）
+  // 確保 PATCH /api/online-orders/:id/status 不會掉到 index.html fallback
+  app.use('/api/online-orders', require('./routes/online-orders'));
 
   app.get('/api/printers/list', async (req, res) => {
     try {
