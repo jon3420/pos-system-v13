@@ -41,9 +41,11 @@ function wrap(sqlDb) {
     run(sql, params = []) {
       const stmt = sqlDb.prepare(sql);
       stmt.run(Array.isArray(params) ? params : [params]);
-      stmt.free();
-      // v18修正：加入 changes（受影響行數），用於 UPDATE/DELETE 後驗證是否真的修改了資料
+      // ★ 必須在 stmt.free() 之前、任何其他 SQL 之前取得 getRowsModified()
+      // 因為 sqlDb.exec('SELECT ...') 會重置 getRowsModified 計數
       const changes = sqlDb.getRowsModified ? sqlDb.getRowsModified() : 0;
+      stmt.free();
+      // 取 lastInsertRowid（只對 INSERT 有意義，UPDATE 維持原 id）
       const r = sqlDb.exec('SELECT last_insert_rowid() as id');
       save();
       return { lastInsertRowid: r[0]?.values[0][0] ?? null, changes };

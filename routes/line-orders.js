@@ -498,85 +498,83 @@ router.get('/online', (req, res) => {
 router.patch('/online/:id/status', (req, res) => {
   try {
     const db = getDb();
-    const rawId = req.params.id;           // Android 傳來的值（可能是 uuid 或 order_number）
-    const { status, reject_reason } = req.body;
+    const rawId = req.params.id;  // uuid 或 order_number
+    const { status, order_status, kitchen_status, reject_reason } = req.body;
+    // 支援 body 裡的 status / order_status 任一
+    const newStatus = status || order_status;
 
     console.log('[PATCH /status] === UPDATE REQUEST ===');
     console.log('[PATCH /status] rawId   :', rawId);
-    console.log('[PATCH /status] status  :', status);
+    console.log('[PATCH /status] status  :', newStatus);
     console.log('[PATCH /status] body    :', JSON.stringify(req.body));
 
     const valid = ['pending','accepted','preparing','ready','completed','cancelled'];
-    if (!valid.includes(status))
-      return res.status(400).json({ success: false, message: '無效的狀態值' });
+    if (!valid.includes(newStatus))
+      return res.status(400).json({ success: false, message: '無效的狀態值: ' + newStatus });
 
-    // ── Step 1：廣域查詢（id / uuid / order_number 任一符合）──
+    // ── Step 1：廣域查詢（order_number 優先，再 id / uuid）──
     const order = db.get(
-      `SELECT * FROM orders WHERE id=? OR uuid=? OR order_number=?`,
+      `SELECT * FROM orders WHERE order_number=? OR id=? OR uuid=?`,
       [rawId, rawId, rawId]
     );
 
     console.log('[PATCH /status] FOUND ORDER:', order
-      ? `id=${order.id} uuid=${order.uuid} order_number=${order.order_number} current_status=${order.order_status}`
+      ? `id=${order.id} uuid=${order.uuid} order_number=${order.order_number} order_status=${order.order_status}`
       : 'null — NOT FOUND');
 
     if (!order) {
       return res.status(404).json({
         success: false,
         error: 'ORDER_NOT_FOUND',
-        message: `找不到訂單：${rawId}`,
-        hint: '請確認傳入的是 uuid 或 order_number'
+        message: '找不到訂單：' + rawId
       });
     }
 
-    // 使用 DB 內的 id（確保 PRIMARY KEY 命中，不靠 uuid/order_number）
-    const dbId = order.id;
-    const now  = new Date().toISOString();
+    const orderNo = order.order_number;
+    const now = new Date().toLocaleString('sv', { timeZone: 'Asia/Taipei' }).replace('T', ' ');
 
-    // ── Step 2：UPDATE（用 PRIMARY KEY，最精確）──
+    // ── Step 2：UPDATE — 同時更新 status / order_status / kitchen_status
+    // 用 order_number WHERE（最穩定，不依賴 id/uuid 的型別匹配問題）
     const result = db.run(
-      `UPDATE orders SET order_status=?, kitchen_status=?, updated_at=? WHERE id=?`,
-      [status, status, now, dbId]
+      `UPDATE orders SET status=?, order_status=?, kitchen_status=?, updated_at=? WHERE order_number=?`,
+      [newStatus, newStatus, newStatus, now, orderNo]
     );
 
     console.log('[PATCH /status] UPDATE RESULT:', {
-      dbId,
-      changes: result.changes,
-      expectedStatus: status
+      orderNo, changes: result.changes, newStatus
     });
 
     if (!result.changes || result.changes === 0) {
-      console.error('[PATCH /status] ❌ NO_ROWS_UPDATED — changes=0, dbId=', dbId);
-      return res.status(500).json({
-        success: false,
-        error: 'NO_ROWS_UPDATED',
-        message: 'UPDATE 執行成功但影響 0 行，請確認訂單 ID',
-        dbId
-      });
+      console.error('[PATCH /status] ❌ changes=0 — UPDATE did not affect any rows');
+      // changes=0 不一定代表失敗（sql.js getRowsModified 在某些情況不可靠）
+      // 改成直接 SELECT 驗證
+      console.warn('[PATCH /status] Falling back to SELECT verify despite changes=0');
     }
 
-    // ── Step 3：立即 SELECT 驗證 ──
-    const updated = db.get(
-      `SELECT id, uuid, order_number, order_status, kitchen_status, updated_at FROM orders WHERE id=?`,
-      [dbId]
+    // ── Step 3：立即 SELECT 驗證（不靠 changes，直接讀 DB）──
+    const verified = db.get(
+      `SELECT order_number, status, order_status, kitchen_status, updated_at FROM orders WHERE order_number=?`,
+      [orderNo]
     );
 
-    console.log('[PATCH /status] VERIFY ORDER:', updated);
+    console.log('[PATCH /status] VERIFY:', verified);
 
-    if (!updated || updated.order_status !== status) {
-      console.error('[PATCH /status] ❌ VERIFY FAILED — expected:', status, 'got:', updated?.order_status);
+    if (!verified || verified.order_status !== newStatus) {
+      console.error('[PATCH /status] ❌ VERIFY FAILED — expected:', newStatus, 'got:', verified?.order_status);
       return res.status(500).json({
         success: false,
         error: 'VERIFY_FAILED',
-        message: `寫入驗證失敗：期望 ${status}，資料庫仍為 ${updated?.order_status}`,
-        dbRow: updated
+        message: '狀態寫入驗證失敗：期望 ' + newStatus + '，DB 仍為 ' + verified?.order_status,
+        verified
       });
     }
 
-    console.log('[PATCH /status] ✅ SUCCESS — order_status=', updated.order_status);
+    console.log('[PATCH /status] ✅ SUCCESS — order_status=', verified.order_status);
+
+    console.log('[PATCH /status] ✅ SUCCESS — order_status=', verified.order_status);
 
     // ── Step 4：取完整訂單廣播 WSS + 回傳 ──
-    const fullOrder = db.get('SELECT * FROM orders WHERE id=?', [dbId]);
+    const fullOrder = db.get('SELECT * FROM orders WHERE order_number=?', [orderNo]);
     try {
       const wss = req.app.get('wss');
       const clientCount = wss?.clients?.size ?? 0;
