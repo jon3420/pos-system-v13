@@ -1,3 +1,755 @@
+// ═══════════════════════════════════════════════════
+// SaaS R1 fix4 — 店家 JWT 綁定層
+// ═══════════════════════════════════════════════════
+
+// ── 讀寫 token ─────────────────────────────────────
+const TOKEN_KEY = 'pos_store_token';
+function getToken()           { return localStorage.getItem(TOKEN_KEY); }
+function setToken(t)          { localStorage.setItem(TOKEN_KEY, t); }
+function clearToken()         { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem('pos_store_info'); }
+
+// ── 解析 JWT payload（不驗簽，僅用於 UI 顯示）────────
+function parseJwtPayload(token) {
+  try {
+    const base64 = token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
+    return JSON.parse(atob(base64));
+  } catch { return null; }
+}
+
+// ── apiFetch — 統一包裝 fetch，自動帶 Authorization ─
+// 所有 POS API 透過此函式呼叫，不再直接用 apiFetch('/api/...')
+async function apiFetch(url, options = {}) {
+  const token = getToken();
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const res = await fetch(url, { ...options, headers });
+
+  // fix16：正確的 401 / 403 處理
+  //   401 → token 過期或無效 → 登出，跳回登入頁
+  //   403 FEATURE_DISABLED  → 保持登入，顯示「功能未授權」提示
+  //   403 LICENSE_INACTIVE  → 保持登入，顯示「授權已停用」提示
+  //   403 其他              → 保持登入，顯示錯誤訊息
+  if (res.status === 401) {
+    const body = await res.json().catch(() => ({}));
+    if (!url.includes('/store-login')) {
+      const errCode = body.error || '';
+      if (errCode === 'NO_STORE_TOKEN') {
+        console.warn('[apiFetch] 401 NO_STORE_TOKEN — 缺少登入 token，重新登入');
+      } else {
+        console.warn('[apiFetch] 401 — token 過期，重新登入');
+      }
+      clearToken();
+      showLoginOverlay();
+    }
+    return { ok: false, status: 401, body };
+  }
+
+  if (res.status === 403) {
+    const body = await res.json().catch(() => ({}));
+    const err  = body.error || '';
+    // fix16j: 403 不登出，依錯誤類型顯示對應訊息
+    if (err === 'FEATURE_DISABLED') {
+      const feat = body.feature ? `（${body.feature}）` : '';
+      if (typeof showToast === 'function')
+        showToast(`此功能未授權${feat}，請聯絡系統管理員升級方案`, 'error');
+    } else if (err === 'LICENSE_INACTIVE') {
+      if (typeof showToast === 'function')
+        showToast('店家授權已停用，請聯絡系統管理員', 'error');
+    } else if (err === 'PAYMENT_METHOD_SEED_FAILED') {
+      // 付款方式初始化失敗 — 建議重新登入
+      if (typeof showToast === 'function')
+        showToast('店家授權異常，請重新登入', 'error');
+    } else if (body.message && (body.message.includes('不存在') || body.message.includes('停用'))) {
+      // store 不存在或停用
+      if (typeof showToast === 'function')
+        showToast('店家授權異常，請重新登入', 'error');
+    } else {
+      console.warn('[apiFetch] 403:', body.message || err);
+      if (typeof showToast === 'function' && !url.includes('/store-login'))
+        showToast(body.message || '存取被拒絕（403）', 'error');
+    }
+    return { ok: false, status: 403, body };
+  }
+
+  return res;
+}
+
+// ── 登入 Overlay UI ────────────────────────────────
+let _loginResolve = null;
+
+function showLoginOverlay() {
+  let overlay = document.getElementById('store-login-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'store-login-overlay';
+    overlay.innerHTML = `
+      <div style="position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:9999;display:flex;align-items:center;justify-content:center;">
+        <div style="background:#1a1d27;border:1px solid #2a2d3e;border-radius:16px;padding:36px;width:340px;text-align:center;font-family:-apple-system,sans-serif;">
+          <div style="font-size:1.4rem;font-weight:700;color:#818cf8;margin-bottom:6px;">🔐 店家登入</div>
+          <div style="color:#64748b;font-size:.85rem;margin-bottom:24px;">POS SaaS R1</div>
+          <div style="text-align:left;margin-bottom:12px;">
+            <label style="font-size:.8rem;color:#94a3b8;display:block;margin-bottom:4px;">Store ID</label>
+            <input id="login-store-id" type="text" placeholder="store_001"
+              style="width:100%;padding:9px 12px;border-radius:8px;border:1px solid #2a2d3e;background:#0f1117;color:#e2e8f0;font-size:.95rem;outline:none;box-sizing:border-box;">
+          </div>
+          <div style="text-align:left;margin-bottom:18px;">
+            <label style="font-size:.8rem;color:#94a3b8;display:block;margin-bottom:4px;">密碼</label>
+            <input id="login-password" type="password" placeholder="預設：與 Store ID 相同"
+              style="width:100%;padding:9px 12px;border-radius:8px;border:1px solid #2a2d3e;background:#0f1117;color:#e2e8f0;font-size:.95rem;outline:none;box-sizing:border-box;"
+              onkeydown="if(event.key==='Enter')doStoreLogin()">
+          </div>
+          <button onclick="doStoreLogin()"
+            style="width:100%;padding:11px;border-radius:8px;border:none;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;font-size:1rem;font-weight:600;cursor:pointer;">
+            登入
+          </button>
+          <div id="login-err" style="color:#ef4444;font-size:.8rem;margin-top:10px;min-height:18px;"></div>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+  }
+  overlay.style.display = '';
+}
+
+function hideLoginOverlay() {
+  const el = document.getElementById('store-login-overlay');
+  if (el) {
+    el.style.display       = 'none';
+    el.style.visibility    = 'hidden';
+    el.style.pointerEvents = 'none';  // fix16f: 確保不攔截點擊
+    el.style.zIndex        = '-1';
+  }
+}
+
+async function doStoreLogin() {
+  const storeId  = (document.getElementById('login-store-id')?.value || '').trim();
+  const password = document.getElementById('login-password')?.value || '';
+  const errEl    = document.getElementById('login-err');
+  if (errEl) errEl.textContent = '';
+  if (!storeId || !password) {
+    if (errEl) errEl.textContent = '請填寫 Store ID 與密碼';
+    return;
+  }
+  try {
+    const res  = await apiFetch('/api/store-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ store_id: storeId, password }),
+    });
+    const data = await res.json();
+    if (data.success) {
+      setToken(data.token);
+      localStorage.setItem('pos_store_info', JSON.stringify({
+        store_id:   data.store_id,
+        store_name: data.store_name,
+        plan:       data.plan,
+      }));
+      hideLoginOverlay();
+      // 重新載入頁面資料
+      if (typeof loadCurrentStore === 'function') await loadCurrentStore().catch(()=>{});
+      if (typeof loadSettings === 'function')   await loadSettings().catch(()=>{});
+      if (typeof loadCategories === 'function') await loadCategories().catch(()=>{});
+      // fix16k-02: 只有 delivery 功能授權才呼叫 loadPlatforms，避免 BASIC 方案觸發 403
+      if (typeof loadPlatforms === 'function' && hasFeature('delivery')) await loadPlatforms().catch(()=>{});
+      if (typeof loadPaymentMethods === 'function') await loadPaymentMethods().catch(()=>{});
+      if (typeof loadProducts === 'function')   await loadProducts().catch(()=>{});
+      if (_loginResolve) { _loginResolve(); _loginResolve = null; }
+    } else {
+      if (errEl) errEl.textContent = data.message || '登入失敗';
+    }
+  } catch(e) {
+    if (errEl) errEl.textContent = '連線失敗：' + e.message;
+  }
+}
+
+// ── 頁面啟動時檢查 token ────────────────────────────
+async function ensureLogin() {
+  const token = getToken();
+  if (!token) { showLoginOverlay(); return; }
+  // fix16b: 驗證 token 用 /api/store-me，確認店家授權有效
+  try {
+    const res = await fetch('/api/store-me', {
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' }
+    });
+    if (res.status === 401) {
+      // token 過期 → 清除並顯示登入
+      clearToken();
+      showLoginOverlay();
+      return;
+    }
+    if (res.status === 200) {
+      const data = await res.json().catch(() => ({}));
+      if (data.success && data.data) {
+        window.currentStore    = data.data;
+        window.currentFeatures = data.data.features || {};
+        applyFeatureGateUI();
+        updateTopbarStoreInfo();
+      }
+    }
+    // 403（FEATURE_DISABLED / LICENSE_INACTIVE）不登出，讓後續 API 處理
+  } catch(e) {
+    console.warn('[ensureLogin] 驗證失敗，繼續（可能 server 暫時無回應）:', e.message);
+  }
+}
+
+// ── 登出 ────────────────────────────────────────────
+function posLogout() {
+  // fix16b: 完整清除所有 auth 相關資料
+  localStorage.removeItem('pos_store_token');
+  localStorage.removeItem('pos_store_info');
+  sessionStorage.clear();
+  window.currentStore    = null;
+  window.currentFeatures = {};
+  location.reload();
+}
+
+// ═══════════════════════════════════════════════════
+// 以下為原始 app.js 內容（已保留完整）
+// 所有 apiFetch('/api/...') 已替換為 apiFetch('/api/...')
+// ═══════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════
+// fix13 — 前端 Feature Gate + 店家資訊 + LINE 點餐入口
+// ═══════════════════════════════════════════════════
+
+// 目前登入店家資訊（loadCurrentStore 後可用）
+window.currentStore    = null;
+window.currentFeatures = {};
+
+/** 判斷 feature 是否啟用 */
+function hasFeature(key) {
+  return window.currentFeatures[key] === true;
+}
+
+/** 載入老闆儀表板（fix16b 升級）*/
+function loadReportsPage() {
+  const container = document.getElementById('reports-container');
+  if (!container) return;
+
+  if (!hasFeature('reports')) {
+    container.innerHTML =
+      '<div style="text-align:center;padding:60px 20px">' +
+      '<div style="font-size:3rem;margin-bottom:16px">🔒</div>' +
+      '<div style="font-size:1rem;font-weight:600;color:#ef4444;margin-bottom:8px">報表分析功能尚未授權</div>' +
+      '<div style="font-size:.875rem;color:var(--text-secondary,#64748b)">請聯絡系統管理員升級方案。</div>' +
+      '</div>';
+    return;
+  }
+
+  container.innerHTML = _dashboardSkeleton();
+  _loadDashboard();
+}
+
+function _dashboardSkeleton() {
+  return `
+  <div id="dashboard-wrap" style="font-family:-apple-system,sans-serif;width:100%;box-sizing:border-box">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;flex-wrap:wrap">
+      <h2 style="margin:0;font-size:1.2rem">📊 老闆儀表板</h2>
+      <input type="date" id="db-date" style="padding:6px 10px;border-radius:8px;border:1px solid var(--border,#2a2d3e);background:var(--bg-card,#1a1d27);color:var(--text-primary,#e2e8f0);font-size:.85rem"
+        onchange="_loadDashboard()">
+      <button onclick="_loadDashboard()" style="padding:6px 12px;border-radius:8px;background:#6366f1;border:none;color:#fff;cursor:pointer;font-size:.85rem">🔄 重新整理</button>
+    </div>
+    <div id="db-body"><div style="color:var(--text-secondary,#64748b);padding:20px">載入中...</div></div>
+  </div>`;
+}
+
+async function _loadDashboard() {
+  const dateEl = document.getElementById('db-date');
+  if (dateEl && !dateEl.value) {
+    // 設定預設日期（台灣今日）
+    const n = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
+    dateEl.value = n.toISOString().slice(0,10);
+  }
+  const date = dateEl ? dateEl.value : '';
+  const body = document.getElementById('db-body');
+  if (!body) return;
+  body.innerHTML = '<div style="color:var(--text-secondary,#64748b);padding:20px">載入中...</div>';
+
+  try {
+    const url = '/api/dashboard' + (date ? '?date=' + date : '');
+    const res  = await apiFetch(url);
+    if (!res || res.status === 403) {
+      body.innerHTML = '<div style="color:#ef4444;padding:20px">❌ 無法載入報表（功能未授權）</div>';
+      return;
+    }
+    const json = await res.json();
+    if (!json.success) { body.innerHTML = '<div style="color:#ef4444;padding:20px">❌ ' + (json.message || '載入失敗') + '</div>'; return; }
+    body.innerHTML = _renderDashboard(json.data, json.date);
+  } catch(e) {
+    body.innerHTML = '<div style="color:#ef4444;padding:20px">❌ 載入失敗：' + e.message + '</div>';
+  }
+}
+
+function _nt(n) { return 'NT$' + Number(n||0).toLocaleString('zh-TW',{minimumFractionDigits:0,maximumFractionDigits:0}); }
+function _pct(a, b) { return b > 0 ? Math.round(a/b*100) + '%' : '—'; }
+
+function _card(label, value, sub, color) {
+  return `<div style="background:var(--bg-card,#1a1d27);border:1px solid var(--border,#2a2d3e);border-radius:12px;padding:16px 20px;min-width:140px">
+    <div style="font-size:.75rem;color:var(--text-secondary,#64748b);margin-bottom:6px">${label}</div>
+    <div style="font-size:1.5rem;font-weight:700;color:${color||'var(--text-primary,#e2e8f0)'}">${value}</div>
+    ${sub ? `<div style="font-size:.75rem;color:var(--text-secondary,#64748b);margin-top:4px">${sub}</div>` : ''}
+  </div>`;
+}
+
+function _section(title, html) {
+  return `<div style="background:var(--bg-card,#1a1d27);border:1px solid var(--border,#2a2d3e);border-radius:12px;padding:20px;margin-bottom:20px;width:100%;box-sizing:border-box">
+    <h3 style="margin:0 0 14px;font-size:.95rem;color:var(--text-primary,#e2e8f0)">${title}</h3>
+    ${html}
+  </div>`;
+}
+
+function _renderDashboard(d, date) {
+  const f = window.currentFeatures || {};
+  let html = '';
+
+  // ── 第一區：今日總覽 ───────────────────────────────
+  html += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:20px;width:100%">
+    ${_card('今日營收', _nt(d.todayRevenue), date, '#10b981')}
+    ${_card('今日訂單', d.todayOrders + ' 筆', '', '')}
+    ${_card('平均客單', _nt(d.avgOrderValue), '', '')}
+    ${_card('已結帳', d.paidOrders + ' 筆', '', '#818cf8')}
+    ${_card('未結帳', d.unpaidOrders + ' 筆', '', d.unpaidOrders > 0 ? '#f59e0b' : '')}
+  </div>`;
+
+  // ── 第二區：週月營收 ────────────────────────────────
+  html += _section('📅 週月營收分析',
+    `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      ${_card('本週營收', _nt(d.weekRevenue), d.weekOrders + ' 筆', '#6366f1')}
+      ${_card('本月營收', _nt(d.monthRevenue), d.monthOrders + ' 筆', '#8b5cf6')}
+    </div>`
+  );
+
+  // ── 第三區：付款方式 ────────────────────────────────
+  const pmNames = {cash:'現金',card:'刷卡',linepay:'LINE Pay',jkopay:'街口支付',transfer:'轉帳',platform:'平台付款'};
+  const pmRows = (d.paymentStats||[]).map(p =>
+    `<tr><td style="padding:6px 0">${pmNames[p.payment_method]||p.payment_method}</td>
+      <td style="padding:6px 0;text-align:right">${p.count} 筆</td>
+      <td style="padding:6px 0;text-align:right;color:#10b981">${_nt(p.revenue)}</td>
+      <td style="padding:6px 0;text-align:right;color:var(--text-secondary,#64748b)">${_pct(p.revenue,d.todayRevenue)}</td></tr>`
+  ).join('');
+  html += _section('💳 付款方式分析',
+    pmRows ? `<table style="width:100%;border-collapse:collapse;font-size:.875rem">
+      <thead><tr style="color:var(--text-secondary,#64748b);font-size:.75rem">
+        <th style="text-align:left;padding-bottom:8px">方式</th><th style="text-align:right;padding-bottom:8px">筆數</th>
+        <th style="text-align:right;padding-bottom:8px">金額</th><th style="text-align:right;padding-bottom:8px">佔比</th></tr></thead>
+      <tbody>${pmRows}</tbody></table>` : '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">今日無資料</div>'
+  );
+
+  // ── 第四區：訂單來源 ────────────────────────────────
+  const modeNames = {dine_in:'內用',takeout:'外帶',delivery:'外送'};
+  const srcRows = (d.sourceStats||[]).map(s => {
+    const modeName = modeNames[s.mode] || s.mode;
+    const platLabel = s.platform ? ` (${s.platform})` : '';
+    return `<tr><td style="padding:6px 0">${modeName}${platLabel}</td>
+      <td style="padding:6px 0;text-align:right">${s.count} 筆</td>
+      <td style="padding:6px 0;text-align:right;color:#10b981">${_nt(s.revenue)}</td></tr>`;
+  }).join('');
+  html += _section('📦 訂單來源分析',
+    srcRows ? `<table style="width:100%;border-collapse:collapse;font-size:.875rem">
+      <thead><tr style="color:var(--text-secondary,#64748b);font-size:.75rem">
+        <th style="text-align:left;padding-bottom:8px">來源</th>
+        <th style="text-align:right;padding-bottom:8px">筆數</th>
+        <th style="text-align:right;padding-bottom:8px">金額</th></tr></thead>
+      <tbody>${srcRows}</tbody></table>` : '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">今日無資料</div>'
+  );
+
+  // ── 第五區：熱銷商品 TOP10 ──────────────────────────
+  const topRows = (d.topProducts||[]).map((p,i) =>
+    `<tr><td style="padding:5px 0;color:${i<3?'#f59e0b':'inherit'}">${i+1}. ${escHtml(p.name)}</td>
+      <td style="padding:5px 0;text-align:right">${p.qty} 份</td>
+      <td style="padding:5px 0;text-align:right;color:#10b981">${_nt(p.revenue)}</td></tr>`
+  ).join('');
+  html += _section('🏆 熱銷商品排行 TOP10',
+    topRows ? `<table style="width:100%;border-collapse:collapse;font-size:.875rem">
+      <thead><tr style="color:var(--text-secondary,#64748b);font-size:.75rem">
+        <th style="text-align:left;padding-bottom:8px">商品</th>
+        <th style="text-align:right;padding-bottom:8px">數量</th>
+        <th style="text-align:right;padding-bottom:8px">營收</th></tr></thead>
+      <tbody>${topRows}</tbody></table>` : '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">今日無資料</div>'
+  );
+
+  // ── 第六區：外送平台 ────────────────────────────────
+  if (f.delivery !== false) {
+    const delivRows = (d.deliveryStats||[]).map(p =>
+      `<tr><td style="padding:6px 0">${escHtml(p.platform)}</td>
+        <td style="padding:6px 0;text-align:right">${p.count} 筆</td>
+        <td style="padding:6px 0;text-align:right">${_nt(p.revenue)}</td>
+        <td style="padding:6px 0;text-align:right;color:#ef4444">${_nt(p.commission)}</td>
+        <td style="padding:6px 0;text-align:right;color:#10b981">${_nt(p.store_income)}</td></tr>`
+    ).join('');
+    html += _section('🛵 外送平台分析',
+      delivRows ? `<table style="width:100%;border-collapse:collapse;font-size:.875rem">
+        <thead><tr style="color:var(--text-secondary,#64748b);font-size:.75rem">
+          <th style="text-align:left;padding-bottom:8px">平台</th>
+          <th style="text-align:right;padding-bottom:8px">筆數</th>
+          <th style="text-align:right;padding-bottom:8px">營收</th>
+          <th style="text-align:right;padding-bottom:8px">抽成</th>
+          <th style="text-align:right;padding-bottom:8px">實收</th></tr></thead>
+        <tbody>${delivRows}</tbody></table>` : '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">今日無外送訂單</div>'
+    );
+  }
+
+  // ── 第七區：時段分析 ────────────────────────────────
+  const hourBars = (d.hourlyStats||[]).filter(h => h.count > 0).map(h => {
+    const maxCount = Math.max(...(d.hourlyStats||[]).map(x=>x.count), 1);
+    const pct = Math.round(h.count / maxCount * 100);
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:.8rem">
+      <span style="width:40px;color:var(--text-secondary,#64748b)">${h.label}</span>
+      <div style="flex:1;background:var(--border,#2a2d3e);border-radius:4px;height:18px;position:relative">
+        <div style="width:${pct}%;background:#6366f1;height:100%;border-radius:4px;transition:width .3s"></div>
+      </div>
+      <span style="width:30px;text-align:right">${h.count}</span>
+      <span style="width:70px;text-align:right;color:#10b981">${_nt(h.revenue)}</span>
+    </div>`;
+  }).join('') || '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">今日無資料</div>';
+  html += _section('⏰ 時段分析', hourBars);
+
+  // ── 第八區：星期分析 ────────────────────────────────
+  const wdBars = (d.weekdayStats||[]).map(w => {
+    const maxRev = Math.max(...(d.weekdayStats||[]).map(x=>x.revenue), 1);
+    const pct = Math.round(w.revenue / maxRev * 100);
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:.8rem">
+      <span style="width:32px;color:var(--text-secondary,#64748b)">${w.label}</span>
+      <div style="flex:1;background:var(--border,#2a2d3e);border-radius:4px;height:18px">
+        <div style="width:${pct}%;background:#8b5cf6;height:100%;border-radius:4px"></div>
+      </div>
+      <span style="width:30px;text-align:right">${w.count}</span>
+      <span style="width:80px;text-align:right;color:#10b981">${_nt(w.revenue)}</span>
+    </div>`;
+  }).join('');
+  html += _section('📆 星期分析（最近4週）', wdBars || '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">無資料</div>');
+
+  // ── 第九區：LINE 點餐 ───────────────────────────────
+  if (f.line_order) {
+    const ls = d.lineStats || {};
+    html += _section('📲 LINE 點餐分析',
+      `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        ${_card('LINE 點餐訂單', (ls.orders||0) + ' 筆', '', '#06C755')}
+        ${_card('LINE 點餐營收', _nt(ls.revenue), '', '#06C755')}
+      </div>`
+    );
+  }
+
+  // ── 第十區：庫存（預留）───────────────────────────────
+  if (f.inventory) {
+    html += _section('🏪 庫存分析（預留）',
+      '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">庫存分析功能開發中...</div>'
+    );
+  }
+
+  return html;
+}
+
+/** 載入目前店家資訊 + 授權，呼叫 /api/store-me */
+async function loadCurrentStore() {
+  try {
+    const res  = await apiFetch('/api/store-me');
+    if (!res || typeof res.json !== 'function') return;
+    const data = await res.json();
+    if (data && data.success && data.data) {
+      window.currentStore    = data.data;
+      window.currentFeatures = data.data.features || {};
+      applyFeatureGateUI();
+      updateTopbarStoreInfo(); // fix16b: 更新右上角店家資訊
+    }
+  } catch(e) { console.error('[FeatureGate] loadCurrentStore:', e.message); }
+}
+
+/** fix16b: 更新右上角店家資訊列 */
+function updateTopbarStoreInfo() {
+  const store = window.currentStore;
+  if (!store) return;
+  const el = document.getElementById('topbar-store-info');
+  if (el) {
+    el.innerHTML =
+      `<span style="font-weight:700;color:var(--text-primary,#e2e8f0)">${escHtml(store.store_name || '')}</span>` +
+      `<span style="font-size:.7rem;color:var(--text-secondary,#94a3b8);margin-left:4px">${escHtml(store.store_id || '')}</span>` +
+      `<span style="font-size:.7rem;background:#312e81;color:#a5b4fc;padding:1px 6px;border-radius:99px;margin-left:4px">${(store.plan||'').toUpperCase()}</span>`;
+  }
+}
+
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+/** 依授權隱藏 / 顯示 UI 元素（fix16 更新）*/
+function applyFeatureGateUI() {
+  const f = window.currentFeatures || {};
+
+  // ── 主選單 ──────────────────────────────────────────────
+  // 庫存
+  const invNav = document.querySelector('button[data-page="inventory"]');
+  if (invNav) invNav.style.display = f.inventory ? '' : 'none';
+
+  // fix16: 報表分析（主選單）
+  const reportsNav = document.getElementById('nav-btn-reports');
+  if (reportsNav) reportsNav.style.display = f.reports !== false ? '' : 'none';
+
+  // ── 設定 Tab ────────────────────────────────────────────
+  // LINE 營業
+  const lineBizBtn = document.getElementById('tab-btn-line_biz');
+  if (lineBizBtn) lineBizBtn.style.display = f.line_order ? '' : 'none';
+
+  // LINE 點餐入口（永遠顯示）
+  const lineEntryBtn = document.getElementById('tab-btn-line_entry');
+  if (lineEntryBtn) lineEntryBtn.style.display = '';
+
+  // LINE 商品管理 nav（v1）
+  initLineProductsNav();
+
+  // 外送平台
+  const platformBtn = document.querySelector('button[data-stab="platform"]');
+  if (platformBtn) platformBtn.style.display = f.delivery ? '' : 'none';
+
+  // fix16k: 付款方式 Tab 由 payment_methods feature 控制（預設 true，所有方案均開啟）
+  const paymentTabBtn = document.querySelector('button[data-stab="payment"]');
+  if (paymentTabBtn) paymentTabBtn.style.display = f.payment_methods !== false ? '' : 'none';
+
+  // 金流 API Tab — payment_api gate（Pro/Premium 才可見）
+  const gatewayBtn = document.getElementById('tab-btn-gateway');
+  if (gatewayBtn) gatewayBtn.style.display = f.payment_api ? '' : 'none';
+
+  // ── 訂單頁 ──────────────────────────────────────────────
+  // 外送報表 Tab
+  const delivTab = document.querySelector('button[data-tab="delivery"]');
+  if (delivTab) delivTab.style.display = f.delivery ? '' : 'none';
+
+  // ── 點餐頁 ──────────────────────────────────────────────
+  // 外送模式按鈕
+  const delivMode = document.querySelector('.mode-btn[data-mode="delivery"]');
+  if (delivMode) delivMode.style.display = f.delivery ? '' : 'none';
+}
+
+// ── LINE 點餐入口 Tab 渲染 ─────────────────────────────────
+function loadLineEntryPage() {
+  renderLineOrderEntry();
+}
+
+function renderLineOrderEntry() {
+  const container = document.getElementById('lineEntryContent');
+  if (!container) return;
+
+  const store   = window.currentStore;
+  const hasLine = hasFeature('line_order');
+
+  if (!store) {
+    container.innerHTML = '<p style="color:var(--text-secondary,#64748b)">載入中...</p>';
+    return;
+  }
+
+  const storeId  = store.store_id || '';
+  const lineUrl  = window.location.origin + '/line-order.html?store_id=' + encodeURIComponent(storeId);
+  const planName = (store.plan || 'basic').toUpperCase();
+
+  // 店家基本資訊（永遠顯示）
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  const infoHtml = `
+    <div style="margin-bottom:20px;padding:16px;background:rgba(0,0,0,.2);border-radius:10px;border:1px solid rgba(255,255,255,.08)">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:.875rem">
+        <div>
+          <div style="color:var(--text-secondary,#64748b);font-size:.75rem;margin-bottom:4px">店家名稱</div>
+          <strong>${esc(store.store_name)}</strong>
+        </div>
+        <div>
+          <div style="color:var(--text-secondary,#64748b);font-size:.75rem;margin-bottom:4px">Store ID</div>
+          <code style="background:rgba(0,0,0,.3);padding:2px 8px;border-radius:4px;font-size:.8rem">${esc(storeId)}</code>
+        </div>
+        <div>
+          <div style="color:var(--text-secondary,#64748b);font-size:.75rem;margin-bottom:4px">目前方案</div>
+          <strong style="color:#818cf8">${esc(planName)}</strong>
+        </div>
+        <div>
+          <div style="color:var(--text-secondary,#64748b);font-size:.75rem;margin-bottom:4px">LINE 點餐</div>
+          <strong style="color:${hasLine?'#10b981':'#ef4444'}">${hasLine ? '✅ 已啟用' : '❌ 未啟用'}</strong>
+        </div>
+      </div>
+    </div>`;
+
+  if (!hasLine) {
+    container.innerHTML = infoHtml + `
+      <div style="text-align:center;padding:36px 20px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:10px">
+        <div style="font-size:2.5rem;margin-bottom:12px">🔒</div>
+        <div style="font-size:1rem;font-weight:600;color:#ef4444;margin-bottom:8px">LINE 點餐功能尚未啟用</div>
+        <div style="font-size:.875rem;color:var(--text-secondary,#64748b)">請聯絡系統管理員升級方案以使用 LINE 點餐功能。</div>
+      </div>`;
+    return;
+  }
+
+  container.innerHTML = infoHtml + `
+    <div style="margin-bottom:20px">
+      <div style="font-size:.8rem;color:var(--text-secondary,#64748b);margin-bottom:8px;font-weight:600;letter-spacing:.04em;text-transform:uppercase">LINE 點餐網址</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <code id="lineOrderUrlDisplay" style="flex:1;min-width:200px;padding:10px 14px;background:rgba(0,0,0,.25);border-radius:8px;font-size:.8rem;word-break:break-all;border:1px solid rgba(255,255,255,.1)">${esc(lineUrl)}</code>
+        <button class="btn-secondary" onclick="copyLineOrderUrl()" style="white-space:nowrap">📋 複製網址</button>
+        <button class="btn-secondary" onclick="openLineOrderUrl()" style="white-space:nowrap">🔗 開啟點餐頁</button>
+        <button class="btn-secondary" onclick="downloadLineOrderQR()" style="white-space:nowrap">⬇️ 下載 QR Code</button>
+      </div>
+    </div>
+    <div style="text-align:center">
+      <div style="font-size:.8rem;color:var(--text-secondary,#64748b);margin-bottom:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase">QR Code（掃描後開啟 LINE 點餐頁）</div>
+      <div id="lineQrContainer" style="display:inline-block;background:#fff;padding:12px;border-radius:12px">
+        <canvas id="lineQrCanvas" width="220" height="220"></canvas>
+      </div>
+    </div>`;
+
+  // 產生 QR Code
+  _loadAndRenderQr(lineUrl);
+}
+
+// QR Code 產生 — fix14：本地 vendor 優先，多重 API fallback
+// 載入順序：1. /js/qrcode.min.js（本地 vendor，已預載）
+//           2. CDN qrcodejs fallback
+//           3. 若都失敗，顯示網址連結（LINE 點餐網址仍可用）
+
+function _loadAndRenderQr(url) {
+  // 本地 vendor 已在 index.html 預載，通常直接可用
+  if (typeof QRCode !== 'undefined') {
+    _doRenderQr(url);
+    return;
+  }
+  // fallback：動態載入 CDN
+  const s = document.createElement('script');
+  s.src = 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js';
+  s.onload  = () => _doRenderQr(url);
+  s.onerror = () => _doRenderQrFallback(url);  // CDN 也失敗
+  document.head.appendChild(s);
+}
+
+function _doRenderQr(url) {
+  // 使用我們的 qrcode.min.js（本地 vendor 版本使用 img API 方式）
+  const container = document.getElementById('lineQrContainer');
+  if (!container) return;
+  try {
+    const size = 220;
+    const tmp  = document.createElement('div');
+    container.innerHTML = '';
+    container.appendChild(tmp);
+    new QRCode(tmp, { text: url, width: size, height: size, correctLevel: QRCode.CorrectLevel.M });
+    // QRCode 可能產生 img（API 模式）或 canvas（純 JS 模式）
+    // 等待渲染後，把 canvas 複製進去供下載
+    setTimeout(() => {
+      const srcCanvas = tmp.querySelector('canvas');
+      const srcImg    = tmp.querySelector('img') || (tmp._qrImg);
+      // 建立可下載的 canvas
+      let dlCanvas = document.getElementById('lineQrCanvas');
+      if (!dlCanvas) {
+        dlCanvas = document.createElement('canvas');
+        dlCanvas.id = 'lineQrCanvas';
+        dlCanvas.style.display = 'none';
+        container.appendChild(dlCanvas);
+      }
+      dlCanvas.width = size; dlCanvas.height = size;
+      const ctx = dlCanvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, size, size);
+      if (srcCanvas) {
+        ctx.drawImage(srcCanvas, 0, 0, size, size);
+      } else if (srcImg && srcImg.complete && srcImg.naturalWidth > 0) {
+        ctx.drawImage(srcImg, 0, 0, size, size);
+      } else if (srcImg) {
+        srcImg.onload = () => ctx.drawImage(srcImg, 0, 0, size, size);
+      }
+    }, 300);
+  } catch(e) {
+    _doRenderQrFallback(url);
+  }
+}
+
+// 最終 fallback：不依賴任何第三方，顯示可複製的連結
+function _doRenderQrFallback(url) {
+  const container = document.getElementById('lineQrContainer');
+  if (!container) return;
+  container.innerHTML =
+    '<div style="text-align:center;padding:20px;background:#fff;border-radius:8px;max-width:260px">' +
+    '<div style="font-size:2rem;margin-bottom:8px">📲</div>' +
+    '<div style="font-size:.75rem;color:#333;word-break:break-all;margin-bottom:10px">' +
+    '<a href="' + url + '" target="_blank" style="color:#06C755">' + url + '</a></div>' +
+    '<div style="font-size:.7rem;color:#888">QR Code 產生失敗<br>請複製上方網址使用</div>' +
+    '</div>';
+  // 確保下載按鈕仍有 canvas（空白）
+  let dlCanvas = document.getElementById('lineQrCanvas');
+  if (!dlCanvas) {
+    dlCanvas = document.createElement('canvas');
+    dlCanvas.id = 'lineQrCanvas';
+    dlCanvas.width = 220; dlCanvas.height = 220;
+    dlCanvas.style.display = 'none';
+    container.appendChild(dlCanvas);
+  }
+}
+
+/** 複製 LINE 點餐網址 */
+function copyLineOrderUrl() {
+  const store = window.currentStore;
+  if (!store) return;
+  const url = window.location.origin + '/line-order.html?store_id=' + encodeURIComponent(store.store_id);
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(url)
+      .then(() => { if (typeof showToast === 'function') showToast('LINE 點餐網址已複製', 'success'); })
+      .catch(() => _fallbackCopy(url));
+  } else { _fallbackCopy(url); }
+}
+
+function _fallbackCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text; ta.style.cssText = 'position:fixed;left:-9999px';
+  document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); if (typeof showToast==='function') showToast('已複製','success'); } catch {}
+  document.body.removeChild(ta);
+}
+
+/** 開啟 LINE 點餐頁（新分頁） */
+function openLineOrderUrl() {
+  const store = window.currentStore;
+  if (!store) return;
+  const url = window.location.origin + '/line-order.html?store_id=' + encodeURIComponent(store.store_id);
+  window.open(url, '_blank');
+}
+
+/** 下載 QR Code PNG — fix14：支援 img 和 canvas 兩種來源 */
+function downloadLineOrderQR() {
+  const store = window.currentStore;
+  if (!store) return;
+
+  const filename = 'line-order-' + store.store_id + '.png';
+
+  // 優先用 canvas
+  const canvas = document.getElementById('lineQrCanvas');
+  if (canvas && canvas.width > 0) {
+    try {
+      const link = document.createElement('a');
+      link.download = filename;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+      return;
+    } catch {}
+  }
+
+  // fallback：找 img 元素（API QR 模式）
+  const container = document.getElementById('lineQrContainer');
+  const img = container ? container.querySelector('img') : null;
+  if (img && img.src && img.complete) {
+    try {
+      const c = document.createElement('canvas');
+      c.width = 220; c.height = 220;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 220, 220);
+      ctx.drawImage(img, 0, 0, 220, 220);
+      const link = document.createElement('a');
+      link.download = filename;
+      link.href = c.toDataURL('image/png');
+      link.click();
+      return;
+    } catch {}
+  }
+
+  if (typeof showToast === 'function') showToast('QR Code 尚未產生，請稍後再試', 'error');
+}
+
+
 // ── 單位換算工具（前端版）────────────────────────────────
 const UNIT_TO_G = { '斤': 600, 'kg': 1000, 'g': 1 };
 function toGrams(amount, unit) { return Number(amount) * (UNIT_TO_G[unit] || 1); }
@@ -28,12 +780,28 @@ let editOrderId = null;
 // ===== 初始化 =====
 document.addEventListener('DOMContentLoaded', async () => {
   startClock();
-  await loadSettings();
-  await loadCategories();
-  await loadPlatforms();
-  await loadPaymentMethods();   // 載入付款方式
-  await loadProducts();
   initDateRange();
+
+  // fix16c-hotfix: 正確初始化順序，避免 inventory 403 中斷商品載入
+  await ensureLogin();
+
+  if (!getToken()) return; // 未登入停止
+
+  // 1. 先取店家授權（必須先於一切 feature gate 判斷）
+  await loadCurrentStore();
+
+  // 2. 核心設定（不受 feature gate 限制）
+  await loadSettings().catch(() => {});
+  await loadCategories().catch(() => {});
+  await loadPaymentMethods().catch(() => {});
+
+  // 3. 商品載入（不依賴 inventory，不受 inventory feature gate 影響）
+  await loadProducts().catch(() => {});
+
+  // 4. 非必要功能（依 feature gate，各自容錯，不可阻斷前述流程）
+  if (hasFeature('delivery')) {
+    await loadPlatforms().catch(() => {});
+  }
 });
 
 function startClock() {
@@ -62,27 +830,63 @@ function initDateRange() {
 let _invRefreshInterval = null;
 
 function showPage(name) {
-  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-  document.getElementById('page-' + name)?.classList.add('active');
-  document.querySelector(`[data-page="${name}"]`)?.classList.add('active');
+  // fix16f: 強制用 style 切換，確保只有一個 page 顯示
+  // classList 操作不夠——某些 page 有獨立 CSS 規則（如 #page-reports）需 style 覆蓋
 
-  // 點餐頁：啟動庫存自動刷新（10秒）
+  // 1. 隱藏所有 page
+  document.querySelectorAll('.page').forEach(p => {
+    p.classList.remove('active');
+    p.style.display      = 'none';
+    p.style.visibility   = 'hidden';
+    p.style.pointerEvents = 'none';
+  });
+
+  // 2. 特別確保 reports 完全隱藏（防止殘留覆蓋）
+  if (name !== 'reports') {
+    const rp = document.getElementById('page-reports');
+    const rc = document.getElementById('reports-container');
+    if (rp) { rp.style.display = 'none'; rp.style.visibility = 'hidden'; rp.style.pointerEvents = 'none'; }
+    if (rc) { rc.style.display = 'none'; rc.style.visibility = 'hidden'; rc.style.pointerEvents = 'none'; }
+  }
+
+  // 3. 清除所有 nav active 狀態
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+
+  // 4. 顯示目標頁
+  const target = document.getElementById('page-' + name);
+  if (target) {
+    target.classList.add('active');
+    target.style.display       = '';       // 讓 CSS .page.active 的 display:flex 生效
+    target.style.visibility    = 'visible';
+    target.style.pointerEvents = 'auto';
+  }
+  const navBtn = document.querySelector(`[data-page="${name}"]`);
+  if (navBtn) navBtn.classList.add('active');
+
+  // 5. reports 恢復容器顯示
+  if (name === 'reports') {
+    const rc = document.getElementById('reports-container');
+    if (rc) { rc.style.display = ''; rc.style.visibility = 'visible'; rc.style.pointerEvents = 'auto'; }
+  }
+
+  // 6. 點餐頁庫存自動刷新
   if (name === 'pos') {
-    if (!_invRefreshInterval) {
+    if (!_invRefreshInterval)
       _invRefreshInterval = setInterval(refreshInventoryForProducts, 10000);
-    }
-    refreshInventoryForProducts(); // 切換到點餐頁立即刷新一次
+    refreshInventoryForProducts();
   } else {
-    // 離開點餐頁時停止刷新
     if (_invRefreshInterval) { clearInterval(_invRefreshInterval); _invRefreshInterval = null; }
   }
 
-  if (name === 'orders')     { loadCurrentOrderTab(); }
-  if (name === 'products')   loadProductsPage();
+  // 7. 各頁資料載入
+  if (name === 'orders')        loadCurrentOrderTab();
+  if (name === 'products')      loadProductsPage();
+  if (name === 'line_products') loadLineProductsPage();
+  if (name === 'line_preorders') loadLinePreorders();
   if (name === 'settings')   { loadSettingsPage(); switchSettingsTab('basic'); }
   if (name === 'categories') loadCategoriesPage();
-  if (name === 'inventory')  { loadInventoryPage(); }
+  if (name === 'inventory')  loadInventoryPage();
+  if (name === 'reports')    loadReportsPage();
 }
 
 /**
@@ -90,8 +894,13 @@ function showPage(name) {
  * 每 10 秒由 setInterval 呼叫，也可手動觸發（結帳後）
  */
 async function refreshInventoryForProducts() {
+  // fix16c-hotfix: inventory=false 時不呼叫 /api/inventory，避免 403 toast
+  if (!hasFeature('inventory')) return;
   try {
-    const invRes  = await fetch('/api/inventory');
+    const invRes  = await fetch('/api/inventory', {
+      headers: { 'Authorization': 'Bearer ' + getToken(), 'Content-Type': 'application/json' }
+    });
+    if (!invRes.ok) return;
     const invJson = await invRes.json();
     if (!invJson.success) return;
 
@@ -143,23 +952,33 @@ let currentSettingsTab = 'basic';
 function switchSettingsTab(tab) {
   currentSettingsTab = tab;
   document.querySelectorAll('.settings-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.stab === tab));
-  document.querySelectorAll('.settings-tab-panel').forEach(p => { p.style.display = 'none'; });
+  // fix16f: 強制用 style 確保只有一個 panel 顯示
+  document.querySelectorAll('.settings-tab-panel').forEach(p => {
+    p.style.display       = 'none';
+    p.style.visibility    = 'hidden';
+    p.style.pointerEvents = 'none';
+  });
   const panel = document.getElementById('stab-' + tab);
-  if (panel) panel.style.display = 'block';
+  if (panel) {
+    panel.style.display       = 'block';
+    panel.style.visibility    = 'visible';
+    panel.style.pointerEvents = 'auto';
+  }
 
   // 各 Tab 的資料載入
   if (tab === 'payment')     loadPaymentMethodsPage();
-  if (tab === 'gateway')     loadGatewayPage();
+  if (tab === 'gateway')     loadGatewayCards();    // fix16e: only provider-based
   if (tab === 'platform')    loadPlatformsPage();
   if (tab === 'printer')     loadPrinterSettings();
   if (tab === 'line_biz')    loadLineBizStatus();
   if (tab === 'ingredients') loadIngredientsPage();
+  if (tab === 'line_entry')  loadLineEntryPage();
 }
 
 // ===== 設定 =====
 async function loadSettings() {
   try {
-    const res = await fetch('/api/settings');
+    const res = await apiFetch('/api/settings');
     const json = await res.json();
     if (json.success) {
       settings = json.data;
@@ -184,7 +1003,7 @@ async function saveSettings() {
     if (el) body[k] = el.value;
   });
   try {
-    const res = await fetch('/api/settings', {
+    const res = await apiFetch('/api/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
@@ -203,18 +1022,24 @@ async function saveSettings() {
 // ===== 商品載入（永遠從 server 取最新庫存，不使用舊快取） =====
 async function loadProducts() {
   try {
-    // 並行取商品列表 + 庫存資料（統一來源）
-    const [prodRes, invRes] = await Promise.all([
-      fetch('/api/products?enabled=1&_t=' + Date.now()),
-      fetch('/api/inventory')
-    ]);
+    // fix16c-hotfix: 商品載入不依賴 inventory，inventory=false 時只跳過庫存 map
+    const prodRes = await apiFetch('/api/products?enabled=1&_t=' + Date.now());
     const prodJson = await prodRes.json();
-    const invJson  = await invRes.json();
 
-    // 建立 inventory map: productId -> inventory record
+    // 僅在 inventory 有授權時才呼叫 /api/inventory（inventory=false 跳過，避免 403 toast）
     const invMap = {};
-    if (invJson.success) {
-      (invJson.data || []).forEach(iv => { invMap[iv.id] = iv; });
+    if (hasFeature('inventory')) {
+      try {
+        const invRes  = await fetch('/api/inventory', {
+          headers: { 'Authorization': 'Bearer ' + getToken(), 'Content-Type': 'application/json' }
+        });
+        if (invRes.ok) {
+          const invJson = await invRes.json();
+          if (invJson.success) {
+            (invJson.data || []).forEach(iv => { invMap[iv.id] = iv; });
+          }
+        }
+      } catch {} // 庫存不可用時靜默忽略
     }
 
     if (prodJson.success) {
@@ -265,7 +1090,7 @@ let allCategories = [];
 
 async function loadCategories() {
   try {
-    const res = await fetch('/api/categories?active=1');
+    const res = await apiFetch('/api/categories?active=1');
     const json = await res.json();
     if (json.success) {
       allCategories = json.data;
@@ -517,8 +1342,14 @@ function selectPayment(method) {
 
 // ===== 動態付款方式 =====
 async function loadPaymentMethods() {
+  // fix16k: payment_methods feature gate
+  if (!hasFeature('payment_methods')) {
+    allPaymentMethods = [];
+    renderPaymentMethods(); // will show feature disabled message
+    return;
+  }
   try {
-    const res  = await fetch('/api/payment-methods?active=1');
+    const res  = await apiFetch('/api/payment-methods?active=1');
     const json = await res.json();
     if (json.success) {
       allPaymentMethods = json.data;
@@ -541,6 +1372,15 @@ function renderPaymentMethods() {
 
   const available = allPaymentMethods.filter(m => m.is_active && m[modeKey]);
 
+  // fix16k: payment_methods feature gate
+  if (!hasFeature('payment_methods')) {
+    container.innerHTML = '';
+    if (warnEl) {
+      warnEl.textContent = '⚠️ 付款方式功能未啟用，請聯絡系統管理員';
+      warnEl.style.display = 'block';
+    }
+    return;
+  }
   if (!available.length) {
     container.innerHTML = '';
     if (warnEl) warnEl.style.display = 'block';
@@ -639,7 +1479,7 @@ async function checkout() {
   };
 
   try {
-    const res = await fetch('/api/orders', {
+    const res = await apiFetch('/api/orders', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
@@ -753,7 +1593,7 @@ function printReceipt() {
   openPrintWindow(currentOrderForPrint);
   // 同時呼叫後端 ESC/POS 列印
   if (currentOrderForPrint.id) {
-    fetch(`/api/orders/${currentOrderForPrint.id}/reprint`, {
+    apiFetch(`/api/orders/${currentOrderForPrint.id}/reprint`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'receipt' })
     }).then(r => r.json()).then(j => {
       if (j?.printResult?.success === false) showToast('ESC/POS: ' + (j.printResult.message || '列印失敗'), 'error');
@@ -930,7 +1770,7 @@ async function loadOrders(modeFilter) {
   const today = new Date().toISOString().slice(0, 10);
   const dateFrom = from || today, dateTo = to || today;
   try {
-    const res = await fetch(`/api/orders?date_from=${dateFrom}&date_to=${dateTo}`);
+    const res = await apiFetch(`/api/orders?date_from=${dateFrom}&date_to=${dateTo}`);
     const json = await res.json();
     let orders = json.success ? json.data : [];
 
@@ -953,7 +1793,7 @@ async function loadDeliveryReport() {
   const from = document.getElementById('dateFrom')?.value || new Date().toISOString().slice(0,10);
   const to   = document.getElementById('dateTo')?.value   || new Date().toISOString().slice(0,10);
   try {
-    const res  = await fetch(`/api/orders/delivery-report?date_from=${from}&date_to=${to}`);
+    const res  = await apiFetch(`/api/orders/delivery-report?date_from=${from}&date_to=${to}`);
     const json = await res.json();
     if (!json.success) return;
 
@@ -1006,8 +1846,19 @@ function renderOrdersTable(orders) {
                   o.order_mode === 'takeout'  ? (o.pickup_name||o.customer_name||'—') :
                   (o.delivery_platform||o.customer_name||'—');
     // pickup_time 顯示（LINE 訂單取餐時間）
-    const pickupTag = (o.source === 'line' || o.customer_line_id) && o.pickup_time && o.pickup_time !== '盡快'
-      ? `<br><span style="font-size:11px;color:#06C755">⏰${o.pickup_time}</span>` : '';
+    // 預購單：pickup_time 格式 "YYYY-MM-DD HH:MM"
+    let pickupTag = '';
+    if ((o.source === 'line' || o.customer_line_id) && o.pickup_time && o.pickup_time !== '盡快') {
+      const pt = o.pickup_time;
+      const isPreorderFmt = pt.length > 10 && pt.includes('-') && pt.includes(' ');
+      if (isPreorderFmt) {
+        // 預購格式：顯示 📅 預購：MM-DD HH:MM
+        const dispDate = pt.slice(5, 10), dispTime = pt.slice(11);
+        pickupTag = `<br><span style="font-size:11px;color:#a78bfa;font-weight:600">📅 預購：${dispDate} ${dispTime}</span>`;
+      } else {
+        pickupTag = `<br><span style="font-size:11px;color:#06C755">⏰${pt}</span>`;
+      }
+    }
     return `
       <tr style="${isVoid?'opacity:0.5':''}">
         <td><span class="order-num">${escHtml(o.order_number)}</span></td>
@@ -1087,7 +1938,7 @@ function renderDeliveryTable(orders) {
 
 async function changeDeliveryStatus(orderId, newStatus) {
   try {
-    const res = await fetch(`/api/orders/${orderId}/delivery-status`, {
+    const res = await apiFetch(`/api/orders/${orderId}/delivery-status`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ delivery_status: newStatus })
@@ -1107,8 +1958,8 @@ async function changeDeliveryStatus(orderId, newStatus) {
 async function showOrderDetail(orderId) {
   try {
     const [orderRes, logsRes] = await Promise.all([
-      fetch('/api/orders/' + orderId),
-      fetch('/api/orders/' + orderId + '/logs')
+      apiFetch('/api/orders/' + orderId),
+      apiFetch('/api/orders/' + orderId + '/logs')
     ]);
     const orderJson = await orderRes.json();
     const logsJson  = await logsRes.json();
@@ -1194,7 +2045,7 @@ function closeOrderDetail() {
 // ===== 商品管理頁 =====
 async function loadProductsPage() {
   try {
-    const res = await fetch('/api/products');
+    const res = await apiFetch('/api/products');
     const json = await res.json();
     if (json.success) renderProductsTable(json.data);
   } catch {
@@ -1205,7 +2056,8 @@ async function loadProductsPage() {
 function renderProductsTable(products) {
   const tbody = document.getElementById('productsBody');
   if (!products.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="table-empty">尚無商品</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="table-empty">尚無商品</td></tr>';
+    updateProductsSelectedCount();
     return;
   }
   const catEmoji = {};
@@ -1237,6 +2089,7 @@ function renderProductsTable(products) {
         sold_out_indefinitely:'<span class="order-status status-void" style="margin-left:4px;display:inline-block;font-size:11px">長期下架</span>' }[saleStatus] || '';
     return `
       <tr>
+        <td style="text-align:center"><input type="checkbox" class="product-row-check" data-product-id="${p.id}" onchange="updateProductsSelectedCount()"></td>
         <td>${thumbHtml}</td>
         <td style="font-weight:600">${escHtml(p.name)}${invBadge}${lineBadge}${saleBadge}</td>
         <td>${catEmoji[p.category] || ''} ${p.category}</td>
@@ -1244,11 +2097,12 @@ function renderProductsTable(products) {
         <td><span class="status-badge ${p.enabled ? 'status-on' : 'status-off'}">${p.enabled ? '販售中' : '已停用'}</span></td>
         <td>
           <button class="btn-icon" onclick="openProductModal(${p.id})" style="margin-right:4px">✏️ 編輯</button>
-          <button class="btn-icon" onclick="openLineSettingsModal(${p.id})" style="margin-right:4px;background:#06C755;color:#fff;border:none">📲 LINE設定</button>
+          ${hasFeature('line_order') ? `<button class="btn-icon" onclick="openLineSettingsModal(${p.id})" style="margin-right:4px;background:#06C755;color:#fff;border:none">📲 LINE設定</button>` : ''}
           <button class="btn-icon danger" onclick="deleteProduct(${p.id})">🗑️ 刪除</button>
         </td>
       </tr>`;
   }).join('');
+  updateProductsSelectedCount();
 }
 
 function openProductModal(id) {
@@ -1283,7 +2137,7 @@ function openProductModal(id) {
   }
 
   if (id) {
-    fetch('/api/products/' + id).then(r => r.json()).then(json => {
+    apiFetch('/api/products/' + id).then(r => r.json()).then(json => {
       if (json.success) {
         const p = json.data;
         document.getElementById('editProductName').value = p.name;
@@ -1368,7 +2222,7 @@ async function saveProduct() {
   const method = id ? 'PUT' : 'POST';
 
   try {
-    const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const res = await apiFetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const json = await res.json();
     if (json.success) {
       const productId = json.data?.id;
@@ -1405,7 +2259,7 @@ async function saveProduct() {
 async function deleteProduct(id) {
   if (!confirm('確定要刪除此商品？')) return;
   try {
-    const res = await fetch('/api/products/' + id, { method: 'DELETE' });
+    const res = await apiFetch('/api/products/' + id, { method: 'DELETE' });
     const json = await res.json();
     if (json.success) {
       removeLocalImage(id);  // 清除 localStorage 圖片快取
@@ -1427,7 +2281,7 @@ async function openLineSettingsModal(id) {
     // 載入分類選項（LINE 唯一來源）
     await loadLineCategoryOptions();
 
-    const res = await fetch('/api/products/' + id);
+    const res = await apiFetch('/api/products/' + id);
     const json = await res.json();
     if (!json.success) { showToast('載入失敗', 'error'); return; }
     const p = json.data;
@@ -1444,6 +2298,25 @@ async function openLineSettingsModal(id) {
     document.getElementById('linePromo').checked       = !!Number(p.line_promo);
     document.getElementById('lineSoldOut').checked     = !!Number(p.line_sold_out);
     document.getElementById('lineAutoRestore').checked = p.auto_restore_next_day != null ? !!Number(p.auto_restore_next_day) : true;
+
+    // ── LINE 可售份數（v1）────────────────────────────
+    const qEnabled = !!Number(p.line_quota_enabled);
+    // 使用新的醒目開關 API
+    setQuotaEnabled(qEnabled);
+    const qDaily   = Number(p.line_quota_daily   || 0);
+    const qSold    = Number(p.line_quota_sold     || 0);
+    const qLow     = Number(p.line_quota_low_threshold  || 2);
+    const qHigh    = Number(p.line_quota_high_threshold || 10);
+    const qStart   = p.line_sell_start || '';
+    const qEnd     = p.line_sell_end   || '';
+    const setQV = (id, v) => { const el=document.getElementById(id); if(el) el.value=v; };
+    setQV('lineQuotaDaily',          qDaily);
+    setQV('lineQuotaSold',           qSold);
+    setQV('lineQuotaLowThreshold',   qLow);
+    setQV('lineQuotaHighThreshold',  qHigh);
+    setQV('lineSellStart',           qStart);
+    setQV('lineSellEnd',             qEnd);
+    if (qEnabled) updateLineQuotaStatusBar(qDaily, qSold, qLow, qHigh);
 
     // ── LINE 顯示分類（客人端）設定 ──
     // 邏輯：優先用 line_category_id；若未設定，預設帶入 category_id（第一次設定時自動帶）
@@ -1500,7 +2373,7 @@ async function openLineSettingsModal(id) {
 // 載入 LINE 顯示分類下拉選項（資料來源：分類管理，與 POS 內部分類共用同一張表）
 async function loadLineCategoryOptions() {
   try {
-    const res  = await fetch('/api/categories/line-options');
+    const res  = await apiFetch('/api/categories/line-options');
     const json = await res.json();
     const sel  = document.getElementById('lineCategory');
     if (!sel) return;
@@ -1534,15 +2407,23 @@ async function saveLineSettings() {
   const line_promo         = document.getElementById('linePromo').checked ? 1 : 0;
   const line_sold_out      = document.getElementById('lineSoldOut').checked ? 1 : 0;
   const auto_restore_next_day = document.getElementById('lineAutoRestore').checked ? 1 : 0;
+  // LINE 可售份數欄位不在這裡宣告，直接在 body 裡讀取
 
   try {
-    const res = await fetch(`/api/products/${id}/line-settings`, {
+    const res = await apiFetch(`/api/products/${id}/line-settings`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         show_on_line, sale_status, line_name, line_price,
         line_description, line_image_url, line_category_id,
-        line_hot, line_promo, line_sold_out, auto_restore_next_day
+        line_hot, line_promo, line_sold_out, auto_restore_next_day,
+        // LINE 可售份數（v1）
+        line_quota_enabled:        document.getElementById('lineQuotaEnabled')?.value === '1' ? 1 : 0,
+        line_quota_daily:          Number(document.getElementById('lineQuotaDaily')?.value   || 0),
+        line_quota_low_threshold:  Number(document.getElementById('lineQuotaLowThreshold')?.value  || 2),
+        line_quota_high_threshold: Number(document.getElementById('lineQuotaHighThreshold')?.value || 10),
+        line_sell_start:           document.getElementById('lineSellStart')?.value || '',
+        line_sell_end:             document.getElementById('lineSellEnd')?.value   || '',
       })
     });
     const json = await res.json();
@@ -1561,12 +2442,12 @@ async function saveLineSettings() {
 // ===== 重新列印 =====
 async function reprintOrder(orderId) {
   try {
-    const res = await fetch('/api/orders/' + orderId);
+    const res = await apiFetch('/api/orders/' + orderId);
     const json = await res.json();
     if (json.success) {
       openPrintWindow(json.data, 'receipt');
       // 非同步通知後端（預留熱感列表機接口）
-      fetch('/api/orders/' + orderId + '/reprint', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({type:'receipt'}) }).catch(()=>{});
+      apiFetch('/api/orders/' + orderId + '/reprint', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({type:'receipt'}) }).catch(()=>{});
     }
   } catch { showToast('列印失敗', 'error'); }
 }
@@ -1587,7 +2468,7 @@ async function confirmVoid() {
   const reason = document.getElementById('voidReason').value;
   if (!reason) { showToast('請選擇作廢原因', 'error'); return; }
   try {
-    const res = await fetch('/api/orders/' + id + '/void', {
+    const res = await apiFetch('/api/orders/' + id + '/void', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ reason })
@@ -1609,7 +2490,7 @@ async function confirmVoid() {
 // ===== 訂單編輯 =====
 async function openEditOrder(orderId) {
   try {
-    const res = await fetch('/api/orders/' + orderId);
+    const res = await apiFetch('/api/orders/' + orderId);
     const json = await res.json();
     if (!json.success) { showToast('載入訂單失敗', 'error'); return; }
     const o = json.data;
@@ -1728,7 +2609,7 @@ async function updateEditAmountDiff(newTotal) {
   // 取出原始金額
   if (!editOrderId) return;
   if (!_editOriginalTotal) {
-    const r = await fetch('/api/orders/' + editOrderId);
+    const r = await apiFetch('/api/orders/' + editOrderId);
     const j = await r.json();
     if (j.success) _editOriginalTotal = j.data.total;
   }
@@ -1771,7 +2652,7 @@ async function saveEditOrder() {
   };
 
   try {
-    const res = await fetch('/api/orders/' + editOrderId, {
+    const res = await apiFetch('/api/orders/' + editOrderId, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
@@ -2021,7 +2902,7 @@ let allCatsAdmin = [];
 
 async function loadCategoriesPage() {
   try {
-    const res = await fetch('/api/categories');
+    const res = await apiFetch('/api/categories');
     const json = await res.json();
     if (json.success) {
       allCatsAdmin = json.data;
@@ -2083,7 +2964,7 @@ async function saveCat() {
   const url    = id ? '/api/categories/' + id : '/api/categories';
   const method = id ? 'PUT' : 'POST';
   try {
-    const res  = await fetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify({name,icon,sort_order,is_active}) });
+    const res  = await apiFetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify({name,icon,sort_order,is_active}) });
     const json = await res.json();
     if (json.success) {
       showToast(id ? '分類已更新' : '分類已新增', 'success');
@@ -2096,7 +2977,7 @@ async function saveCat() {
 
 async function toggleCatActive(id, currentActive) {
   try {
-    const res  = await fetch('/api/categories/' + id, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ is_active: currentActive ? 0 : 1 }) });
+    const res  = await apiFetch('/api/categories/' + id, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ is_active: currentActive ? 0 : 1 }) });
     const json = await res.json();
     if (json.success) { loadCategoriesPage(); loadCategories(); showToast('已更新分類狀態', 'success'); }
   } catch { showToast('操作失敗', 'error'); }
@@ -2105,7 +2986,7 @@ async function toggleCatActive(id, currentActive) {
 async function deleteCat(id) {
   if (!confirm('確認刪除此分類？')) return;
   try {
-    const res  = await fetch('/api/categories/' + id, { method:'DELETE' });
+    const res  = await apiFetch('/api/categories/' + id, { method:'DELETE' });
     const json = await res.json();
     if (json.success) { showToast('分類已刪除', 'success'); loadCategoriesPage(); loadCategories(); }
     else { showToast(json.message || '刪除失敗', 'error'); }
@@ -2119,8 +3000,8 @@ async function deleteCat(id) {
 async function loadInventoryPage() {
   try {
     const [invRes, statsRes] = await Promise.all([
-      fetch('/api/inventory'),
-      fetch('/api/stats/today')
+      apiFetch('/api/inventory'),
+      apiFetch('/api/stats/today')
     ]);
     const invJson   = await invRes.json();
     const statsJson = await statsRes.json();
@@ -2207,7 +3088,7 @@ function renderInventoryTable(products) {
 let _invProducts = [];
 async function _ensureInvProducts() {
   if (!_invProducts.length) {
-    const r = await fetch('/api/inventory');
+    const r = await apiFetch('/api/inventory');
     const j = await r.json();
     if (j.success) _invProducts = j.data;
   }
@@ -2234,7 +3115,7 @@ async function confirmRestock() {
   const reason = document.getElementById('restockReason').value || '補貨';
   if (!grams || grams <= 0) { showToast('請輸入有效補貨克數', 'error'); return; }
   try {
-    const res  = await fetch('/api/inventory/restock', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ product_id:pid, add_grams:grams, reason }) });
+    const res  = await apiFetch('/api/inventory/restock', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ product_id:pid, add_grams:grams, reason }) });
     const json = await res.json();
     if (json.success) {
       const units = json.data.available_units;
@@ -2268,7 +3149,7 @@ async function confirmAdjust() {
   const reason = document.getElementById('adjustReason').value || '手動調整';
   if (grams === undefined || isNaN(grams)) { showToast('請輸入調整克數', 'error'); return; }
   try {
-    const res  = await fetch('/api/inventory/adjust', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ product_id:pid, change_grams:grams, reason }) });
+    const res  = await apiFetch('/api/inventory/adjust', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ product_id:pid, change_grams:grams, reason }) });
     const json = await res.json();
     if (json.success) {
       showToast(`調整成功！現在可售 ${json.data.available_units} 份`, 'success');
@@ -2284,7 +3165,7 @@ async function confirmAdjust() {
 async function showInventoryLogs(productId) {
   const url = productId ? `/api/inventory/logs?product_id=${productId}&limit=100` : '/api/inventory/logs?limit=100';
   try {
-    const res  = await fetch(url);
+    const res  = await apiFetch(url);
     const json = await res.json();
     if (!json.success) return;
     const logs = json.data;
@@ -2317,7 +3198,7 @@ function closeInvLogs() { document.getElementById('invLogsModal').classList.remo
 
 async function loadPlatforms() {
   try {
-    const res  = await fetch('/api/platforms?active=1');
+    const res  = await apiFetch('/api/platforms?active=1');
     const json = await res.json();
     if (json.success) {
       allPlatforms = json.data;
@@ -2416,7 +3297,7 @@ async function loadPlatformsPage() {
   const tbody = document.getElementById('platformsBody');
   if (tbody) tbody.innerHTML = '<tr><td colspan="4" class="table-empty">載入中…</td></tr>';
   try {
-    const res  = await fetch('/api/platforms');
+    const res  = await apiFetch('/api/platforms');
     const json = await res.json();
     if (json.success) {
       allPlatformsAdmin = json.data;
@@ -2476,7 +3357,7 @@ async function savePlatform() {
   const url = id ? '/api/platforms/' + id : '/api/platforms';
   const method = id ? 'PUT' : 'POST';
   try {
-    const res  = await fetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify({name, commission_rate:rate, is_active}) });
+    const res  = await apiFetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify({name, commission_rate:rate, is_active}) });
     const json = await res.json();
     if (json.success) {
       showToast(id ? '已更新' : '已新增', 'success');
@@ -2490,7 +3371,7 @@ async function savePlatform() {
 async function deletePlatform(id) {
   if (!confirm('確認刪除此平台？')) return;
   try {
-    const res  = await fetch('/api/platforms/' + id, { method:'DELETE' });
+    const res  = await apiFetch('/api/platforms/' + id, { method:'DELETE' });
     const json = await res.json();
     if (json.success) { showToast('已刪除', 'success'); loadPlatformsPage(); loadPlatforms(); }
     else { showToast(json.message || '刪除失敗', 'error'); }
@@ -2538,7 +3419,7 @@ async function loadPaymentMethodsPage() {
   const tbody = document.getElementById('paymentMethodsBody');
   if (tbody) tbody.innerHTML = '<tr><td colspan="8" class="table-empty">載入中…</td></tr>';
   try {
-    const res  = await fetch('/api/payment-methods');
+    const res  = await apiFetch('/api/payment-methods');
     const json = await res.json();
     if (json.success) {
       if (!json.data || json.data.length === 0) {
@@ -2596,7 +3477,7 @@ function renderPaymentMethodsTable(methods) {
 
 async function updatePM(id, fields) {
   try {
-    const res  = await fetch('/api/payment-methods/' + id, {
+    const res  = await apiFetch('/api/payment-methods/' + id, {
       method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(fields)
     });
     const json = await res.json();
@@ -2609,123 +3490,24 @@ async function updatePM(id, fields) {
 }
 
 // =============================================
-// ===== 金流設定頁 =====
+// ===== 金流設定頁 (fix16e: 已完全清理舊版 id-based 函式) =====
 // =============================================
-
-async function loadGatewayPage() {
-  const container = document.getElementById('gatewayCards');
-  if (container) container.innerHTML = '<p style="color:#888;padding:20px">載入中…</p>';
-  try {
-    const res  = await fetch('/api/payment-gateways');
-    const json = await res.json();
-    if (json.success) {
-      if (!json.data || json.data.length === 0) {
-        if (container) container.innerHTML = '<p style="color:#888;padding:20px">目前尚無資料</p>';
-      } else {
-        renderGatewayCards(json.data);
-      }
-    } else {
-      if (container) container.innerHTML = `<p style="color:#e53935;padding:20px">載入失敗：${json.message||'API 錯誤'}</p>`;
-    }
-  } catch(e) {
-    if (container) container.innerHTML = '<p style="color:#e53935;padding:20px">載入失敗，請檢查後端 API</p>';
-    showToast('金流載入失敗：' + e.message, 'error');
-  }
-}
-
-function renderGatewayCards(gateways) {
-  const container = document.getElementById('gatewayCards');
-  if (!container) return;
-
-  container.innerHTML = gateways.map(gw => `
-    <div class="gateway-card ${gw.is_active ? 'active-gw' : ''}" id="gw-card-${gw.id}">
-      <div class="gateway-card-header">
-        <h4>${escHtml(gw.name)}</h4>
-        <div style="display:flex;align-items:center;gap:8px">
-          <span class="gateway-status ${gw.is_active?'gw-on':'gw-off'}">${gw.is_active?'已啟用':'未啟用'}</span>
-          <label class="pm-toggle" style="margin:0">
-            <input type="checkbox" ${gw.is_active?'checked':''} onchange="toggleGateway(${gw.id},this.checked)">
-            <span class="pm-toggle-slider"></span>
-          </label>
-        </div>
-      </div>
-
-      <div class="gateway-mode-toggle">
-        <div class="mode-chip ${gw.mode==='test'?'selected':''}" onclick="setGwMode(${gw.id},'test',this)">🧪 測試模式</div>
-        <div class="mode-chip ${gw.mode==='live'?'selected':''}" onclick="setGwMode(${gw.id},'live',this)">🚀 正式模式</div>
-      </div>
-
-      <label>Merchant ID / Channel ID
-        <input type="text" id="gw-mid-${gw.id}" value="${escHtml(gw.merchant_id||'')}" placeholder="商家 ID">
-      </label>
-      <label>API Key
-        <input type="text" id="gw-apikey-${gw.id}" value="${escHtml(gw.api_key||'')}" placeholder="API Key">
-      </label>
-      <label>Secret Key
-        <input type="password" id="gw-secret-${gw.id}" value="${escHtml(gw.secret_key||'')}" placeholder="Secret Key">
-      </label>
-      <label>Webhook URL
-        <input type="url" id="gw-webhook-${gw.id}" value="${escHtml(gw.webhook_url||'')}" placeholder="https://yoursite.com/webhook/${gw.code}">
-      </label>
-      <label>Callback URL
-        <input type="url" id="gw-callback-${gw.id}" value="${escHtml(gw.callback_url||'')}" placeholder="https://yoursite.com/callback/${gw.code}">
-      </label>
-
-      <div class="gateway-card-actions">
-        <button class="btn-secondary" style="flex:1;font-size:13px" onclick="testGateway(${gw.id})">🔌 測試連線</button>
-        <button class="btn-primary" style="flex:1;font-size:13px" onclick="saveGateway(${gw.id})">💾 儲存</button>
-      </div>
-    </div>`).join('');
-}
-
-async function toggleGateway(id, active) {
-  try {
-    const res  = await fetch('/api/payment-gateways/' + id, {
-      method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ is_active: active?1:0 })
-    });
-    const json = await res.json();
-    if (json.success) {
-      showToast(active ? '金流已啟用' : '金流已停用（相關付款方式已同步停用）', active ? 'success' : 'info');
-      loadGatewayPage();
-      loadPaymentMethods();      // 同步前台
-      loadPaymentMethodsPage();  // 同步設定頁
-    }
-  } catch { showToast('網路錯誤', 'error'); }
-}
-
-function setGwMode(id, mode, el) {
-  el.closest('.gateway-mode-toggle').querySelectorAll('.mode-chip').forEach(c => c.classList.remove('selected'));
-  el.classList.add('selected');
-  fetch('/api/payment-gateways/' + id, {
-    method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ mode })
-  }).catch(() => {});
-}
-
-async function saveGateway(id) {
-  const body = {
-    merchant_id: document.getElementById('gw-mid-'+id)?.value    || '',
-    api_key:     document.getElementById('gw-apikey-'+id)?.value  || '',
-    secret_key:  document.getElementById('gw-secret-'+id)?.value  || '',
-    webhook_url: document.getElementById('gw-webhook-'+id)?.value || '',
-    callback_url:document.getElementById('gw-callback-'+id)?.value|| '',
-  };
-  try {
-    const res  = await fetch('/api/payment-gateways/' + id, {
-      method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
-    });
-    const json = await res.json();
-    if (json.success) showToast('金流設定已儲存', 'success');
-    else showToast(json.message || '儲存失敗', 'error');
-  } catch { showToast('網路錯誤', 'error'); }
-}
-
-async function testGateway(id) {
-  try {
-    const res  = await fetch('/api/payment-gateways/' + id + '/test', { method: 'POST' });
-    const json = await res.json();
-    showToast(json.message || '連線測試完成', json.success ? 'info' : 'error');
-  } catch { showToast('測試失敗', 'error'); }
-}
+//
+// fix16e 清理說明：
+//   移除的舊版函式（id-based，使用 /api/payment-gateways/:id）：
+//     loadGatewayPage()       — 已移除
+//     renderGatewayCards(data)— 已移除
+//     toggleGateway(id, ...)  — 已移除
+//     setGwMode(id, ...)      — 已移除
+//     saveGateway(id)         — 已移除
+//     testGateway(id)         — 已移除
+//
+//   現有函式（provider code-based，使用 /api/payment-gateways/:provider）：
+//     loadGatewayCards()      — 載入 8 個 provider 卡片
+//     saveGateway(code)       — PUT /api/payment-gateways/{code}
+//     testGateway(code)       — POST /api/payment-gateways/{code}/test
+//
+//   switchSettingsTab('gateway') 只呼叫 loadGatewayCards()，見 tab switch 區塊
 
 // =============================================
 // ===== 出單機設定頁 =====
@@ -2789,8 +3571,8 @@ function _updatePrinterBadgeFromConfig(cfg) {
 async function loadPrinterSettings() {
   try {
     const [settingsRes, statusRes] = await Promise.all([
-      fetch('/api/settings'),
-      fetch('/api/print/status')
+      apiFetch('/api/settings'),
+      apiFetch('/api/print/status')
     ]);
     const sJson = await settingsRes.json();
     const pJson = await statusRes.json();
@@ -2839,7 +3621,7 @@ async function refreshPrinterList() {
   if (!sel) return;
   sel.innerHTML = '<option value="">載入中...</option>';
   try {
-    const res  = await fetch('/api/printers/list');
+    const res  = await apiFetch('/api/printers/list');
     const json = await res.json();
     const list = json.data || [];
     if (!list.length) {
@@ -2870,7 +3652,7 @@ async function savePrinterSettings() {
     auto_drawer:     getCheck('set-auto_drawer'),
   };
   try {
-    const res  = await fetch('/api/settings', {
+    const res  = await apiFetch('/api/settings', {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
     });
     const json = await res.json();
@@ -2889,7 +3671,7 @@ async function testPrint() {
   const msgEl = document.getElementById('printerTestResult');
   if (msgEl) { msgEl.textContent = '⏳ 列印中...'; msgEl.style.color = 'var(--text-muted)'; }
   try {
-    const res  = await fetch('/api/print/test', { method: 'POST' });
+    const res  = await apiFetch('/api/print/test', { method: 'POST' });
     const json = await res.json();
     if (msgEl) {
       msgEl.textContent = json.success ? `✅ ${json.message}` : `❌ ${json.message}`;
@@ -2907,7 +3689,7 @@ async function testKitchenPrint() {
   if (msgEl) { msgEl.textContent = '⏳ 廚房單列印中...'; msgEl.style.color = 'var(--text-muted)'; }
   try {
     // 使用固定測試內容，不依賴訂單資料
-    const res  = await fetch('/api/print/kitchen-test', { method: 'POST' });
+    const res  = await apiFetch('/api/print/kitchen-test', { method: 'POST' });
     const json = await res.json();
     if (msgEl) {
       msgEl.textContent = json.success ? `✅ 廚房單：${json.message}` : `❌ ${json.message}`;
@@ -2923,7 +3705,7 @@ async function testCashDrawer() {
   const msgEl = document.getElementById('printerTestResult');
   if (msgEl) { msgEl.textContent = '⏳ 開錢櫃中...'; msgEl.style.color = 'var(--text-muted)'; }
   try {
-    const res  = await fetch('/api/print/cashdrawer', { method: 'POST' });
+    const res  = await apiFetch('/api/print/cashdrawer', { method: 'POST' });
     const json = await res.json();
     if (msgEl) {
       msgEl.textContent = json.success ? `✅ ${json.message}` : `❌ ${json.message}`;
@@ -2939,7 +3721,7 @@ async function testCashDrawer() {
 // 訂單紀錄 — 現金訂單手動開錢櫃
 async function openDrawerFromOrder(orderId) {
   try {
-    const res  = await fetch('/api/print/cashdrawer', { method: 'POST' });
+    const res  = await apiFetch('/api/print/cashdrawer', { method: 'POST' });
     const json = await res.json();
     showToast(json.success ? '💰 錢櫃已開啟' : ('開錢櫃失敗：' + json.message), json.success ? 'success' : 'error');
   } catch(e) {
@@ -2951,7 +3733,7 @@ async function checkPrinterStatus() {
   const badge = document.getElementById('printerStatusBadge');
   if (badge) badge.innerHTML = '<span class="order-status status-modified">檢查中...</span>';
   try {
-    const res  = await fetch('/api/print/status');
+    const res  = await apiFetch('/api/print/status');
     const json = await res.json();
     _updatePrinterBadge(json?.data || {});
     return json?.data;
@@ -2968,7 +3750,7 @@ async function checkPrinterStatus() {
 // ── LINE 總開關 ──────────────────────────────────────────
 async function loadLineBizStatus() {
   try {
-    const res  = await fetch('/api/settings');
+    const res  = await apiFetch('/api/settings');
     const json = await res.json();
     const d    = json.data || {};
     const el   = document.getElementById('lineOrderingStatus');
@@ -2985,7 +3767,28 @@ async function loadLineBizStatus() {
         : '<span style="color:#06C755">● 今日正常營業</span>';
       const pdEl = document.getElementById('pickupDeliveryStatus');
       if (pdEl) pdEl.innerHTML =
-        `自取：${d.pickup_enabled !== '0' ? '✅ 開啟' : '❌ 關閉'}　外送：${d.delivery_enabled !== '0' ? '✅ 開啟' : '❌ 關閉'}`;
+        `外帶：${d.takeout_enabled !== '0' ? '✅ 開啟' : '❌ 關閉'}　外送：${d.delivery_enabled !== '0' ? '✅ 開啟' : '❌ 關閉'}`;
+      // 即時狀態小卡
+      const now = new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Taipei'}));
+      const nowMins = now.getHours()*60+now.getMinutes();
+      const toCard = document.getElementById('takeout-live-status');
+      const dlCard = document.getElementById('delivery-live-status');
+      if(toCard){
+        const enabled = d.takeout_enabled !== '0';
+        const cutoff = d.takeout_cutoff_time;
+        const cutoffPassed = cutoff && nowMins > cutoff.split(':').reduce((h,m,i)=>i?h*60+Number(m):Number(m)*60,0)/60;
+        toCard.innerHTML = !enabled ? '<span style="color:#e53935">已關閉</span>'
+          : cutoffPassed ? '<span style="color:#ff6d00">截止售完</span>'
+          : '<span style="color:#06C755">接單中</span>';
+      }
+      if(dlCard){
+        const enabled = d.delivery_enabled !== '0';
+        const cutoff = d.delivery_cutoff_time;
+        const cutoffPassed = cutoff && nowMins > cutoff.split(':').reduce((h,m,i)=>i?h*60+Number(m):Number(m)*60,0)/60;
+        dlCard.innerHTML = !enabled ? '<span style="color:#e53935">已關閉</span>'
+          : cutoffPassed ? '<span style="color:#ff6d00">截止售完</span>'
+          : '<span style="color:#06C755">接單中</span>';
+      }
       // 填入 LINE 付款方式設定
       const lpMap = {
         cash: 'line_payment_cash_enabled', linepay: 'line_payment_linepay_enabled',
@@ -2997,7 +3800,20 @@ async function loadLineBizStatus() {
         if (el) el.checked = d[key] === '1';
       });
     }
-    // 填入營業時間設定
+    // ── 外帶規則填入（v1）──────────────────────────────
+    const setV = (id, val) => { const el = document.getElementById(id); if(el) el.value = val||''; };
+    const setC = (id, val) => { const el = document.getElementById(id); if(el) el.checked = !!val; };
+    setC('set-takeout_enabled',        d.takeout_enabled !== '0');
+    setV('set-takeout_cutoff_time',    d.takeout_cutoff_time);
+    setV('set-takeout_prep_minutes',   d.takeout_prep_minutes || 15);
+    setC('set-takeout_allow_next_day', d.takeout_allow_next_day !== '0');
+    setC('set-delivery_enabled',       d.delivery_enabled !== '0');
+    setV('set-delivery_cutoff_time',   d.delivery_cutoff_time);
+    setV('set-delivery_prep_minutes',  d.delivery_prep_minutes || 30);
+    setC('set-delivery_allow_next_day',d.delivery_allow_next_day !== '0');
+    renderModeHoursGrid('takeoutBizHoursGrid', d.takeout_business_hours);
+    renderModeHoursGrid('deliveryBizHoursGrid', d.delivery_business_hours);
+    // ── 整體營業時間（舊版相容）──────────────────────────
     const bhe = document.getElementById('set-line_business_hours_enabled');
     if (bhe) bhe.checked = d.line_business_hours_enabled === '1';
     renderBizHoursGrid(d.line_business_hours);
@@ -3023,7 +3839,7 @@ async function saveAdvancedLineSettings() {
   const cdRaw = (document.getElementById('set-line_closed_dates_text')?.value || '').split('\n')
     .map(d => d.trim()).filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d));
   try {
-    await fetch('/api/settings', { method:'PUT', headers:{'Content-Type':'application/json'},
+    await apiFetch('/api/settings', { method:'PUT', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({
         same_day_preorder_minutes: String(sdm),
         next_day_preorder_hours:   String(ndh),
@@ -3041,7 +3857,7 @@ async function setLineOrdering(enable) {
     : '確定要關閉 LINE 點餐營業嗎？\n關閉後客人將無法透過 LINE 下單，但現場 POS 不受影響。';
   if (!confirm(msg)) return;
   try {
-    await fetch('/api/settings', { method:'PUT', headers:{'Content-Type':'application/json'},
+    await apiFetch('/api/settings', { method:'PUT', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ line_ordering_enabled: enable ? '1' : '0' }) });
     showToast(enable ? '✅ LINE 點餐已開啟' : '🔴 LINE 點餐已關閉', 'success');
     loadLineBizStatus();
@@ -3055,7 +3871,7 @@ async function setTodayClosed(closed) {
   if (!confirm(msg)) return;
   const todayStr = new Date().toISOString().slice(0,10);
   try {
-    await fetch('/api/settings', { method:'PUT', headers:{'Content-Type':'application/json'},
+    await apiFetch('/api/settings', { method:'PUT', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ line_today_closed: closed ? '1' : '0', line_today_closed_date: todayStr }) });
     showToast(closed ? '🌙 今日已設定臨時休息' : '✅ 已取消今日休息', 'success');
     loadLineBizStatus();
@@ -3063,14 +3879,14 @@ async function setTodayClosed(closed) {
 }
 
 async function setPickup(enable) {
-  await fetch('/api/settings', { method:'PUT', headers:{'Content-Type':'application/json'},
+  await apiFetch('/api/settings', { method:'PUT', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ pickup_enabled: enable ? '1' : '0' }) });
   showToast(enable ? '✅ 自取已開啟' : '❌ 自取已關閉', 'success');
   loadLineBizStatus();
 }
 
 async function setDelivery(enable) {
-  await fetch('/api/settings', { method:'PUT', headers:{'Content-Type':'application/json'},
+  await apiFetch('/api/settings', { method:'PUT', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ delivery_enabled: enable ? '1' : '0' }) });
   showToast(enable ? '✅ 外送已開啟' : '❌ 外送已關閉', 'success');
   loadLineBizStatus();
@@ -3088,7 +3904,7 @@ async function saveLinePaymentSettings() {
     if (el) body[key] = el.checked ? '1' : '0';
   });
   try {
-    await fetch('/api/settings', { method:'PUT', headers:{'Content-Type':'application/json'},
+    await apiFetch('/api/settings', { method:'PUT', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(body) });
     const enabled = Object.entries(lpMap)
       .filter(([code]) => document.getElementById(`lp-${code}`)?.checked)
@@ -3134,7 +3950,7 @@ async function saveLineBizSettings() {
   });
   const bhe = document.getElementById('set-line_business_hours_enabled');
   try {
-    await fetch('/api/settings', { method:'PUT', headers:{'Content-Type':'application/json'},
+    await apiFetch('/api/settings', { method:'PUT', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({
         line_business_hours_enabled: bhe?.checked ? '1' : '0',
         line_business_hours: JSON.stringify(hours)
@@ -3146,6 +3962,995 @@ async function saveLineBizSettings() {
 
 async function saveBizHoursFromGrid() { /* 即時儲存，不需 Toast */ saveLineBizSettings().catch(()=>{}); }
 
+// ═══════════════════════════════════════════════════════════
+// LINE 接單與可售管理中心 v1 — Web 後台 JS
+// ═══════════════════════════════════════════════════════════
+
+// ── 外帶/外送每週營業時間 Grid ──────────────────────────
+function renderModeHoursGrid(gridId, hoursJsonStr) {
+  const grid = document.getElementById(gridId);
+  if (!grid) return;
+  let hours = {};
+  try { hours = JSON.parse(hoursJsonStr || '{}'); } catch {}
+  const mode = gridId.startsWith('takeout') ? 'takeout' : 'delivery';
+  grid.innerHTML = DAY_KEYS.map(d => {
+    const dh = hours[d] || { open:'11:00', close:'20:00', enabled: d !== 'sun' };
+    return `<div style="background:#fff;padding:10px 12px;border-radius:8px;border:1px solid #ddd;box-sizing:border-box;min-width:0">
+      <label style="display:flex;align-items:center;gap:6px;margin-bottom:8px;font-weight:700;color:#222;cursor:pointer">
+        <input type="checkbox" id="${mode}-bh-${d}-en" ${dh.enabled?'checked':''} onchange="saveModeHoursFromGrid('${mode}')">
+        <span>${DAY_NAMES[d]}</span>
+      </label>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <input type="time" id="${mode}-bh-${d}-open" value="${dh.open||'11:00'}" onchange="saveModeHoursFromGrid('${mode}')"
+          style="width:130px;min-width:120px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;color:#222;background:#fff;box-sizing:border-box;flex-shrink:0">
+        <span style="color:#555;flex-shrink:0;font-size:13px">～</span>
+        <input type="time" id="${mode}-bh-${d}-close" value="${dh.close||'20:00'}" onchange="saveModeHoursFromGrid('${mode}')"
+          style="width:130px;min-width:120px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;color:#222;background:#fff;box-sizing:border-box;flex-shrink:0">
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── 外帶/外送接單規則儲存 ─────────────────────────────
+async function saveTakeoutDeliveryRule(mode) {
+  const m = mode === 'delivery' ? 'delivery' : 'takeout';
+  const hours = {};
+  DAY_KEYS.forEach(d => {
+    const en    = document.getElementById(`${m}-bh-${d}-en`);
+    const open  = document.getElementById(`${m}-bh-${d}-open`);
+    const close = document.getElementById(`${m}-bh-${d}-close`);
+    if (en) hours[d] = { enabled: en.checked, open: open?.value||'11:00', close: close?.value||'20:00' };
+  });
+  const enabled    = document.getElementById(`set-${m}_enabled`)?.checked ? '1' : '0';
+  const cutoff     = document.getElementById(`set-${m}_cutoff_time`)?.value || '';
+  const prep       = document.getElementById(`set-${m}_prep_minutes`)?.value || (m==='takeout'?'15':'30');
+  const allowNext  = document.getElementById(`set-${m}_allow_next_day`)?.checked ? '1' : '0';
+  const body = {
+    [`${m}_enabled`]:           enabled,
+    [`${m}_cutoff_time`]:       cutoff,
+    [`${m}_prep_minutes`]:      String(prep),
+    [`${m}_allow_next_day`]:    allowNext,
+    [`${m}_business_hours`]:    JSON.stringify(hours),
+  };
+  // 同步舊版 pickup_enabled / delivery_enabled
+  if (m === 'takeout')   body.pickup_enabled   = enabled;
+  if (m === 'delivery')  body.delivery_enabled = enabled;
+  try {
+    await apiFetch('/api/settings', { method:'PUT', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body) });
+    showToast(`✅ ${m==='takeout'?'外帶':'外送'}設定已儲存`, 'success');
+    loadLineBizStatus();
+  } catch(e) { showToast('儲存失敗', 'error'); }
+}
+
+async function saveModeHoursFromGrid(mode) {
+  await saveTakeoutDeliveryRule(mode);
+}
+
+// ── LINE 商品設定 Modal：份數 UI ──────────────────────────
+// BUG-001 FIX: 醒目開關取代 checkbox
+function setQuotaEnabled(enabled) {
+  const hiddenInput = document.getElementById('lineQuotaEnabled');
+  if (hiddenInput) hiddenInput.value = enabled ? '1' : '0';
+  const btnOn  = document.getElementById('btnQuotaEnable');
+  const btnOff = document.getElementById('btnQuotaDisable');
+  if (btnOn) {
+    if (enabled) {
+      btnOn.style.background  = '#06C755'; btnOn.style.color = '#fff'; btnOn.style.borderColor = '#06C755';
+    } else {
+      btnOn.style.background  = '#f5f5f5'; btnOn.style.color = '#888'; btnOn.style.borderColor = '#ddd';
+    }
+  }
+  if (btnOff) {
+    if (!enabled) {
+      btnOff.style.background  = '#374151'; btnOff.style.color = '#f9fafb'; btnOff.style.borderColor = '#6b7280';
+    } else {
+      btnOff.style.background  = '#f5f5f5'; btnOff.style.color = '#888'; btnOff.style.borderColor = '#ddd';
+    }
+  }
+  const fields = document.getElementById('lineQuotaFields');
+  if (fields) fields.style.display = enabled ? 'block' : 'none';
+}
+
+// 相容舊呼叫
+function toggleLineQuotaFields() {
+  const v = document.getElementById('lineQuotaEnabled')?.value;
+  setQuotaEnabled(v === '1');
+}
+
+function updateLineQuotaStatusBar(daily, sold, low, high) {
+  const bar = document.getElementById('lineQuotaStatusBar');
+  if (!bar) return;
+  const remaining = Math.max(0, daily - sold);
+  const dEl = document.getElementById('qs-daily');
+  const sEl = document.getElementById('qs-sold');
+  const rEl = document.getElementById('qs-remaining');
+  if (dEl) dEl.textContent = daily;
+  if (sEl) sEl.textContent = sold;
+  if (rEl) { rEl.textContent = remaining; rEl.style.color = remaining <= 0 ? '#ff6b6b' : remaining <= low ? '#fbbf24' : '#4ade80'; }
+  const badge = document.getElementById('qs-status-badge');
+  if (badge) {
+    if (remaining <= 0)        badge.innerHTML = '<span style="background:#7f1d1d;color:#fca5a5;padding:4px 10px;border-radius:10px;font-size:12px;font-weight:700">今日售完</span>';
+    else if (remaining <= low) badge.innerHTML = '<span style="background:#7c2d12;color:#fdba74;padding:4px 10px;border-radius:10px;font-size:12px;font-weight:700">即將售完</span>';
+    else if (remaining >= high)badge.innerHTML = '<span style="background:#14532d;color:#86efac;padding:4px 10px;border-radius:10px;font-size:12px;font-weight:700">供應充足</span>';
+    else                        badge.innerHTML = '<span style="background:#1e3a5f;color:#93c5fd;padding:4px 10px;border-radius:10px;font-size:12px;font-weight:700">販售中</span>';
+  }
+  bar.style.display = 'block';
+}
+
+async function resetLineQuotaSold() {
+  const id = document.getElementById('lineSettingsProductId')?.value;
+  if (!id) return;
+  if (!confirm('確定要重置此商品今日 LINE 已售份數為 0？')) return;
+  try {
+    const res = await apiFetch(`/api/products/${id}/line-settings`, {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ line_quota_sold: 0 })
+    });
+    const json = await res.json();
+    if (json.success) {
+      document.getElementById('lineQuotaSold').value = 0;
+      const daily = Number(document.getElementById('lineQuotaDaily')?.value || 0);
+      const low   = Number(document.getElementById('lineQuotaLowThreshold')?.value || 2);
+      const high  = Number(document.getElementById('lineQuotaHighThreshold')?.value || 10);
+      updateLineQuotaStatusBar(daily, 0, low, high);
+      showToast('✅ LINE 已售份數已重置', 'success');
+    }
+  } catch { showToast('重置失敗', 'error'); }
+}
+
+
+// ═══════════════════════════════════════════════════════════
+// LINE 預購管理 (FEATURE-001)
+// ═══════════════════════════════════════════════════════════
+
+let _lpAllOrders = [];  // 全部預購訂單快取
+let _lpFilter = 'all';  // today | tomorrow | week | all | custom
+
+// ── 日期工具 ──────────────────────────────────────────────
+function twTodayStr() {
+  const d = new Date(new Date().toLocaleString('en-US', {timeZone:'Asia/Taipei'}));
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+function twDateAdd(base, n) {
+  const d = new Date(base + 'T00:00:00+08:00'); d.setDate(d.getDate()+n);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+// ── 篩選條件切換 ──────────────────────────────────────────
+function lpSetFilter(type) {
+  _lpFilter = type;
+  document.querySelectorAll('[id^="lpf-"]').forEach(b => {
+    b.style.background = ''; b.style.color = '';
+  });
+  const activeBtn = document.getElementById('lpf-' + type);
+  if (activeBtn) { activeBtn.style.background = 'var(--accent,#3b82f6)'; activeBtn.style.color = '#fff'; }
+  loadLinePreorders();
+}
+
+// ── 載入預購訂單 ──────────────────────────────────────────
+async function loadLinePreorders() {
+  const tbody = document.getElementById('lp-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;padding:30px;color:var(--text-muted,#64748b)">載入中…</td></tr>';
+
+  const today = twTodayStr();
+  let dateFrom, dateTo;
+  if (_lpFilter === 'today') {
+    dateFrom = dateTo = today;
+  } else if (_lpFilter === 'tomorrow') {
+    dateFrom = dateTo = twDateAdd(today, 1);
+  } else if (_lpFilter === 'week') {
+    dateFrom = today; dateTo = twDateAdd(today, 7);
+  } else if (_lpFilter === 'custom') {
+    dateFrom = document.getElementById('lp-date-from')?.value || today;
+    dateTo   = document.getElementById('lp-date-to')?.value   || today;
+  } else {
+    // all: 今天起往後 30 天，加上今天以前 7 天（含今日預購）
+    dateFrom = twDateAdd(today, -7);
+    dateTo   = twDateAdd(today, 30);
+  }
+
+  try {
+    // 用 LINE 訂單 API，依建立日期抓取
+    const res  = await apiFetch(`/api/orders?date_from=${dateFrom}&date_to=${dateTo}&source=line`);
+    const json = await res.json();
+    let orders = (json.success ? json.data : []).filter(o => o.source === 'line');
+
+    // 判斷是否為預購單：pickup_time 包含日期（格式 YYYY-MM-DD HH:MM）或日期 > 建立日期
+    orders = orders.map(o => {
+      const pt = o.pickup_time || '';
+      let preorderDate = null, preorderTime = pt;
+      if (/^\d{4}-\d{2}-\d{2}\s/.test(pt)) {
+        // 新格式：YYYY-MM-DD HH:MM
+        preorderDate = pt.slice(0, 10);
+        preorderTime = pt.slice(11);
+      } else if (o.created_at) {
+        // 舊格式：只有時間，用建立日期
+        preorderDate = o.created_at.slice(0, 10);
+      }
+      const isPreorder = preorderDate && preorderDate > (o.created_at || '').slice(0, 10);
+      return { ...o, preorderDate, preorderTime, isPreorder };
+    });
+
+    _lpAllOrders = orders;
+    renderLinePreordersTable();
+  } catch(e) {
+    if (tbody) tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;padding:30px;color:#ef4444">載入失敗：${escHtml(e.message)}</td></tr>`;
+  }
+}
+
+// ── 渲染預購表格 ──────────────────────────────────────────
+function renderLinePreordersTable() {
+  const tbody = document.getElementById('lp-tbody');
+  if (!tbody) return;
+
+  const modeFilter   = document.getElementById('lp-filter-mode')?.value   || '';
+  const statusFilter = document.getElementById('lp-filter-status')?.value || '';
+
+  let orders = _lpAllOrders;
+  if (modeFilter)   orders = orders.filter(o => o.order_mode === modeFilter);
+  if (statusFilter) orders = orders.filter(o => (o.order_status || o.status) === statusFilter);
+
+  // 統計
+  const pending = orders.filter(o => ['pending','accepted','preparing'].includes(o.order_status || o.status)).length;
+  const revenue = orders.reduce((s, o) => s + Number(o.total||0), 0);
+  const setStat = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  setStat('lp-stat-total',   orders.length);
+  setStat('lp-stat-pending', pending);
+  setStat('lp-stat-revenue', 'NT$' + revenue.toLocaleString());
+  const badge = document.getElementById('lp-count-badge');
+  if (badge) badge.textContent = `共 ${orders.length} 筆`;
+
+  if (!orders.length) {
+    tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;padding:40px;color:var(--text-muted,#64748b)">此條件下無預購訂單</td></tr>';
+    return;
+  }
+
+  const STATUS_CLS   = {pending:'status-new',accepted:'status-preparing',preparing:'status-preparing',ready:'status-ready',completed:'status-completed',cancelled:'status-void'};
+  const STATUS_LABEL = {pending:'待接單',accepted:'已接單',preparing:'製作中',ready:'可取餐',completed:'已完成',cancelled:'已取消'};
+  const MODE_LABEL   = {takeout:'🛍️ 外帶', delivery:'🛵 外送', dine_in:'🍽️ 內用'};
+  const PAY_LABEL    = {cash:'現金',linepay:'LINE Pay',transfer:'轉帳',platform:'平台',credit_card:'信用卡'};
+  const tdS = 'padding:8px 8px;border-bottom:1px solid var(--border,#334155);vertical-align:middle';
+
+  // 依預購日期排序
+  orders = [...orders].sort((a, b) => {
+    const da = (a.preorderDate || a.created_at || '').slice(0, 10);
+    const db2 = (b.preorderDate || b.created_at || '').slice(0, 10);
+    return da < db2 ? -1 : da > db2 ? 1 : (a.preorderTime||'') < (b.preorderTime||'') ? -1 : 1;
+  });
+
+  tbody.innerHTML = orders.map(o => {
+    const st = o.order_status || o.status || 'pending';
+    const stCls   = STATUS_CLS[st]   || 'status-completed';
+    const stLabel = STATUS_LABEL[st] || st;
+    const items   = (typeof o.items==='string') ? JSON.parse(o.items||'[]') : (o.items||[]);
+    const itemStr = items.map(i => `${i.name}×${i.qty}`).join('、');
+    const phone   = String(o.customer_phone||'');
+    const phoneMasked = phone.length > 4 ? phone.slice(0,3)+'****'+phone.slice(-3) : phone;
+    const today = twTodayStr();
+    const isToday = o.preorderDate === today;
+    const preorderBadge = isToday
+      ? '<span style="background:#3b82f6;color:#fff;font-size:10px;padding:2px 6px;border-radius:8px;font-weight:700">今日單</span>'
+      : '<span style="background:#7c3aed;color:#fff;font-size:10px;padding:2px 6px;border-radius:8px;font-weight:700">預購單</span>';
+    const dateDisplay = o.preorderDate
+      ? `${o.preorderDate.slice(5)} ${o.preorderTime||''}`
+      : (o.pickup_time||'—');
+
+    return `<tr style="background:var(--bg-card,#1e293b)">
+      <td style="${tdS}">
+        <div style="font-size:12px;font-weight:600;color:var(--text-primary,#f1f5f9)">${escHtml(o.order_number)}</div>
+        <div style="margin-top:3px">${preorderBadge}</div>
+        <div style="font-size:10px;color:var(--text-muted,#64748b);margin-top:2px">建立：${(o.created_at||'').slice(5,16)}</div>
+      </td>
+      <td style="${tdS};text-align:center">
+        <div style="font-size:13px;font-weight:700;color:${isToday?'#3b82f6':'#a78bfa'}">${dateDisplay}</div>
+      </td>
+      <td style="${tdS}">${escHtml(o.customer_name||'—')}</td>
+      <td style="${tdS};text-align:center;font-size:12px">${escHtml(phoneMasked)}</td>
+      <td style="${tdS};text-align:center">${MODE_LABEL[o.order_mode]||o.order_mode||'—'}</td>
+      <td style="${tdS};max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(itemStr)}">${escHtml(itemStr||'—')}</td>
+      <td style="${tdS};text-align:center;font-weight:700;color:#f5a623">$${o.total||0}</td>
+      <td style="${tdS};text-align:center;font-size:11px">${PAY_LABEL[o.payment_method]||o.payment_method||'—'}</td>
+      <td style="${tdS};font-size:11px;color:var(--text-muted,#64748b)">${escHtml(o.note||'')}</td>
+      <td style="${tdS};text-align:center">
+        <span class="order-status ${stCls}" style="font-size:11px">${stLabel}</span>
+      </td>
+      <td style="${tdS};text-align:center">
+        <div style="display:flex;gap:4px;justify-content:center;flex-wrap:wrap">
+          <button style="padding:4px 8px;font-size:11px;background:var(--bg-base,#0f172a);border:1px solid var(--border,#334155);border-radius:5px;color:var(--text-secondary,#94a3b8);cursor:pointer" onclick="showOrderDetail('${o.id}')">📋 詳情</button>
+          ${st==='pending'?`<button style="padding:4px 8px;font-size:11px;background:#06C755;border:none;border-radius:5px;color:#fff;cursor:pointer" onclick="lpUpdateStatus('${o.id||o.uuid}','${o.order_number}','accepted')">✅ 接單</button>`:''}
+          ${['pending','accepted','preparing'].includes(st)?`<button style="padding:4px 8px;font-size:11px;background:#e53935;border:none;border-radius:5px;color:#fff;cursor:pointer" onclick="lpUpdateStatus('${o.id||o.uuid}','${o.order_number}','cancelled')">❌ 取消</button>`:''}
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+// ── 快速更新預購訂單狀態 ──────────────────────────────────
+async function lpUpdateStatus(id, orderNo, newStatus) {
+  const label = {accepted:'接受',cancelled:'取消'}[newStatus]||newStatus;
+  if (!confirm(`確定要${label}訂單 ${orderNo} 嗎？`)) return;
+  try {
+    const res  = await apiFetch(`/api/line-orders/online/${encodeURIComponent(orderNo)}/status`, {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ status: newStatus })
+    });
+    const json = await res.json();
+    if (json.success) {
+      showToast(`✅ 訂單狀態已更新為：${newStatus}`, 'success');
+      loadLinePreorders();
+    } else {
+      showToast(json.message || '更新失敗', 'error');
+    }
+  } catch(e) { showToast('網路錯誤', 'error'); }
+}
+
+// ═══════════════════════════════════════════════════════════
+// LINE 商品管理總表 (v1)
+// ═══════════════════════════════════════════════════════════
+
+let _lpmProducts = [];    // 全部商品快取
+let _lpmEditing  = {};    // 正在編輯的列 { [id]: {daily,sold,low,high,start,end} }
+
+// ── 顯示/隱藏 LINE 商品管理入口 ──────────────────────────
+function initLineProductsNav() {
+  const hasLine = hasFeature && hasFeature('line_order');
+  const navBtn     = document.getElementById('nav-btn-line_products');
+  const preNavBtn  = document.getElementById('nav-btn-line_preorders');
+  const toolBtn    = document.getElementById('btnLineProductsMgr');
+  if (navBtn)     navBtn.style.display     = hasLine ? '' : 'none';
+  if (preNavBtn)  preNavBtn.style.display  = hasLine ? '' : 'none';
+  if (toolBtn)    toolBtn.style.display    = hasLine ? '' : 'none';
+}
+
+// ── 載入 LINE 商品管理頁 ──────────────────────────────────
+async function loadLineProductsPage() {
+  const tbody = document.getElementById('lpm-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="13" style="text-align:center;padding:40px;color:var(--text-muted,#64748b)">載入中…</td></tr>';
+  _lpmEditing = {};
+  try {
+    const res  = await apiFetch('/api/products/line-products/list');
+    const json = await res.json();
+    if (!json.success) throw new Error(json.message || '載入失敗');
+    _lpmProducts = json.data || [];
+    renderLpmTable(_lpmProducts);
+  } catch(e) {
+    if (tbody) tbody.innerHTML = `<tr><td colspan="13" style="text-align:center;padding:40px;color:#ef4444">載入失敗：${escHtml(e.message)}</td></tr>`;
+  }
+}
+
+// ── Tab 切換：今日販售 / 預購管理 ──────────────────────────
+let _lpmTab = 'today'; // 'today' | 'preorder'
+function lpmSwitchTab(tab) {
+  _lpmTab = tab;
+  const todayBtn       = document.getElementById('lpm-tab-today');
+  const preorderBtn    = document.getElementById('lpm-tab-preorder');
+  const todayControls  = document.getElementById('lpm-today-controls');
+  const preorderCtrls  = document.getElementById('lpm-preorder-controls');
+
+  const activeStyle = 'color:var(--accent,#3b82f6);border-bottom-color:var(--accent,#3b82f6)';
+  const inactiveStyle = 'color:var(--text-muted,#64748b);border-bottom-color:transparent';
+
+  if (todayBtn)    { todayBtn.style.color    = tab==='today'    ? 'var(--accent,#3b82f6)' : 'var(--text-muted,#64748b)'; todayBtn.style.borderBottomColor    = tab==='today'    ? 'var(--accent,#3b82f6)' : 'transparent'; }
+  if (preorderBtn) { preorderBtn.style.color = tab==='preorder' ? '#a78bfa'                : 'var(--text-muted,#64748b)'; preorderBtn.style.borderBottomColor = tab==='preorder' ? '#7c3aed' : 'transparent'; }
+
+  if (todayControls)  todayControls.style.display  = tab==='today'    ? 'block' : 'none';
+  if (preorderCtrls)  preorderCtrls.style.display  = tab==='preorder' ? 'block' : 'none';
+
+  renderLpmTable(_lpmProducts);
+}
+
+// ── LINE 商品狀態計算 ──────────────────────────────────────
+function calcLpmStatus(p) {
+  if (!p.show_on_line) return { label:'未上架', cls:'#94a3b8', bg:'rgba(148,163,184,.12)' };
+  // 商品販售時段判斷
+  const now = new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Taipei'}));
+  const hhmm = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+
+  if (_lpmTab === 'preorder') {
+    // 預購管理 Tab：用 line_preorder_*
+    if (!Number(p.line_preorder_enabled)) return { label:'未啟用預購管理', cls:'#94a3b8', bg:'rgba(148,163,184,.12)' };
+    const remaining = Math.max(0, Number(p.line_preorder_daily||0) - Number(p.line_preorder_sold||0));
+    const low  = Number(p.line_preorder_low_threshold  || 2);
+    const high = Number(p.line_preorder_high_threshold || 10);
+    if (remaining <= 0)    return { label:'預購已滿', cls:'#ef4444', bg:'rgba(239,68,68,.12)' };
+    if (remaining <= low)  return { label:'預購快滿', cls:'#ff6d00', bg:'rgba(255,109,0,.12)' };
+    if (remaining >= high) return { label:'可預購', cls:'#06C755', bg:'rgba(6,199,85,.12)' };
+    return { label:`可預購(剩${remaining})`, cls:'#3b82f6', bg:'rgba(59,130,246,.12)' };
+  }
+
+  // 今日販售 Tab：原本邏輯
+  if (p.line_sell_end   && hhmm >= p.line_sell_end)   return { label:'今日售完', cls:'#ef4444', bg:'rgba(239,68,68,.12)' };
+  if (p.line_sell_start && hhmm <  p.line_sell_start) return { label:'尚未開賣', cls:'#ff6d00', bg:'rgba(255,109,0,.12)' };
+  if (!Number(p.line_quota_enabled)) return { label:'販售中（未限額）', cls:'#06C755', bg:'rgba(6,199,85,.12)' };
+  const remaining = Number(p.line_quota_remaining ?? Math.max(0, p.line_quota_daily - p.line_quota_sold));
+  const low  = Number(p.line_quota_low_threshold  || 2);
+  const high = Number(p.line_quota_high_threshold || 10);
+  if (remaining <= 0)    return { label:'今日售完', cls:'#ef4444', bg:'rgba(239,68,68,.12)' };
+  if (remaining <= low)  return { label:'即將售完', cls:'#ff6d00', bg:'rgba(255,109,0,.12)' };
+  if (remaining >= high) return { label:'供應充足', cls:'#06C755', bg:'rgba(6,199,85,.12)' };
+  return { label:'販售中', cls:'#3b82f6', bg:'rgba(59,130,246,.12)' };
+}
+
+// ── 渲染總表 ──────────────────────────────────────────────
+function renderLpmTable(products) {
+  const tbody = document.getElementById('lpm-tbody');
+  if (!tbody) return;
+  document.getElementById('lpm-check-all').checked = false;
+  document.getElementById('lpm-selected-count').textContent = '（未選取商品）';
+  if (!products.length) {
+    tbody.innerHTML = '<tr><td colspan="14" style="text-align:center;padding:40px;color:var(--text-muted,#64748b)">尚無商品</td></tr>';
+    return;
+  }
+  tbody.innerHTML = products.map(p => {
+    // Tab 切換：今日販售 vs 預購管理
+    const isPreorderTab = _lpmTab === 'preorder';
+    const qEnabled  = isPreorderTab ? (Number(p.line_preorder_enabled) || 0) : (Number(p.line_quota_enabled) || 0);
+    const daily     = isPreorderTab ? (Number(p.line_preorder_daily)   || 0) : (Number(p.line_quota_daily)   || 0);
+    const sold      = isPreorderTab ? (Number(p.line_preorder_sold)    || 0) : (Number(p.line_quota_sold)    || 0);
+    const remaining = qEnabled ? Math.max(0, daily - sold) : '—';
+    const low       = isPreorderTab
+      ? Number(p.line_preorder_low_threshold  || 2)
+      : Number(p.line_quota_low_threshold     || 2);
+    const high      = isPreorderTab
+      ? Number(p.line_preorder_high_threshold || 10)
+      : Number(p.line_quota_high_threshold    || 10);
+    const start     = p.line_sell_start || '';
+    const end       = p.line_sell_end   || '';
+    const imgSrc    = p.image || '';
+    const thumbHtml = imgSrc
+      ? `<img src="${escAttr(imgSrc)}" style="width:38px;height:38px;border-radius:6px;object-fit:cover" onerror="this.style.display='none'">`
+      : `<div style="width:38px;height:38px;border-radius:6px;background:var(--bg-base,#0f172a);display:flex;align-items:center;justify-content:center;font-size:18px">🍽️</div>`;
+    const st = calcLpmStatus(p);
+    const rowCls = 'background:var(--bg-card,#1e293b)';
+    // 是否正在編輯
+    const ed = _lpmEditing[p.id];
+    const tdStyle = 'padding:8px 6px;border-bottom:1px solid var(--border,#334155);vertical-align:middle;text-align:center';
+    return `<tr id="lpm-row-${p.id}" style="${rowCls}">
+      <td style="${tdStyle}"><input type="checkbox" class="lpm-chk" data-id="${p.id}" onchange="lpmUpdateCount()"></td>
+      <td style="${tdStyle}">${thumbHtml}</td>
+      <td style="${tdStyle};text-align:left;padding-left:10px">
+        <div style="font-weight:600;font-size:13px">${escHtml(p.name)}</div>
+        <div style="font-size:11px;color:var(--text-muted,#64748b)">${escHtml(p.category||'')}</div>
+      </td>
+      <td style="${tdStyle}">
+        <label style="display:flex;align-items:center;justify-content:center;gap:4px;cursor:pointer">
+          <input type="checkbox" ${p.show_on_line?'checked':''} onchange="lpmToggleOnline(${p.id},this.checked)">
+        </label>
+      </td>
+      <td style="${tdStyle}">
+        <label style="display:flex;align-items:center;justify-content:center;gap:4px;cursor:pointer" title="啟用後前台依份數顯示狀態">
+          <input type="checkbox" ${qEnabled?'checked':''} onchange="lpmToggleQuota(${p.id},this.checked)">
+          <span style="font-size:10px;color:${qEnabled?'#06C755':'#94a3b8'}">${qEnabled?'✅':'⬜'}</span>
+        </label>
+      </td>
+      <td style="${tdStyle}">
+        ${ed
+          ? `<div><input type="number" id="lpm-ed-daily-${p.id}" value="${daily}" min="0" style="width:64px;padding:4px 6px;border:1px solid var(--border,#334155);border-radius:4px;font-size:13px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9);text-align:center"><div style="font-size:10px;margin-top:4px"><label style="display:flex;align-items:center;gap:2px;cursor:pointer"><input type="checkbox" id="lpm-ed-qen-${p.id}" ${qEnabled?'checked':''} style="width:12px;height:12px"><span style="font-size:10px;color:var(--text-muted,#64748b)">限額</span></label></div></div>`
+          : `<div style="font-weight:600">${qEnabled?daily:'—'}</div><div style="font-size:10px;margin-top:2px;color:${qEnabled?'#06C755':'#94a3b8'}">${qEnabled?'✅ 限額':'⬜ 未限額'}</div>`}
+      </td>
+      <td style="${tdStyle}">
+        <span style="color:#ef4444;font-weight:600">${qEnabled?sold:'—'}</span>
+      </td>
+      <td style="${tdStyle}">
+        <span style="color:${qEnabled&&typeof remaining==='number'&&remaining<=0?'#ef4444':'inherit'};font-weight:600">${qEnabled?remaining:'—'}</span>
+      </td>
+      <td style="${tdStyle}">
+        ${ed ? `<input type="number" id="lpm-ed-low-${p.id}" value="${low}" min="0" style="width:56px;padding:4px 6px;border:1px solid var(--border,#334155);border-radius:4px;font-size:13px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9);text-align:center">` : `<span>${low}</span>`}
+      </td>
+      <td style="${tdStyle}">
+        ${ed ? `<input type="number" id="lpm-ed-high-${p.id}" value="${high}" min="0" style="width:56px;padding:4px 6px;border:1px solid var(--border,#334155);border-radius:4px;font-size:13px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9);text-align:center">` : `<span>${high}</span>`}
+      </td>
+      <td style="${tdStyle}">
+        ${ed ? `<input type="time" id="lpm-ed-start-${p.id}" value="${start}" style="width:88px;padding:4px 6px;border:1px solid var(--border,#334155);border-radius:4px;font-size:12px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">` : `<span style="font-size:12px">${start||'不限'}</span>`}
+      </td>
+      <td style="${tdStyle}">
+        ${ed ? `<input type="time" id="lpm-ed-end-${p.id}" value="${end}" style="width:88px;padding:4px 6px;border:1px solid var(--border,#334155);border-radius:4px;font-size:12px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">` : `<span style="font-size:12px">${end||'不限'}</span>`}
+      </td>
+      <td style="${tdStyle}">
+        <span style="display:inline-block;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:700;color:${st.cls};background:${st.bg}">${st.label}</span>
+      </td>
+      <td style="${tdStyle}">
+        <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:center">
+          ${ed
+            ? `<button onclick="lpmSaveRow(${p.id})" style="padding:4px 8px;background:#06C755;color:#fff;border:none;border-radius:5px;font-size:12px;cursor:pointer">💾儲存</button>
+               <button onclick="lpmCancelRow(${p.id})" style="padding:4px 8px;background:var(--bg-base,#0f172a);color:var(--text-secondary,#94a3b8);border:1px solid var(--border,#334155);border-radius:5px;font-size:12px;cursor:pointer">取消</button>`
+            : `<button onclick="lpmEditRow(${p.id})" style="padding:4px 8px;background:var(--bg-base,#0f172a);color:var(--text-secondary,#94a3b8);border:1px solid var(--border,#334155);border-radius:5px;font-size:12px;cursor:pointer">✏️編輯</button>`
+          }
+          <button onclick="lpmResetSold(${p.id})" style="padding:4px 8px;background:var(--bg-base,#0f172a);color:#ff6d00;border:1px solid #ff6d00;border-radius:5px;font-size:12px;cursor:pointer" title="重置已售份數">⟳重置</button>
+          <button onclick="openLineSettingsModal(${p.id})" style="padding:4px 8px;background:#06C755;color:#fff;border:none;border-radius:5px;font-size:12px;cursor:pointer">⚙️LINE設定</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+// ── 全選 / 取消全選 ──────────────────────────────────────
+function lpmToggleAll(checked) {
+  document.querySelectorAll('.lpm-chk').forEach(cb => { cb.checked = checked; });
+  lpmUpdateCount();
+}
+function lpmSelectAll()   { document.getElementById('lpm-check-all').checked = true;  lpmToggleAll(true);  }
+function lpmDeselectAll() { document.getElementById('lpm-check-all').checked = false; lpmToggleAll(false); }
+
+function lpmUpdateCount() {
+  const sel = document.querySelectorAll('.lpm-chk:checked').length;
+  const el  = document.getElementById('lpm-selected-count');
+  if (el) el.textContent = sel ? `（已選取 ${sel} 個商品）` : '（未選取商品）';
+}
+
+function lpmGetSelected() {
+  return Array.from(document.querySelectorAll('.lpm-chk:checked')).map(cb => Number(cb.dataset.id));
+}
+
+// ── 行內編輯 ──────────────────────────────────────────────
+function lpmEditRow(id) {
+  const p = _lpmProducts.find(x => x.id === id);
+  if (!p) return;
+  _lpmEditing[id] = true;
+  renderLpmTable(_lpmProducts);
+  // 捲動到目標行
+  const row = document.getElementById(`lpm-row-${id}`);
+  if (row) row.scrollIntoView({ behavior:'smooth', block:'center' });
+}
+
+function lpmCancelRow(id) {
+  delete _lpmEditing[id];
+  renderLpmTable(_lpmProducts);
+}
+
+async function lpmSaveRow(id) {
+  const daily  = Number(document.getElementById(`lpm-ed-daily-${id}`)?.value  || 0);
+  const low    = Number(document.getElementById(`lpm-ed-low-${id}`)?.value    || 0);
+  const high   = Number(document.getElementById(`lpm-ed-high-${id}`)?.value   || 0);
+  const start  = document.getElementById(`lpm-ed-start-${id}`)?.value || '';
+  const end    = document.getElementById(`lpm-ed-end-${id}`)?.value   || '';
+  // 讀取「限額管理」勾選框；若份數 > 0 則強制啟用
+  const qEnCb  = document.getElementById(`lpm-ed-qen-${id}`);
+  const qEnabled = daily > 0 ? 1 : (qEnCb?.checked ? 1 : 0);
+  const isPreorderTab = _lpmTab === 'preorder';
+  try {
+    const saveBody = isPreorderTab ? {
+      line_preorder_enabled:        qEnabled,
+      line_preorder_daily:          daily,
+      line_preorder_low_threshold:  low,
+      line_preorder_high_threshold: high,
+    } : {
+      line_quota_enabled:        qEnabled,
+      line_quota_daily:          daily,
+      line_quota_low_threshold:  low,
+      line_quota_high_threshold: high,
+      line_sell_start:           start,
+      line_sell_end:             end,
+    };
+    const res  = await apiFetch(`/api/products/${id}/line-settings`, {
+      method:'PATCH', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(saveBody)
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.message || '儲存失敗');
+    // 更新本地快取
+    const idx = _lpmProducts.findIndex(x => x.id === id);
+    if (idx !== -1) {
+      _lpmProducts[idx] = { ..._lpmProducts[idx], ...json.data };
+    }
+    delete _lpmEditing[id];
+    renderLpmTable(_lpmProducts);
+    showToast(`✅ ${json.data?.name || '商品'} LINE 設定已儲存`, 'success');
+  } catch(e) { showToast(e.message || '儲存失敗', 'error'); }
+}
+
+// ── 上架/下架切換 ─────────────────────────────────────────
+async function lpmToggleOnline(id, checked) {
+  try {
+    const res  = await apiFetch(`/api/products/${id}/line-settings`, {
+      method:'PATCH', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ show_on_line: checked ? 1 : 0 })
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.message);
+    const idx = _lpmProducts.findIndex(x => x.id === id);
+    if (idx !== -1) _lpmProducts[idx] = { ..._lpmProducts[idx], ...json.data };
+    renderLpmTable(_lpmProducts);
+    showToast(checked ? '✅ 已開啟 LINE 上架' : '❌ 已關閉 LINE 上架', 'success');
+  } catch(e) { showToast(e.message || '操作失敗', 'error'); }
+}
+
+// ── 份數管理開關（直接從表格 checkbox 切換）──────────────
+async function lpmToggleQuota(id, checked) {
+  try {
+    const res  = await apiFetch(`/api/products/${id}/line-settings`, {
+      method:'PATCH', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ line_quota_enabled: checked ? 1 : 0 })
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.message);
+    const idx = _lpmProducts.findIndex(x => x.id === id);
+    if (idx !== -1) _lpmProducts[idx] = { ..._lpmProducts[idx], ...json.data };
+    renderLpmTable(_lpmProducts);
+    showToast(checked ? '📦 份數管理已啟用' : '⬜ 份數管理已停用', 'success');
+  } catch(e) { showToast(e.message || '操作失敗', 'error'); }
+}
+
+// ── 重置單商品已售 ────────────────────────────────────────
+async function lpmResetSold(id) {
+  const p = _lpmProducts.find(x => x.id === id);
+  if (!p) return;
+  if (!confirm(`確定要重置「${p.name}」的 LINE 已售份數為 0 嗎？此操作不影響主庫存。`)) return;
+  try {
+    const res  = await apiFetch(`/api/products/${id}/line-settings`, {
+      method:'PATCH', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ line_quota_sold: 0 })
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.message);
+    const idx = _lpmProducts.findIndex(x => x.id === id);
+    if (idx !== -1) _lpmProducts[idx] = { ..._lpmProducts[idx], ...json.data };
+    renderLpmTable(_lpmProducts);
+    showToast(`✅ 「${p.name}」已售份數已重置`, 'success');
+  } catch(e) { showToast(e.message || '重置失敗', 'error'); }
+}
+
+// ── 重置全部已售 ──────────────────────────────────────────
+async function resetAllLineQuota() {
+  if (!confirm('確定要重置【全部商品】的 LINE 今日已售份數為 0 嗎？此操作不影響主庫存。')) return;
+  try {
+    const res  = await apiFetch('/api/line-orders/quota-reset', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.message);
+    showToast('✅ 全部 LINE 已售份數已重置', 'success');
+    loadLineProductsPage();
+  } catch(e) { showToast(e.message || '重置失敗', 'error'); }
+}
+
+// ── 批量操作 ──────────────────────────────────────────────
+// ── 今日販售：套用設定（主按鈕）──────────────────────────
+async function lpmApplyAll() {
+  const ids = lpmGetSelected();
+  if (!ids.length) { showToast('請先選擇商品', 'error'); return; }
+
+  // 讀今日販售專屬 input（id: lpm-today-*）
+  const daily    = document.getElementById('lpm-today-daily')?.value?.trim();
+  const low      = document.getElementById('lpm-today-low')?.value?.trim();
+  const high     = document.getElementById('lpm-today-high')?.value?.trim();
+  const startVal = document.getElementById('lpm-today-start')?.value || '';
+  const endVal   = document.getElementById('lpm-today-end')?.value   || '';
+
+  if (!daily && daily !== '0') { showToast('請輸入今日開放份數', 'error'); return; }
+
+  const dailyNum = Number(daily);
+  const lowNum   = low   !== '' ? Number(low)   : null;
+  const highNum  = high  !== '' ? Number(high)  : null;
+
+  if (lowNum !== null && highNum !== null && lowNum > highNum) {
+    showToast('快售完門檻不可大於供應充足門檻', 'error'); return;
+  }
+  if (startVal && endVal && startVal >= endVal) {
+    showToast('販售開始時間不可晚於販售結束時間', 'error'); return;
+  }
+
+  const confirmLines = [
+    `即將套用「今日販售」LINE 商品設定：`,
+    `已選商品：${ids.length} 個`,
+    `今日開放份數：${dailyNum}`,
+    lowNum  !== null ? `快售完門檻：${lowNum}`   : null,
+    highNum !== null ? `供應充足門檻：${highNum}` : null,
+    startVal || endVal ? `販售時間：${startVal||'不限'} ~ ${endVal||'不限'}` : null,
+    `啟用份數管理：是`,
+    `確定套用？`,
+  ].filter(l => l !== null).join('\n');
+
+  if (!confirm(confirmLines)) return;
+
+  const body = { line_quota_enabled: 1, line_quota_daily: dailyNum };
+  if (lowNum  !== null) body.line_quota_low_threshold  = lowNum;
+  if (highNum !== null) body.line_quota_high_threshold = highNum;
+  if (startVal !== '') body.line_sell_start = startVal;
+  if (endVal   !== '') body.line_sell_end   = endVal;
+
+  await _lpmBatchSend(ids, body, '今日販售');
+}
+
+// ── 預購數量：套用設定（主按鈕）──────────────────────────
+async function lpmApplyPreorder() {
+  const ids = lpmGetSelected();
+  if (!ids.length) { showToast('請先選擇商品', 'error'); return; }
+
+  // 讀預購專屬 input（id: lpm-preorder-*）—— 完全獨立於今日販售
+  const daily = document.getElementById('lpm-preorder-daily')?.value?.trim();
+  const low   = document.getElementById('lpm-preorder-low')?.value?.trim();
+  const high  = document.getElementById('lpm-preorder-high')?.value?.trim();
+
+  if (!daily && daily !== '0') { showToast('請輸入每日預購數量', 'error'); return; }
+
+  const dailyNum = Number(daily);
+  const lowNum   = low   !== '' ? Number(low)   : null;
+  const highNum  = high  !== '' ? Number(high)  : null;
+
+  if (lowNum !== null && highNum !== null && lowNum > highNum) {
+    showToast('預購快滿門檻不可大於預購充足門檻', 'error'); return;
+  }
+
+  const confirmLines = [
+    `即將套用「預購數量管理」LINE 商品設定：`,
+    `已選商品：${ids.length} 個`,
+    `每日預購數量：${dailyNum}`,
+    lowNum  !== null ? `預購快滿門檻：${lowNum}`  : null,
+    highNum !== null ? `預購充足門檻：${highNum}` : null,
+    `自動啟用預購管理：是`,
+    `注意：不影響今日販售份數（line_quota_daily）`,
+    `確定套用？`,
+  ].filter(l => l !== null).join('\n');
+
+  if (!confirm(confirmLines)) return;
+
+  // 只更新 line_preorder_*，完全不碰 line_quota_*
+  const body = { line_preorder_enabled: 1, line_preorder_daily: dailyNum };
+  if (lowNum  !== null) body.line_preorder_low_threshold  = lowNum;
+  if (highNum !== null) body.line_preorder_high_threshold = highNum;
+
+  await _lpmBatchSend(ids, body, '預購數量');
+}
+
+// ── 共用批量發送邏輯 ──────────────────────────────────────
+async function _lpmBatchSend(ids, body, label) {
+  let successCount = 0, failCount = 0, firstFailReason = '';
+  const chunks = [];
+  for (let i = 0; i < ids.length; i += 5) chunks.push(ids.slice(i, i+5));
+  for (const chunk of chunks) {
+    await Promise.all(chunk.map(async id => {
+      try {
+        const res = await apiFetch(`/api/products/${id}/line-settings`, {
+          method:'PATCH', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(body)
+        });
+        // BUG-001 修正：apiFetch 在 401/403 時回傳純物件（無 .json()），需先判斷型態
+        let json;
+        if (res && typeof res.json === 'function') {
+          json = await res.json();
+        } else if (res && res.body) {
+          json = res.body;
+        } else {
+          throw new Error(`HTTP error (status=${res?.status ?? 'unknown'})`);
+        }
+        if (json && json.success) {
+          const idx = _lpmProducts.findIndex(x => x.id === id);
+          if (idx !== -1) _lpmProducts[idx] = { ..._lpmProducts[idx], ...json.data };
+          successCount++;
+        } else {
+          const reason = json?.message || '伺服器回傳 success:false';
+          console.warn(`[lpmBatchSend] id=${id} 失敗：`, reason);
+          if (!firstFailReason) firstFailReason = reason;
+          failCount++;
+        }
+      } catch(e) {
+        const reason = e?.message || String(e);
+        console.error(`[lpmBatchSend] id=${id} 例外：`, reason);
+        if (!firstFailReason) firstFailReason = reason;
+        failCount++;
+      }
+    }));
+  }
+  renderLpmTable(_lpmProducts);
+  if (!failCount) {
+    showToast(`✅ 已更新 ${successCount} 個商品的 LINE ${label}設定`, 'success');
+  } else if (!successCount) {
+    showToast(`⚠️ 全部 ${failCount} 個失敗。原因：${firstFailReason || '未知'}`, 'error');
+  } else {
+    showToast(`✅ ${successCount} 個成功，⚠️ ${failCount} 個失敗（${firstFailReason}）`, 'error');
+  }
+}
+
+async function lpmBatch(type) {
+  const ids = lpmGetSelected();
+  if (!ids.length) { showToast('請先勾選商品', 'error'); return; }
+
+  const names = {
+    daily:      '今日 LINE 開放份數',
+    low:        '快售完門檻',
+    high:       '供應充足門檻',
+    reset_sold: 'LINE 已售份數重置為 0',
+    enable:     'LINE 販售開啟',
+    disable:    'LINE 販售關閉',
+    sell_time:  'LINE 販售時段',
+  };
+
+  let body = {};
+  let val, startVal, endVal;
+  if (type === 'daily') {
+    val = Number(document.getElementById('lpm-today-daily')?.value);
+    if (isNaN(val) || val < 0) { showToast('請輸入有效的開放份數（今日販售區塊）', 'error'); return; }
+    if (!confirm(`確定要將已選 ${ids.length} 個商品的「今日開放份數」設定為 ${val} 嗎？`)) return;
+    const alsoEnable = val > 0 && confirm(`是否同時啟用已選 ${ids.length} 個商品的 LINE 份數管理？\n確認 → 啟用份數管理\n取消 → 只改數字`);
+    body = { line_quota_daily: val };
+    if (alsoEnable) body.line_quota_enabled = 1;
+  } else if (type === 'low') {
+    val = Number(document.getElementById('lpm-today-low')?.value);
+    if (isNaN(val) || val < 0) { showToast('請輸入有效的門檻值（今日販售區塊）', 'error'); return; }
+    if (!confirm(`確定要將已選 ${ids.length} 個商品的「快售完門檻」設定為 ${val} 嗎？`)) return;
+    body = { line_quota_low_threshold: val, line_quota_enabled: 1 };
+  } else if (type === 'high') {
+    val = Number(document.getElementById('lpm-today-high')?.value);
+    if (isNaN(val) || val < 0) { showToast('請輸入有效的門檻值（今日販售區塊）', 'error'); return; }
+    if (!confirm(`確定要將已選 ${ids.length} 個商品的「供應充足門檻」設定為 ${val} 嗎？`)) return;
+    body = { line_quota_high_threshold: val, line_quota_enabled: 1 };
+  } else if (type === 'sell_time') {
+    startVal = document.getElementById('lpm-today-start')?.value || '';
+    endVal   = document.getElementById('lpm-today-end')?.value   || '';
+    if (!confirm(`確定要將已選 ${ids.length} 個商品的 LINE 販售時段設定為 ${startVal||'不限'}～${endVal||'不限'} 嗎？`)) return;
+    body = { line_sell_start: startVal, line_sell_end: endVal };
+  } else if (type === 'reset_sold') {
+    if (!confirm(`確定要重置已選 ${ids.length} 個商品的 LINE 已售份數為 0 嗎？此操作不影響主庫存。`)) return;
+    body = { line_quota_sold: 0 };
+  } else if (type === 'enable') {
+    if (!confirm(`確定要開啟已選 ${ids.length} 個商品的 LINE 販售嗎？`)) return;
+    body = { show_on_line: 1 };
+  } else if (type === 'disable') {
+    if (!confirm(`確定要關閉已選 ${ids.length} 個商品的 LINE 販售嗎？`)) return;
+    body = { show_on_line: 0 };
+  } else if (type === 'quota_on') {
+    if (!confirm(`確定要啟用已選 ${ids.length} 個商品的 LINE 份數管理嗎？（只更新 line_quota_enabled，不影響預購管理）`)) return;
+    body = { line_quota_enabled: 1 };
+  } else if (type === 'quota_off') {
+    if (!confirm(`確定要停用已選 ${ids.length} 個商品的 LINE 份數管理嗎？`)) return;
+    body = { line_quota_enabled: 0 };
+  } else if (type === 'preorder_daily') {
+    val = Number(document.getElementById('lpm-preorder-daily')?.value);
+    if (isNaN(val) || val < 0) { showToast('請輸入有效的預購份數（預購管理區塊）', 'error'); return; }
+    if (!confirm(`確定要將已選 ${ids.length} 個商品的「每日預購數量」設定為 ${val} 嗎？\n（自動啟用預購管理，完全不影響今日販售份數）`)) return;
+    body = { line_preorder_daily: val, line_preorder_enabled: 1 };
+  } else if (type === 'preorder_low') {
+    val = Number(document.getElementById('lpm-preorder-low')?.value);
+    if (isNaN(val) || val < 0) { showToast('請輸入有效的門檻值', 'error'); return; }
+    if (!confirm(`確定要將已選 ${ids.length} 個商品的「預購快滿門檻」設定為 ${val} 嗎？`)) return;
+    body = { line_preorder_low_threshold: val, line_preorder_enabled: 1 };
+  } else if (type === 'preorder_high') {
+    val = Number(document.getElementById('lpm-preorder-high')?.value);
+    if (isNaN(val) || val < 0) { showToast('請輸入有效的門檻值', 'error'); return; }
+    if (!confirm(`確定要將已選 ${ids.length} 個商品的「預購充足門檻」設定為 ${val} 嗎？`)) return;
+    body = { line_preorder_high_threshold: val, line_preorder_enabled: 1 };
+  } else if (type === 'preorder_reset') {
+    if (!confirm(`確定要重置已選 ${ids.length} 個商品的 LINE 已預購數量為 0 嗎？此操作不影響主庫存。`)) return;
+    body = { line_preorder_sold: 0 };
+  } else if (type === 'preorder_on') {
+    if (!confirm(`確定要啟用已選 ${ids.length} 個商品的 LINE 預購管理嗎？（只更新 line_preorder_enabled，不影響今日販售）`)) return;
+    body = { line_preorder_enabled: 1 };
+  } else if (type === 'preorder_off') {
+    if (!confirm(`確定要停用已選 ${ids.length} 個商品的 LINE 預購管理嗎？`)) return;
+    body = { line_preorder_enabled: 0 };
+  }
+
+  let successCount = 0, failCount = 0;
+  // 批量並發執行（最多 5 個同時）
+  const chunks = [];
+  for (let i = 0; i < ids.length; i += 5) chunks.push(ids.slice(i, i+5));
+  for (const chunk of chunks) {
+    await Promise.all(chunk.map(async id => {
+      try {
+        const res = await apiFetch(`/api/products/${id}/line-settings`, {
+          method:'PATCH', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(body)
+        });
+        // BUG-001 修正：apiFetch 在 401/403 時回傳純物件（無 .json()）
+        let json;
+        if (res && typeof res.json === 'function') {
+          json = await res.json();
+        } else if (res && res.body) {
+          json = res.body;
+        } else {
+          throw new Error(`HTTP error (status=${res?.status ?? 'unknown'})`);
+        }
+        if (json && json.success) {
+          const idx = _lpmProducts.findIndex(x => x.id === id);
+          if (idx !== -1) _lpmProducts[idx] = { ..._lpmProducts[idx], ...json.data };
+          successCount++;
+        } else {
+          console.warn(`[lpmBatch] id=${id} 失敗：`, json?.message || 'success:false');
+          failCount++;
+        }
+      } catch(e) {
+        console.error(`[lpmBatch] id=${id} 例外：`, e?.message || e);
+        failCount++;
+      }
+    }));
+  }
+  renderLpmTable(_lpmProducts);
+  const msg = failCount
+    ? `✅ ${successCount} 個成功，⚠️ ${failCount} 個失敗`
+    : `✅ ${successCount} 個商品批量更新完成`;
+  showToast(msg, failCount ? 'error' : 'success');
+}
+
+// ── 批量食材控管（開啟 / 關閉 inventory_enabled）────────────
+// 供商品管理頁「全選 → 開啟食材控管 / 關閉食材控管」按鈕使用
+// 只影響現場 POS / Web POS，不影響 LINE 點餐
+
+// 取得商品管理頁已勾選的商品 id 陣列
+function productsGetSelected() {
+  return Array.from(document.querySelectorAll('.product-row-check:checked'))
+    .map(cb => Number(cb.dataset.productId))
+    .filter(Boolean);
+}
+
+// 更新選取數量顯示
+function updateProductsSelectedCount() {
+  const count = productsGetSelected().length;
+  const el = document.getElementById('products-selected-count');
+  if (el) el.textContent = count > 0 ? `（已選 ${count} 個商品）` : '（未選取商品）';
+  // 同步全選 checkbox 狀態
+  const all = document.querySelectorAll('.product-row-check');
+  const chkAll = document.getElementById('products-check-all');
+  if (chkAll && all.length > 0) chkAll.indeterminate = count > 0 && count < all.length;
+  if (chkAll && all.length > 0) chkAll.checked = count === all.length;
+}
+
+function productsToggleAll(checked) {
+  document.querySelectorAll('.product-row-check').forEach(cb => { cb.checked = checked; });
+  updateProductsSelectedCount();
+}
+
+function productsSelectAll()   { productsToggleAll(true);  }
+function productsDeselectAll() { productsToggleAll(false); }
+
+// 批量套用食材控管細節設定（inventory_enabled=1 + allocated_grams + low_stock_alert）
+async function applyInventorySettings() {
+  const ids = productsGetSelected();
+  if (!ids.length) { showToast('請先勾選商品', 'error'); return; }
+  const gramsVal = document.getElementById('inv-allocated-grams')?.value?.trim();
+  const alertVal = document.getElementById('inv-low-stock-alert')?.value?.trim();
+  const grams = Number(gramsVal);
+  const alertN = Number(alertVal);
+  if (!gramsVal || grams <= 0) { showToast('每份分配克數必須 > 0', 'error'); return; }
+  if (alertVal === '' || alertN < 0) { showToast('低庫存警戒份數必須 >= 0', 'error'); return; }
+  if (!confirm(
+    `即將套用食材控管設定：\n已選商品：${ids.length} 個\n每份分配克數：${grams}g\n低庫存警戒：${alertN} 份\n並啟用食材控管\n\n確定套用？`
+  )) return;
+  try {
+    const res = await apiFetch('/api/products/batch-inventory-settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids, inventory_enabled: 1, allocated_grams: grams, low_stock_alert: alertN })
+    });
+    const data = await res.json();
+    if (data.success) {
+      showToast(`✅ 食材控管設定已套用：${data.updated} 筆更新成功`, 'success');
+      loadProductsPage();
+    } else {
+      showToast(`❌ 套用失敗：${data.message}`, 'error');
+    }
+  } catch(e) {
+    showToast(`❌ 套用失敗：${e.message}`, 'error');
+  }
+}
+
+async function batchInventoryControl(enableFlag) {
+  const ids = productsGetSelected();
+  if (!ids.length) { showToast('請先勾選商品', 'error'); return; }
+  const label = enableFlag ? '開啟食材控管' : '關閉食材控管';
+  if (!confirm(`即將對 ${ids.length} 個商品「${label}」。\n此操作只影響現場 POS / Web POS，不影響 LINE 今日份數與預購數量。\n確定繼續？`)) return;
+  try {
+    const res = await apiFetch('/api/products/batch-inventory-control', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids, inventory_enabled: enableFlag ? 1 : 0 })
+    });
+    const data = await res.json();
+    if (data.success) {
+      showToast(`✅ ${label}：${data.updated} 筆更新成功`, 'success');
+      loadProductsPage();
+    } else {
+      showToast(`❌ ${label} 失敗：${data.message}`, 'error');
+    }
+  } catch(e) {
+    showToast(`❌ 批量更新失敗：${e.message}`, 'error');
+  }
+}
+
+// ── 初始化 LINE 商品管理（showPage 觸發）────────────────
 // ── 食材庫存管理 ──────────────────────────────────────────
 let _ingredients = [];
 let _ingSearchQuery = '';
@@ -3155,7 +4960,7 @@ async function loadIngredientsPage() {
   if (!el) return;
   el.innerHTML = '<div class="ing-loading"><span>載入中…</span></div>';
   try {
-    const res  = await fetch('/api/ingredients');
+    const res  = await apiFetch('/api/ingredients');
     const json = await res.json();
     _ingredients = json.data || [];
     renderIngredientsList(_ingredients);
@@ -3312,7 +5117,7 @@ async function submitNewIngredient(btn) {
   if (!name) { showToast('請輸入食材名稱', 'error'); return; }
   btn.disabled = true; btn.textContent = '建立中…';
   try {
-    const res = await fetch('/api/ingredients', { method:'POST', headers:{'Content-Type':'application/json'},
+    const res = await apiFetch('/api/ingredients', { method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ name, unit, initial_stock: stock, low_stock_threshold: threshold, default_thaw_hours: thawHours }) });
     const j = await res.json();
     if (j.success) {
@@ -3375,7 +5180,7 @@ async function submitEditIngredient(id, btn) {
   if (!name) { showToast('請輸入食材名稱', 'error'); return; }
   btn.disabled=true; btn.textContent='儲存中…';
   try {
-    const res = await fetch(`/api/ingredients/${id}`, { method:'PUT', headers:{'Content-Type':'application/json'},
+    const res = await apiFetch(`/api/ingredients/${id}`, { method:'PUT', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ name, unit, low_stock_threshold: threshold, default_thaw_hours: thawHours }) });
     const j = await res.json();
     if (j.success) { showToast('✅ 已更新', 'success'); btn.closest('.ing-modal-overlay').remove(); loadIngredientsPage(); }
@@ -3386,7 +5191,7 @@ async function submitEditIngredient(id, btn) {
 async function deleteIngredient(id, name) {
   if (!confirm(`確定刪除「${name}」？此操作無法復原。`)) return;
   try {
-    const res = await fetch(`/api/ingredients/${id}`, { method:'DELETE' });
+    const res = await apiFetch(`/api/ingredients/${id}`, { method:'DELETE' });
     const j = await res.json();
     if (j.success) { showToast(`✅ 已刪除「${name}」`, 'success'); loadIngredientsPage(); }
     else showToast(j.message||'刪除失敗', 'error');
@@ -3478,7 +5283,7 @@ async function submitIngAction(id, action, btn) {
   }
   btn.disabled=true; btn.textContent='執行中…';
   try {
-    const res = await fetch(`/api/ingredients/${id}/${action}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const res = await apiFetch(`/api/ingredients/${id}/${action}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
     const j = await res.json();
     const labels = { purchase:'進貨入庫', 'freeze-to-thaw':'轉解凍中', 'thaw-complete':'完成解凍', scrap:'報廢' };
     if (j.success) { showToast(`✅ ${labels[action]}完成`, 'success'); btn.closest('.ing-modal-overlay').remove(); loadIngredientsPage(); notifyInventoryChanged(); }
@@ -3549,7 +5354,7 @@ async function submitBatchPurchase(btn) {
   let ok=0, fail=0;
   for (const item of items) {
     try {
-      const res = await fetch(`/api/ingredients/${item.id}/purchase`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ amount: item.amount }) });
+      const res = await apiFetch(`/api/ingredients/${item.id}/purchase`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ amount: item.amount }) });
       const j = await res.json();
       if (j.success) ok++; else fail++;
     } catch(e) { fail++; }
@@ -3575,7 +5380,7 @@ async function openIngredientLogsModal() {
   requestAnimationFrame(() => overlay.classList.add('open'));
 
   try {
-    const res  = await fetch('/api/ingredients/logs/all?limit=200');
+    const res  = await apiFetch('/api/ingredients/logs/all?limit=200');
     const json = await res.json();
     const rows = (json.data||[]);
     const typeMap = {
@@ -3636,9 +5441,9 @@ async function openFormulaManagerModal() {
 
   try {
     const [ingRes, fmRes, prodRes] = await Promise.all([
-      fetch('/api/ingredients').then(r=>r.json()),
-      fetch('/api/ingredients/formulas/all').then(r=>r.json()),
-      fetch('/api/products').then(r=>r.json())
+      apiFetch('/api/ingredients').then(r=>r.json()),
+      apiFetch('/api/ingredients/formulas/all').then(r=>r.json()),
+      apiFetch('/api/products').then(r=>r.json())
     ]);
     const ings = ingRes.data || [];
     const fms  = fmRes.data  || [];
@@ -3684,7 +5489,7 @@ async function addFormula() {
   const iid = document.getElementById('fml-ingid')?.value;
   const amt = document.getElementById('fml-amt')?.value;
   if (!pid||!iid||!amt) { showToast('請填寫所有欄位', 'error'); return; }
-  const res  = await fetch('/api/ingredients/formulas/add', { method:'POST', headers:{'Content-Type':'application/json'},
+  const res  = await apiFetch('/api/ingredients/formulas/add', { method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ product_id:Number(pid), ingredient_id:Number(iid), amount_per_unit:Number(amt) }) });
   const json = await res.json();
   if (json.success) {
@@ -3695,7 +5500,7 @@ async function addFormula() {
 
 async function deleteFormula(id, btn) {
   if (!confirm('確定刪除此扣料公式？')) return;
-  const res = await fetch(`/api/ingredients/formulas/${id}`, { method:'DELETE' });
+  const res = await apiFetch(`/api/ingredients/formulas/${id}`, { method:'DELETE' });
   const json = await res.json();
   if (json.success) { btn.closest('tr').remove(); showToast('✅ 已刪除', 'success'); }
 }
@@ -3814,9 +5619,24 @@ async function submitImport(type, btn) {
   if (!rows || !rows.length) { showToast('請先選擇 CSV 檔案', 'error'); return; }
   btn.disabled = true; btn.textContent = '匯入中…';
   try {
-    const res  = await fetch(`/api/import/${type}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ rows }) });
-    const json = await res.json();
+    const res  = await apiFetch(`/api/import/${type}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ rows }) });
     const resultDiv = document.getElementById(`_import-result-${type}`);
+
+    // ── v18-r1-fix1：先檢查 HTTP 狀態，處理 403 授權擋住的情況 ──
+    if (!res.ok) {
+      let errMsg = `HTTP ${res.status}`;
+      try {
+        const errJson = await res.json();
+        errMsg = errJson.message || errMsg;
+      } catch {}
+      resultDiv.innerHTML = `<div style="color:#f87171">❌ 匯入失敗：${escHtml(errMsg)}</div>`;
+      resultDiv.style.cssText = 'display:block;background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.3);border-radius:8px;padding:12px;margin-top:10px';
+      showToast('匯入失敗：' + errMsg, 'error');
+      btn.disabled = false; btn.textContent = '開始匯入';
+      return;
+    }
+
+    const json = await res.json();
     if (json.success) {
       const parts = [];
       if (json.added)   parts.push(`新增 ${json.added} 筆`);
@@ -3828,15 +5648,16 @@ async function submitImport(type, btn) {
       }
       resultDiv.innerHTML = html;
       resultDiv.style.cssText = 'display:block;background:rgba(74,222,128,.08);border:1px solid rgba(74,222,128,.3);border-radius:8px;padding:12px;margin-top:10px';
-      // reload relevant data
+      // reload relevant data（只有真的寫入成功才重新載入）
       if (type === 'products' || type === 'product-inventory') { loadInventoryPage(); if (typeof loadProductsPage === 'function') loadProductsPage(); }
       if (type === 'ingredients' || type === 'ingredient-formulas') loadIngredientsPage();
       showToast('匯入完成', 'success');
     } else {
       resultDiv.innerHTML = `<div style="color:#f87171">❌ 匯入失敗：${escHtml(json.message)}</div>`;
       resultDiv.style.cssText = 'display:block;background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.3);border-radius:8px;padding:12px;margin-top:10px';
+      showToast('匯入失敗：' + (json.message || ''), 'error');
     }
-  } catch(e) { showToast('網路錯誤', 'error'); }
+  } catch(e) { showToast('網路錯誤：' + e.message, 'error'); }
   btn.disabled = false; btn.textContent = '開始匯入';
 }
 
@@ -3876,12 +5697,16 @@ function notifyInventoryChanged() {
   }
 })();
 
-// ── v18：WSS Client — 接收後端 order_status_changed 後自動刷新訂單頁 ──────────
+// ── v18 fix6：WSS Client — 帶 token 連線，確保 store_id 綁定 ──────────────
 (function initWebPosWss() {
   let _wssRetry = 0;
   function connectWss() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url   = proto + '//' + location.host + '/orders';
+    // ★ fix6：帶 JWT token，讓 server 綁定 store_id
+    // 若尚未登入（無 token），沿用預設 store_001（向後相容）
+    const token = getToken();
+    const url   = proto + '//' + location.host + '/orders'
+      + (token ? '?token=' + encodeURIComponent(token) : '');
     let ws;
     try { ws = new WebSocket(url); } catch(e) { return; }
 
@@ -3940,3 +5765,177 @@ function notifyInventoryChanged() {
     connectWss();
   }
 })();
+
+// ═══════════════════════════════════════════════════════
+// fix16c-hotfix: 金流 API 設定頁（8個 provider）
+// ═══════════════════════════════════════════════════════
+
+const GATEWAY_PROVIDERS = [
+  { code: 'linepay',             name: 'LINE Pay',        icon: '💚' },
+  { code: 'ecpay',               name: '綠界 ECPay',      icon: '🟢' },
+  { code: 'newebpay',            name: '藍新 NewebPay',   icon: '🔵' },
+  { code: 'jkopay',              name: '街口支付',         icon: '🟠' },
+  { code: 'pxpay',               name: '全支付',           icon: '🔴' },
+  { code: 'applepay',            name: 'Apple Pay',       icon: '🍎' },
+  { code: 'googlepay',           name: 'Google Pay',      icon: '🎨' },
+  { code: 'creditcard_terminal', name: '信用卡刷卡機',     icon: '💳' },
+];
+
+async function loadGatewayCards() {
+  const container = document.getElementById('gatewayCards');
+  if (!container) return;
+
+  if (!hasFeature('payment_api')) {
+    container.innerHTML =
+      '<div style="grid-column:1/-1;text-align:center;padding:40px;color:#ef4444">' +
+      '🔒 金流 API 功能尚未授權，請聯絡系統管理員升級方案。</div>';
+    return;
+  }
+
+  container.innerHTML = '<div style="grid-column:1/-1;color:var(--text-secondary,#64748b);padding:20px">載入中...</div>';
+
+  let gwMap = {};
+  try {
+    const res  = await apiFetch('/api/payment-gateways');
+    if (res && res.ok) {
+      const json = await res.json();
+      if (json.success) {
+        (json.data || []).forEach(g => { gwMap[g.code] = g; });
+      }
+    }
+  } catch {}
+
+  const origin = window.location.origin;
+  container.innerHTML = GATEWAY_PROVIDERS.map(p => {
+    const gw = gwMap[p.code] || {};
+    // fix16e: gwId 已移除，只使用 provider code
+    return `
+    <div class="settings-card" style="border:1px solid var(--border,#2a2d3e)">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+        <span style="font-size:1.4rem">${p.icon}</span>
+        <div>
+          <div style="font-weight:700;font-size:.95rem">${escHtml(p.name)}</div>
+          <div style="font-size:.75rem;color:var(--text-secondary,#64748b)">${p.code}</div>
+        </div>
+        <label class="pm-toggle" style="margin-left:auto">
+          <input type="checkbox" id="gw-enabled-${p.code}" ${gw.is_active ? 'checked' : ''}>
+          <span class="pm-toggle-slider"></span>
+        </label>
+      </div>
+
+      <div style="display:grid;gap:10px">
+        <div>
+          <label style="font-size:.78rem;color:var(--text-secondary,#64748b)">模式</label>
+          <select id="gw-mode-${p.code}" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid var(--border,#2a2d3e);background:var(--bg,#0f1117);color:var(--text-primary,#e2e8f0);font-size:.85rem">
+            <option value="test"  ${(gw.mode||'test')==='test'?'selected':''}>🧪 測試模式</option>
+            <option value="live"  ${(gw.mode||'')==='live'?'selected':''}>🟢 正式模式</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:.78rem;color:var(--text-secondary,#64748b)">Merchant ID / Channel ID</label>
+          <input id="gw-mid-${p.code}" type="text" value="${escHtml(gw.merchant_id||'')}" placeholder="輸入商店代號"
+            style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid var(--border,#2a2d3e);background:var(--bg,#0f1117);color:var(--text-primary,#e2e8f0);font-size:.85rem;box-sizing:border-box">
+        </div>
+        <div>
+          <label style="font-size:.78rem;color:var(--text-secondary,#64748b)">API Key${gw.api_key?'（●●●●'+gw.api_key.slice(-4)+'）':''}</label>
+          <input id="gw-apikey-${p.code}" type="password" value="" placeholder="留空表示不更新"
+            style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid var(--border,#2a2d3e);background:var(--bg,#0f1117);color:var(--text-primary,#e2e8f0);font-size:.85rem;box-sizing:border-box">
+        </div>
+        <div>
+          <label style="font-size:.78rem;color:var(--text-secondary,#64748b)">Secret Key${gw.secret_key?'（●●●●'+gw.secret_key.slice(-4)+'）':''}</label>
+          <input id="gw-secret-${p.code}" type="password" value="" placeholder="留空表示不更新"
+            style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid var(--border,#2a2d3e);background:var(--bg,#0f1117);color:var(--text-primary,#e2e8f0);font-size:.85rem;box-sizing:border-box">
+        </div>
+        <div>
+          <label style="font-size:.78rem;color:var(--text-secondary,#64748b)">Webhook URL</label>
+          <input id="gw-webhook-${p.code}" type="text"
+            value="${escHtml(gw.webhook_url || origin + '/api/' + p.code + '/webhook')}"
+            style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid var(--border,#2a2d3e);background:var(--bg,#0f1117);color:var(--text-primary,#e2e8f0);font-size:.85rem;box-sizing:border-box">
+        </div>
+        <div>
+          <label style="font-size:.78rem;color:var(--text-secondary,#64748b)">Callback URL（LINE Pay 付款成功 redirect）</label>
+          <input id="gw-callback-${p.code}" type="text"
+            value="${escHtml(gw.callback_url || origin + '/api/' + p.code + '/confirm')}"
+            style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid var(--border,#2a2d3e);background:var(--bg,#0f1117);color:var(--text-primary,#e2e8f0);font-size:.85rem;box-sizing:border-box">
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
+          <button class="btn-primary" style="flex:1;min-width:80px;font-size:.82rem"
+            onclick="saveGateway('${p.code}')">💾 儲存</button>
+          <button class="btn-secondary" style="font-size:.82rem"
+            onclick="testGateway('${p.code}')">🔗 測試連線</button>
+        </div>
+        <div id="gw-result-${p.code}" style="font-size:.78rem;color:var(--text-secondary,#64748b)"></div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// fix16d: saveGateway/testGateway 改用 provider code（不用 id）
+// PUT /api/payment-gateways/:provider（upsert，後端 INSERT OR IGNORE）
+async function saveGateway(code) {
+  const g = (k) => document.getElementById('gw-' + k + '-' + code);
+  const resEl = document.getElementById('gw-result-' + code);
+  if (!g('enabled')) { console.warn('saveGateway: element not found for', code); return; }
+
+  const body = {
+    is_active:    g('enabled').checked ? 1 : 0,
+    mode:         g('mode')?.value     || 'test',
+    merchant_id:  (g('mid')?.value     || '').trim(),
+    webhook_url:  (g('webhook')?.value || '').trim(),
+    callback_url: (g('callback')?.value|| '').trim(),
+  };
+  const apiKey = g('apikey')?.value || '';
+  const secret = g('secret')?.value || '';
+  if (apiKey && !apiKey.startsWith('••••')) body.api_key    = apiKey;
+  if (secret && !secret.startsWith('••••')) body.secret_key = secret;
+
+  if (resEl) resEl.textContent = '儲存中...';
+  try {
+    // fix16d: 使用 provider code 路徑（不用 id）
+    const res  = await apiFetch('/api/payment-gateways/' + code, { method: 'PUT', body: JSON.stringify(body) });
+    if (!res || !res.ok) {
+      if (resEl) resEl.textContent = '❌ 儲存失敗（HTTP ' + (res?.status || '?') + '）';
+      return;
+    }
+    const json = await res.json();
+    if (resEl) resEl.textContent = json.success ? '✅ 已儲存' : '❌ ' + json.message;
+    if (json.success) setTimeout(() => loadGatewayCards(), 800);
+  } catch(e) {
+    if (resEl) resEl.textContent = '❌ ' + e.message;
+  }
+}
+
+// fix16d: testGateway 改用 provider code 路徑
+async function testGateway(code) {
+  const resEl = document.getElementById('gw-result-' + code);
+  if (resEl) resEl.innerHTML = '<span style="color:#94a3b8">測試中…</span>';
+  try {
+    // 對 linepay 直接呼叫真實測試 API，並傳入目前表單的 mode
+    let body = {};
+    if (code === 'linepay') {
+      const modeEl   = document.getElementById(`gw-mode-${code}`);
+      const midEl    = document.getElementById(`gw-mid-${code}`);
+      const secretEl = document.getElementById(`gw-secret-${code}`);
+      if (modeEl)   body.mode           = modeEl.value;
+      if (midEl)    body.channel_id     = midEl.value;
+      if (secretEl && secretEl.value) body.channel_secret = secretEl.value;
+      // 若 secret 欄位空白，後端會從 DB 讀取
+    }
+    const res  = await apiFetch('/api/payment-gateways/' + code + '/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json();
+    if (resEl) {
+      const color = json.success ? '#06C755' : '#ef4444';
+      const icon  = json.success ? '✅' : '❌';
+      resEl.innerHTML = `<span style="color:${color};font-weight:600">${icon} ${json.message || ''}</span>`;
+      if (json.return_code && !json.success) {
+        resEl.innerHTML += `<br><span style="font-size:11px;color:#94a3b8">LINE Pay returnCode: ${json.return_code} | ${json.apiBase || ''}</span>`;
+      }
+    }
+  } catch(e) {
+    if (resEl) resEl.innerHTML = `<span style="color:#ef4444">❌ ${e.message}</span>`;
+  }
+}

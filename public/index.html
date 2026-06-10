@@ -32,11 +32,28 @@
     <button class="nav-btn" data-page="categories" onclick="showPage('categories')">
       <span class="nav-icon">🏷️</span><span>分類</span>
     </button>
+    <button class="nav-btn" id="nav-btn-reports" data-page="reports" onclick="showPage('reports')">
+      <span class="nav-icon">📊</span><span>報表分析</span>
+    </button>
+    <button class="nav-btn" data-page="line_products" id="nav-btn-line_products" onclick="showPage('line_products')" style="display:none">
+      <span class="nav-icon">📲</span><span>LINE商品</span>
+    </button>
+    <button class="nav-btn" data-page="line_preorders" id="nav-btn-line_preorders" onclick="showPage('line_preorders')" style="display:none">
+      <span class="nav-icon">📅</span><span>LINE預購</span>
+    </button>
     <button class="nav-btn" data-page="settings" onclick="showPage('settings')">
       <span class="nav-icon">⚙️</span><span>設定</span>
     </button>
   </nav>
-  <div class="topbar-right">
+  <div class="topbar-right" style="display:flex;align-items:center;gap:10px">
+    <div id="topbar-store-info" style="display:flex;align-items:center;gap:6px;font-size:.8rem;color:var(--text-secondary,#94a3b8)">
+      <!-- 登入後由 updateTopbarStoreInfo() 填入 -->
+    </div>
+    <button onclick="posLogout()" style="padding:4px 10px;border-radius:6px;border:1px solid rgba(255,255,255,.15);background:transparent;color:var(--text-secondary,#94a3b8);cursor:pointer;font-size:.78rem;transition:all .2s"
+      onmouseover="this.style.borderColor='#ef4444';this.style.color='#ef4444'"
+      onmouseout="this.style.borderColor='rgba(255,255,255,.15)';this.style.color='var(--text-secondary,#94a3b8)'">
+      🚪 登出
+    </button>
     <span class="clock" id="clock">--:--</span>
   </div>
 </header>
@@ -247,24 +264,297 @@
       <h1 class="page-title">📦 商品管理</h1>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <button class="btn-primary" onclick="openProductModal()">＋ 新增商品</button>
+        <button class="btn-secondary" id="btnLineProductsMgr" onclick="showPage('line_products')" style="background:#06C755;color:#fff;border-color:#06C755;display:none">📲 LINE 商品管理</button>
         <button class="btn-secondary" onclick="openImportModal('products')">📥 匯入商品</button>
         <button class="btn-secondary" onclick="exportCsv('products')">📤 匯出商品</button>
         <button class="ing-btn-ghost" onclick="downloadTemplate('products')">📋 下載範本</button>
+      </div>
+    </div>
+    <!-- 批量食材控管區（現場 POS / Web POS 專用）-->
+    <div id="products-batch-panel" style="background:var(--bg-card,#1e293b);border:1px solid var(--border,#334155);border-radius:8px;padding:10px 14px;margin-bottom:12px">
+      <!-- 第一列：選取控制 -->
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+        <span style="font-size:12px;font-weight:700;color:var(--text-secondary,#94a3b8)">批量操作</span>
+        <span id="products-selected-count" style="font-size:12px;color:#a78bfa;font-weight:600">（未選取商品）</span>
+        <button onclick="productsSelectAll()" style="font-size:12px;padding:4px 10px;background:var(--bg-base,#0f172a);color:var(--text-secondary,#94a3b8);border:1px solid var(--border,#334155);border-radius:5px;cursor:pointer">全選</button>
+        <button onclick="productsDeselectAll()" style="font-size:12px;padding:4px 10px;background:var(--bg-base,#0f172a);color:var(--text-secondary,#94a3b8);border:1px solid var(--border,#334155);border-radius:5px;cursor:pointer">取消全選</button>
+      </div>
+      <!-- 第二列：食材控管細節設定 -->
+      <div style="display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;padding-top:8px;border-top:1px solid var(--border,#334155)">
+        <span style="font-size:11px;color:#a78bfa;align-self:center;white-space:nowrap">🔬 食材控管（POS）：</span>
+        <div>
+          <div style="font-size:10px;color:var(--text-muted,#64748b);margin-bottom:3px">每份分配克數(g)</div>
+          <input type="number" id="inv-allocated-grams" min="1" step="1" placeholder="250"
+            style="width:90px;padding:5px 8px;border:1px solid rgba(167,139,250,.5);border-radius:5px;font-size:13px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">
+        </div>
+        <div>
+          <div style="font-size:10px;color:var(--text-muted,#64748b);margin-bottom:3px">低庫存警戒(份)</div>
+          <input type="number" id="inv-low-stock-alert" min="0" step="1" placeholder="5"
+            style="width:80px;padding:5px 8px;border:1px solid rgba(167,139,250,.5);border-radius:5px;font-size:13px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">
+        </div>
+        <button onclick="applyInventorySettings()" style="padding:5px 14px;background:#a78bfa;color:#fff;border:none;border-radius:5px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap">💾 套用設定</button>
+        <span style="font-size:11px;color:var(--text-muted,#64748b);align-self:center">│</span>
+        <button onclick="batchInventoryControl(true)" style="font-size:12px;padding:4px 12px;background:rgba(167,139,250,.15);color:#a78bfa;border:1px solid rgba(167,139,250,.5);border-radius:5px;cursor:pointer;white-space:nowrap">✅ 開啟食材控管</button>
+        <button onclick="batchInventoryControl(false)" style="font-size:12px;padding:4px 12px;background:var(--bg-base,#0f172a);color:var(--text-muted,#64748b);border:1px solid var(--border,#334155);border-radius:5px;cursor:pointer;white-space:nowrap">❌ 關閉食材控管</button>
       </div>
     </div>
     <div class="table-wrap">
       <table class="data-table">
         <thead>
           <tr>
+            <th style="width:36px"><input type="checkbox" id="products-check-all" onchange="productsToggleAll(this.checked)" title="全選／取消全選"></th>
             <th style="width:60px">圖片</th><th>商品名稱</th><th>分類</th><th>價格</th><th>狀態</th><th>操作</th>
           </tr>
         </thead>
         <tbody id="productsBody">
-          <tr><td colspan="5" class="table-empty">載入中...</td></tr>
+          <tr><td colspan="7" class="table-empty">載入中...</td></tr>
         </tbody>
       </table>
     </div>
   </div>
+</div>
+
+<!-- LINE 商品管理頁 (v1) -->
+<div id="page-line_products" class="page">
+  <div class="page-inner" style="max-width:100%;padding:16px 20px">
+    <div class="page-toolbar" style="margin-bottom:16px">
+      <h1 class="page-title">📲 LINE 商品管理</h1>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <button class="btn-secondary" onclick="showPage('products')">← 返回商品管理</button>
+        <button class="btn-secondary" onclick="loadLineProductsPage()">🔄 重新整理</button>
+        <button class="btn-primary" style="background:#ff6d00;border-color:#ff6d00" onclick="resetAllLineQuota()">⟳ 全部重置已售</button>
+      </div>
+    </div>
+
+    <!-- 批量操作區 -->
+    <div id="lpm-batch-panel" style="background:var(--bg-card,#1e293b);border:1px solid var(--border,#334155);border-radius:10px;padding:14px 16px;margin-bottom:14px">
+      <!-- Tab 切換：今日販售 / 預購管理 -->
+      <div style="display:flex;gap:0;margin-bottom:14px;border-bottom:2px solid var(--border,#334155)">
+        <button id="lpm-tab-today" onclick="lpmSwitchTab('today')"
+          style="padding:8px 18px;font-size:13px;font-weight:700;border:none;background:none;color:var(--accent,#3b82f6);border-bottom:2px solid var(--accent,#3b82f6);margin-bottom:-2px;cursor:pointer">
+          📦 今日販售管理
+        </button>
+        <button id="lpm-tab-preorder" onclick="lpmSwitchTab('preorder')"
+          style="padding:8px 18px;font-size:13px;font-weight:700;border:none;background:none;color:var(--text-muted,#64748b);border-bottom:2px solid transparent;margin-bottom:-2px;cursor:pointer">
+          📅 預購數量管理
+        </button>
+      </div>
+
+      <!-- 選取控制（兩個 Tab 共用）-->
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+        <span style="font-size:13px;font-weight:700;color:var(--text-secondary,#94a3b8)">批量操作</span>
+        <span id="lpm-selected-count" style="font-size:12px;color:#06C755;font-weight:600">（未選取商品）</span>
+        <button class="btn-secondary" onclick="lpmSelectAll()" style="font-size:12px;padding:4px 10px">全選</button>
+        <button class="btn-secondary" onclick="lpmDeselectAll()" style="font-size:12px;padding:4px 10px">取消全選</button>
+      </div>
+
+      <!-- ══ 今日販售管理：批量操作（Tab=today 時顯示）══ -->
+      <div id="lpm-today-controls">
+        <!-- 輸入區 + 套用設定主按鈕 -->
+        <div style="display:flex;gap:10px;align-items:flex-end;margin-bottom:10px;flex-wrap:wrap">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;flex:1">
+            <div>
+              <div style="font-size:10px;color:var(--text-muted,#64748b);margin-bottom:3px">今日開放份數</div>
+              <input type="number" id="lpm-today-daily" min="0" placeholder="0"
+                style="width:80px;padding:6px 8px;border:1px solid var(--border,#334155);border-radius:6px;font-size:13px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">
+            </div>
+            <div>
+              <div style="font-size:10px;color:var(--text-muted,#64748b);margin-bottom:3px">快售完門檻</div>
+              <input type="number" id="lpm-today-low" min="0" placeholder="0"
+                style="width:80px;padding:6px 8px;border:1px solid var(--border,#334155);border-radius:6px;font-size:13px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">
+            </div>
+            <div>
+              <div style="font-size:10px;color:var(--text-muted,#64748b);margin-bottom:3px">供應充足門檻</div>
+              <input type="number" id="lpm-today-high" min="0" placeholder="0"
+                style="width:80px;padding:6px 8px;border:1px solid var(--border,#334155);border-radius:6px;font-size:13px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">
+            </div>
+            <div>
+              <div style="font-size:10px;color:var(--text-muted,#64748b);margin-bottom:3px">販售時段</div>
+              <div style="display:flex;gap:4px;align-items:center">
+                <input type="time" id="lpm-today-start"
+                  style="width:100px;padding:6px 8px;border:1px solid var(--border,#334155);border-radius:6px;font-size:13px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">
+                <span style="font-size:11px;color:var(--text-muted,#64748b)">~</span>
+                <input type="time" id="lpm-today-end"
+                  style="width:100px;padding:6px 8px;border:1px solid var(--border,#334155);border-radius:6px;font-size:13px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">
+              </div>
+            </div>
+          </div>
+          <button onclick="lpmApplyAll()" style="padding:10px 20px;background:#06C755;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;white-space:nowrap;box-shadow:0 2px 8px rgba(6,199,85,.35);flex-shrink:0">
+            💾 套用今日設定
+          </button>
+        </div>
+        <!-- 單項操作 -->
+        <div style="display:flex;gap:6px;flex-wrap:wrap;padding-top:10px;border-top:1px solid var(--border,#334155)">
+          <span style="font-size:11px;color:var(--text-muted,#64748b);align-self:center">單項：</span>
+          <button class="btn-secondary" onclick="lpmBatch('daily')" style="font-size:11px;padding:4px 8px;white-space:nowrap">只更新份數</button>
+          <button class="btn-secondary" onclick="lpmBatch('low')" style="font-size:11px;padding:4px 8px;white-space:nowrap">只更新快售完門檻</button>
+          <button class="btn-secondary" onclick="lpmBatch('high')" style="font-size:11px;padding:4px 8px;white-space:nowrap">只更新充足門檻</button>
+          <button class="btn-secondary" onclick="lpmBatch('sell_time')" style="font-size:11px;padding:4px 8px;white-space:nowrap">只更新販售時段</button>
+          <button class="btn-secondary" onclick="lpmBatch('reset_sold')" style="font-size:11px;padding:4px 8px;background:#ff6d00;border-color:#ff6d00;color:#fff;white-space:nowrap">⟳ 重置已售</button>
+          <button class="btn-secondary" onclick="lpmBatch('enable')" style="font-size:11px;padding:4px 8px;background:#06C755;border-color:#06C755;color:#fff;white-space:nowrap">✅ 開啟 LINE 販售</button>
+          <button class="btn-secondary" onclick="lpmBatch('disable')" style="font-size:11px;padding:4px 8px;background:#e53935;border-color:#e53935;color:#fff;white-space:nowrap">❌ 關閉 LINE 販售</button>
+          <button class="btn-secondary" onclick="lpmBatch('quota_on')" style="font-size:11px;padding:4px 8px;background:#7c3aed;border-color:#7c3aed;color:#fff;white-space:nowrap">只啟用份數管理</button>
+          <button class="btn-secondary" onclick="lpmBatch('quota_off')" style="font-size:11px;padding:4px 8px;white-space:nowrap">只停用份數管理</button>
+        </div>
+      </div>
+
+      <!-- ══ 預購數量管理：批量操作（Tab=preorder 時顯示）══ -->
+      <div id="lpm-preorder-controls" style="display:none">
+        <!-- 輸入區 + 套用預購設定主按鈕 -->
+        <div style="display:flex;gap:10px;align-items:flex-end;margin-bottom:10px;flex-wrap:wrap">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;flex:1">
+            <div>
+              <div style="font-size:10px;color:#a78bfa;margin-bottom:3px">每日預購數量</div>
+              <input type="number" id="lpm-preorder-daily" min="0" placeholder="0"
+                style="width:80px;padding:6px 8px;border:1px solid #7c3aed;border-radius:6px;font-size:13px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">
+            </div>
+            <div>
+              <div style="font-size:10px;color:#a78bfa;margin-bottom:3px">預購快滿門檻</div>
+              <input type="number" id="lpm-preorder-low" min="0" placeholder="0"
+                style="width:80px;padding:6px 8px;border:1px solid #7c3aed;border-radius:6px;font-size:13px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">
+            </div>
+            <div>
+              <div style="font-size:10px;color:#a78bfa;margin-bottom:3px">預購充足門檻</div>
+              <input type="number" id="lpm-preorder-high" min="0" placeholder="0"
+                style="width:80px;padding:6px 8px;border:1px solid #7c3aed;border-radius:6px;font-size:13px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">
+            </div>
+          </div>
+          <button onclick="lpmApplyPreorder()" style="padding:10px 20px;background:#7c3aed;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;white-space:nowrap;box-shadow:0 2px 8px rgba(124,58,237,.35);flex-shrink:0">
+            📅 套用預購設定
+          </button>
+        </div>
+        <!-- 單項操作 -->
+        <div style="display:flex;gap:6px;flex-wrap:wrap;padding-top:10px;border-top:1px solid var(--border,#334155)">
+          <span style="font-size:11px;color:var(--text-muted,#64748b);align-self:center">單項：</span>
+          <button onclick="lpmBatch('preorder_daily')" style="font-size:11px;padding:4px 8px;background:#7c3aed;color:#fff;border:none;border-radius:4px;cursor:pointer;white-space:nowrap">只更新預購數量</button>
+          <button onclick="lpmBatch('preorder_low')" style="font-size:11px;padding:4px 8px;background:var(--bg-base,#0f172a);color:var(--text-secondary,#94a3b8);border:1px solid var(--border,#334155);border-radius:4px;cursor:pointer;white-space:nowrap">只更新預購快滿門檻</button>
+          <button onclick="lpmBatch('preorder_high')" style="font-size:11px;padding:4px 8px;background:var(--bg-base,#0f172a);color:var(--text-secondary,#94a3b8);border:1px solid var(--border,#334155);border-radius:4px;cursor:pointer;white-space:nowrap">只更新預購充足門檻</button>
+          <button onclick="lpmBatch('preorder_reset')" style="font-size:11px;padding:4px 8px;background:#ff6d00;color:#fff;border:none;border-radius:4px;cursor:pointer;white-space:nowrap">⟳ 重置已預購</button>
+          <button onclick="lpmBatch('preorder_on')" style="font-size:11px;padding:4px 8px;background:#06C755;color:#fff;border:none;border-radius:4px;cursor:pointer;white-space:nowrap">✅ 啟用預購管理</button>
+          <button onclick="lpmBatch('preorder_off')" style="font-size:11px;padding:4px 8px;background:var(--bg-base,#0f172a);color:var(--text-secondary,#94a3b8);border:1px solid var(--border,#334155);border-radius:4px;cursor:pointer;white-space:nowrap">停用預購管理</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 商品總表 -->
+    <div style="overflow-x:auto;border:1px solid var(--border,#334155);border-radius:10px">
+      <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:900px">
+        <thead>
+          <tr style="background:var(--bg-card,#1e293b);border-bottom:1px solid var(--border,#334155)">
+            <th style="padding:10px 8px;text-align:center;width:36px"><input type="checkbox" id="lpm-check-all" onchange="lpmToggleAll(this.checked)"></th>
+            <th style="padding:10px 8px;text-align:center;width:52px">圖片</th>
+            <th style="padding:10px 12px;text-align:left">商品名稱</th>
+            <th style="padding:10px 8px;text-align:center;width:72px">LINE上架</th>
+            <th style="padding:10px 8px;text-align:center;width:72px">份數管理</th>
+            <th style="padding:10px 8px;text-align:center;width:80px">今日份數</th>
+            <th style="padding:10px 8px;text-align:center;width:70px">已售</th>
+            <th style="padding:10px 8px;text-align:center;width:70px">剩餘</th>
+            <th style="padding:10px 8px;text-align:center;width:72px">快售完</th>
+            <th style="padding:10px 8px;text-align:center;width:72px">充足門檻</th>
+            <th style="padding:10px 8px;text-align:center;width:90px">販售開始</th>
+            <th style="padding:10px 8px;text-align:center;width:90px">販售結束</th>
+            <th style="padding:10px 8px;text-align:center;width:90px">目前狀態</th>
+            <th style="padding:10px 8px;text-align:center;width:130px">操作</th>
+          </tr>
+        </thead>
+        <tbody id="lpm-tbody">
+          <tr><td colspan="14" style="text-align:center;padding:40px;color:var(--text-muted,#64748b)">載入中…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- LINE 預購管理頁 (FEATURE-001) -->
+<div id="page-line_preorders" class="page">
+  <div class="page-inner" style="max-width:100%;padding:16px 20px">
+    <div class="page-toolbar" style="margin-bottom:16px">
+      <h1 class="page-title">📅 LINE 預購管理</h1>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <button class="btn-secondary" onclick="loadLinePreorders()">🔄 重新整理</button>
+      </div>
+    </div>
+
+    <!-- 篩選列 -->
+    <div style="background:var(--bg-card,#1e293b);border:1px solid var(--border,#334155);border-radius:10px;padding:12px 16px;margin-bottom:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+      <!-- 快選日期 -->
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn-secondary" id="lpf-today" onclick="lpSetFilter('today')" style="font-size:12px;padding:5px 10px">今天</button>
+        <button class="btn-secondary" id="lpf-tomorrow" onclick="lpSetFilter('tomorrow')" style="font-size:12px;padding:5px 10px">明天</button>
+        <button class="btn-secondary" id="lpf-week" onclick="lpSetFilter('week')" style="font-size:12px;padding:5px 10px">本週</button>
+        <button class="btn-secondary" id="lpf-all" onclick="lpSetFilter('all')" style="font-size:12px;padding:5px 10px;background:var(--accent);color:#fff">全部預購</button>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <label style="font-size:12px;color:var(--text-secondary,#94a3b8)">自訂日期</label>
+        <input type="date" id="lp-date-from" style="padding:5px 8px;border:1px solid var(--border,#334155);border-radius:6px;font-size:12px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">
+        <span style="font-size:12px;color:var(--text-muted,#64748b)">~</span>
+        <input type="date" id="lp-date-to" style="padding:5px 8px;border:1px solid var(--border,#334155);border-radius:6px;font-size:12px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">
+        <button class="btn-secondary" onclick="lpSetFilter('custom')" style="font-size:12px;padding:5px 10px">查詢</button>
+      </div>
+      <div style="display:flex;gap:6px">
+        <select id="lp-filter-mode" onchange="renderLinePreordersTable()" style="padding:5px 8px;border:1px solid var(--border,#334155);border-radius:6px;font-size:12px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">
+          <option value="">全部模式</option>
+          <option value="takeout">外帶</option>
+          <option value="delivery">外送</option>
+        </select>
+        <select id="lp-filter-status" onchange="renderLinePreordersTable()" style="padding:5px 8px;border:1px solid var(--border,#334155);border-radius:6px;font-size:12px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">
+          <option value="">全部狀態</option>
+          <option value="pending">待接單</option>
+          <option value="accepted">已接單</option>
+          <option value="preparing">製作中</option>
+          <option value="ready">可取餐</option>
+          <option value="completed">已完成</option>
+          <option value="cancelled">已取消</option>
+        </select>
+      </div>
+      <span id="lp-count-badge" style="font-size:12px;color:#06C755;font-weight:600;margin-left:auto"></span>
+    </div>
+
+    <!-- 統計卡 -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:14px" id="lp-stats-row">
+      <div style="background:var(--bg-card,#1e293b);border:1px solid var(--border,#334155);border-radius:8px;padding:12px;text-align:center">
+        <div style="font-size:11px;color:var(--text-muted,#64748b)">預購筆數</div>
+        <div style="font-size:22px;font-weight:700" id="lp-stat-total">—</div>
+      </div>
+      <div style="background:var(--bg-card,#1e293b);border:1px solid var(--border,#334155);border-radius:8px;padding:12px;text-align:center">
+        <div style="font-size:11px;color:var(--text-muted,#64748b)">待處理</div>
+        <div style="font-size:22px;font-weight:700;color:#fbbf24" id="lp-stat-pending">—</div>
+      </div>
+      <div style="background:var(--bg-card,#1e293b);border:1px solid var(--border,#334155);border-radius:8px;padding:12px;text-align:center">
+        <div style="font-size:11px;color:var(--text-muted,#64748b)">預購金額</div>
+        <div style="font-size:22px;font-weight:700;color:#06C755" id="lp-stat-revenue">—</div>
+      </div>
+    </div>
+
+    <!-- 預購訂單表 -->
+    <div style="overflow-x:auto;border:1px solid var(--border,#334155);border-radius:10px">
+      <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:960px">
+        <thead>
+          <tr style="background:var(--bg-card,#1e293b);border-bottom:1px solid var(--border,#334155)">
+            <th style="padding:10px 10px;text-align:left;width:140px">訂單編號</th>
+            <th style="padding:10px 8px;text-align:center;width:130px">預購日期時段</th>
+            <th style="padding:10px 8px;text-align:left;width:90px">顧客</th>
+            <th style="padding:10px 8px;text-align:center;width:70px">電話</th>
+            <th style="padding:10px 8px;text-align:center;width:60px">方式</th>
+            <th style="padding:10px 8px;text-align:left">商品明細</th>
+            <th style="padding:10px 8px;text-align:center;width:70px">金額</th>
+            <th style="padding:10px 8px;text-align:center;width:60px">付款</th>
+            <th style="padding:10px 8px;text-align:left;width:80px">備註</th>
+            <th style="padding:10px 8px;text-align:center;width:90px">狀態</th>
+            <th style="padding:10px 8px;text-align:center;width:110px">操作</th>
+          </tr>
+        </thead>
+        <tbody id="lp-tbody">
+          <tr><td colspan="11" style="text-align:center;padding:40px;color:var(--text-muted,#64748b)">載入中…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- 報表分析頁（fix16c-hotfix：全寬老闆儀表板）-->
+<div id="page-reports" class="page">
+  <div id="reports-container"></div>
 </div>
 
 <!-- 設定頁 -->
@@ -276,10 +566,12 @@
     <div class="settings-tabs">
       <button class="settings-tab-btn active" data-stab="basic"    onclick="switchSettingsTab('basic')">🏪 基本設定</button>
       <button class="settings-tab-btn"        data-stab="payment"  onclick="switchSettingsTab('payment')">💳 付款方式</button>
-      <button class="settings-tab-btn"        data-stab="gateway"  onclick="switchSettingsTab('gateway')">🔌 金流設定</button>
+      <button class="settings-tab-btn"        data-stab="gateway"  onclick="switchSettingsTab('gateway')" id="tab-btn-gateway">💳 金流 API</button>
       <button class="settings-tab-btn"        data-stab="platform" onclick="switchSettingsTab('platform')">🛵 外送平台</button>
       <button class="settings-tab-btn"        data-stab="printer"  onclick="switchSettingsTab('printer')">🖨️ 出單機</button>
-      <button class="settings-tab-btn"        data-stab="line_biz" onclick="switchSettingsTab('line_biz')">📡 LINE 營業</button>
+      <button class="settings-tab-btn"        data-stab="line_biz" onclick="switchSettingsTab('line_biz')" id="tab-btn-line_biz">📡 LINE 營業</button>
+      <button class="settings-tab-btn"        data-stab="line_entry" onclick="switchSettingsTab('line_entry')" id="tab-btn-line_entry">📲 LINE 點餐入口</button>
+      <!-- fix10: 店家授權 Tab 已移至 /system-admin，一般店家不可存取 -->
     </div>
 
     <!-- 基本設定 -->
@@ -315,6 +607,16 @@
     </div>
 
     <!-- 付款方式管理 -->
+    <!-- fix12: LINE 點餐入口資訊 -->
+    <div class="settings-tab-panel" id="stab-line_entry" style="display:none">
+      <div class="settings-grid">
+        <div class="settings-card full" id="lineEntryCard">
+          <h3>📲 LINE 點餐入口資訊</h3>
+          <div id="lineEntryContent">載入中...</div>
+        </div>
+      </div>
+    </div>
+
     <div class="settings-tab-panel" id="stab-payment" style="display:none">
       <div class="settings-card full">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
@@ -339,7 +641,10 @@
 
     <!-- 金流設定 -->
     <div class="settings-tab-panel" id="stab-gateway" style="display:none">
-      <div id="gatewayCards" class="gateway-grid"></div>
+      <div style="margin-bottom:16px;color:var(--text-secondary,#64748b);font-size:.875rem">
+        💡 設定完成後請先測試連線，確認金流串接正常。所有密鑰僅顯示後4碼。
+      </div>
+      <div id="gatewayCards" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:16px"></div>
     </div>
 
     <!-- 外送平台設定 -->
@@ -467,18 +772,90 @@
           </div>
           <p style="font-size:12px;color:#888;margin-top:8px">隔日自動恢復</p>
         </div>
+        <!-- 外帶/外送當前狀態一覽 -->
         <div class="settings-card">
-          <h3>🚴 自取 / 外送開關</h3>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
-            <button class="btn-secondary" onclick="setPickup(true)">✅ 開啟自取</button>
-            <button class="btn-secondary" onclick="setPickup(false)">❌ 關閉自取</button>
+          <h3>🚦 當前接單狀態</h3>
+          <div id="pickupDeliveryStatus" style="font-size:13px;color:#333;font-weight:600;margin-bottom:10px">載入中…</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <div style="background:#f8f9fa;border-radius:8px;padding:10px 12px;text-align:center">
+              <div style="font-size:12px;color:#888;margin-bottom:4px">🛍️ 外帶</div>
+              <div id="takeout-live-status" style="font-size:13px;font-weight:700">—</div>
+            </div>
+            <div style="background:#f8f9fa;border-radius:8px;padding:10px 12px;text-align:center">
+              <div style="font-size:12px;color:#888;margin-bottom:4px">🛵 外送</div>
+              <div id="delivery-live-status" style="font-size:13px;font-weight:700">—</div>
+            </div>
           </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap">
-            <button class="btn-secondary" onclick="setDelivery(true)">✅ 開啟外送</button>
-            <button class="btn-secondary" onclick="setDelivery(false)">❌ 關閉外送</button>
-          </div>
-          <div id="pickupDeliveryStatus" style="margin-top:12px;font-size:13px;color:#333;font-weight:600">載入中…</div>
         </div>
+        <!-- ── 外帶接單規則（v1）────────────────── -->
+        <div class="settings-card" style="grid-column:1/-1">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+            <h3 style="margin:0">🛍️ 外帶接單規則</h3>
+            <label class="checkbox-label" style="margin:0;gap:8px">
+              <input type="checkbox" id="set-takeout_enabled" onchange="saveTakeoutDeliveryRule('takeout')">
+              <span style="font-size:13px;font-weight:600">外帶開放接單</span>
+            </label>
+          </div>
+          <p style="font-size:12px;color:#e65100;background:#fff3e0;border-radius:6px;padding:8px 10px;margin-bottom:12px">
+            ⚠️ 外帶與外送完全獨立判斷，關閉其中一種不影響另一種
+          </p>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:14px">
+            <label>
+              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">今日最後接單時間</div>
+              <input type="time" id="set-takeout_cutoff_time" class="form-input" style="width:100%">
+              <div style="font-size:11px;color:var(--text-muted);margin-top:4px">超過此時間前台顯示今日售完（不扣庫存）</div>
+            </label>
+            <label>
+              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">最短備餐時間（分鐘）</div>
+              <input type="number" id="set-takeout_prep_minutes" min="0" step="5" placeholder="15" class="form-input" style="width:100%">
+              <div style="font-size:11px;color:var(--text-muted);margin-top:4px">客人最早可選「現在 ＋ N 分鐘」的時段</div>
+            </label>
+            <label class="checkbox-label" style="align-items:flex-start;padding-top:20px">
+              <input type="checkbox" id="set-takeout_allow_next_day">
+              <div>
+                <span>允許明日預購</span>
+                <div style="font-size:11px;color:var(--text-muted);margin-top:2px">開啟後客人可選明天 / 後天外帶時間</div>
+              </div>
+            </label>
+          </div>
+          <h4 style="font-size:13px;font-weight:700;margin-bottom:10px;color:var(--text-secondary)">外帶每週營業時間</h4>
+          <div id="takeoutBizHoursGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px;width:100%;box-sizing:border-box"></div>
+          <button class="btn-primary" style="margin-top:12px;background:#06C755;border-color:#06C755" onclick="saveTakeoutDeliveryRule('takeout')">💾 儲存外帶設定</button>
+        </div>
+
+        <!-- ── 外送接單規則（v1）────────────────── -->
+        <div class="settings-card" style="grid-column:1/-1">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+            <h3 style="margin:0">🛵 外送接單規則</h3>
+            <label class="checkbox-label" style="margin:0;gap:8px">
+              <input type="checkbox" id="set-delivery_enabled" onchange="saveTakeoutDeliveryRule('delivery')">
+              <span style="font-size:13px;font-weight:600">外送開放接單</span>
+            </label>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:14px">
+            <label>
+              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">今日最後接單時間</div>
+              <input type="time" id="set-delivery_cutoff_time" class="form-input" style="width:100%">
+              <div style="font-size:11px;color:var(--text-muted);margin-top:4px">超過此時間前台顯示今日售完（不扣庫存）</div>
+            </label>
+            <label>
+              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">最短備餐時間（分鐘）</div>
+              <input type="number" id="set-delivery_prep_minutes" min="0" step="5" placeholder="30" class="form-input" style="width:100%">
+              <div style="font-size:11px;color:var(--text-muted);margin-top:4px">客人最早可選「現在 ＋ N 分鐘」的時段</div>
+            </label>
+            <label class="checkbox-label" style="align-items:flex-start;padding-top:20px">
+              <input type="checkbox" id="set-delivery_allow_next_day">
+              <div>
+                <span>允許明日預購</span>
+                <div style="font-size:11px;color:var(--text-muted);margin-top:2px">開啟後客人可選明天 / 後天外送時間</div>
+              </div>
+            </label>
+          </div>
+          <h4 style="font-size:13px;font-weight:700;margin-bottom:10px;color:var(--text-secondary)">外送每週營業時間</h4>
+          <div id="deliveryBizHoursGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px;width:100%;box-sizing:border-box"></div>
+          <button class="btn-primary" style="margin-top:12px;background:#06C755;border-color:#06C755" onclick="saveTakeoutDeliveryRule('delivery')">💾 儲存外送設定</button>
+        </div>
+
         <div class="settings-card">
           <h3>💳 LINE 點餐付款方式</h3>
           <p style="font-size:12px;color:#888;margin-bottom:12px">控制 LINE 點餐頁顯示的付款方式</p>
@@ -507,10 +884,11 @@
           <div id="linePaymentStatus" style="margin-top:10px;font-size:12px;color:#888"></div>
         </div>
         <div class="settings-card" style="grid-column:1/-1;overflow:hidden">
-          <h3>🕐 LINE 點餐營業時間</h3>
+          <h3>🕐 LINE 整體營業時間（舊版相容）</h3>
+          <p style="font-size:12px;color:#888;margin-bottom:10px">此為舊版整體時間設定，若已設定上方「外帶/外送」獨立規則，以獨立規則優先。</p>
           <label class="checkbox-label" style="margin-bottom:14px">
             <input type="checkbox" id="set-line_business_hours_enabled" onchange="saveLineBizSettings()">
-            <span>啟用營業時間限制（未啟用則全天可點）</span>
+            <span>啟用整體營業時間限制</span>
           </label>
           <div id="bizHoursGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;width:100%;box-sizing:border-box">
             <!-- 由 JS 動態產生 -->
@@ -549,7 +927,9 @@
       </div>
     </div>
 
->
+
+
+    <!-- fix10: 店家授權管理已移至 /system-admin，此處不顯示 -->
 
   </div>
 </div>
@@ -1085,6 +1465,8 @@
 <div class="toast-container" id="toastContainer"></div>
 
 <script src="/js/app.js"></script>
+<script src="/js/qrcode.min.js"></script>
+<script src="/license.js"></script>
 
 <!-- LINE 商品設定 Modal (v16) -->
 <div class="modal-overlay" id="lineSettingsModal" onclick="if(event.target===this)closeLineSettingsModal()">
@@ -1168,7 +1550,91 @@
         <input type="checkbox" id="lineAutoRestore" checked>
         <span>🔄 今日完售隔日自動恢復為正常販售</span>
       </label>
-    </div>
+
+      <!-- ── LINE 可售份數管理（v1）────────────────────── -->
+      <div style="border-top:1px solid #eee;margin-top:16px;padding-top:16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+          <h4 style="font-size:14px;font-weight:700;color:#222;margin:0">📦 LINE 今日可售份數</h4>
+        </div>
+        <p style="font-size:11px;color:#888;margin-bottom:12px">
+          ⚠️ LINE 份數獨立管理，不影響 Web / Android 現場庫存與販售
+        </p>
+        <!-- 醒目開關 -->
+        <div id="quotaToggleArea" style="display:flex;gap:10px;margin-bottom:14px">
+          <button type="button" id="btnQuotaEnable"
+            onclick="setQuotaEnabled(true)"
+            style="flex:1;padding:10px 8px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;
+                   border:2px solid #06C755;background:#06C755;color:#fff;transition:.15s">
+            ✅ 啟用 LINE 份數管理
+          </button>
+          <button type="button" id="btnQuotaDisable"
+            onclick="setQuotaEnabled(false)"
+            style="flex:1;padding:10px 8px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;
+                   border:2px solid #ddd;background:#f5f5f5;color:#888;transition:.15s">
+            ⬜ 停用份數管理
+          </button>
+        </div>
+        <input type="hidden" id="lineQuotaEnabled" value="0">
+        <div id="lineQuotaFields" style="display:none">
+          <!-- 份數狀態顯示 -->
+          <div id="lineQuotaStatusBar" style="background:linear-gradient(135deg,#1a2e1a,#1e3a2e);border:1px solid #2d5a2d;border-radius:8px;padding:12px 16px;margin-bottom:12px;display:none">
+            <div style="font-size:11px;color:#7ed87e;font-weight:600;letter-spacing:.05em;margin-bottom:8px">📊 今日 LINE 可售狀態</div>
+            <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center">
+              <div style="text-align:center">
+                <div style="font-size:10px;color:#9ca3af;margin-bottom:2px">今日開放</div>
+                <div style="font-size:18px;font-weight:700;color:#f1f5f9" id="qs-daily">—</div>
+              </div>
+              <div style="color:#4b5563;font-size:16px">−</div>
+              <div style="text-align:center">
+                <div style="font-size:10px;color:#9ca3af;margin-bottom:2px">已售</div>
+                <div style="font-size:18px;font-weight:700;color:#ff6b6b" id="qs-sold">—</div>
+              </div>
+              <div style="color:#4b5563;font-size:16px">=</div>
+              <div style="text-align:center">
+                <div style="font-size:10px;color:#9ca3af;margin-bottom:2px">剩餘</div>
+                <div style="font-size:18px;font-weight:700;color:#4ade80" id="qs-remaining">—</div>
+              </div>
+              <div style="margin-left:auto" id="qs-status-badge"></div>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+            <label style="font-size:13px;color:#555">
+              今日開放份數
+              <input type="number" id="lineQuotaDaily" min="0" step="1" placeholder="0 = 不限" style="width:100%;margin-top:4px;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:14px">
+            </label>
+            <label style="font-size:13px;color:#555">
+              LINE 已售份數
+              <div style="display:flex;gap:6px;margin-top:4px">
+                <input type="number" id="lineQuotaSold" min="0" step="1" placeholder="0" style="flex:1;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:14px" readonly>
+                <button type="button" onclick="resetLineQuotaSold()" style="padding:8px 10px;background:#fff3e0;color:#e65100;border:1px solid #ffcc80;border-radius:6px;font-size:12px;cursor:pointer;white-space:nowrap">重置</button>
+              </div>
+            </label>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+            <label style="font-size:13px;color:#555">
+              低庫存提醒門檻（份）
+              <input type="number" id="lineQuotaLowThreshold" min="0" step="1" placeholder="2" style="width:100%;margin-top:4px;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:14px">
+              <span style="font-size:11px;color:#aaa">剩餘 ≤ 此數顯示「快售完」</span>
+            </label>
+            <label style="font-size:13px;color:#555">
+              充足顯示門檻（份）
+              <input type="number" id="lineQuotaHighThreshold" min="0" step="1" placeholder="10" style="width:100%;margin-top:4px;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:14px">
+              <span style="font-size:11px;color:#aaa">剩餘 ≥ 此數顯示「供應充足」</span>
+            </label>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <label style="font-size:13px;color:#555">
+              LINE 販售開始時間
+              <input type="time" id="lineSellStart" style="width:100%;margin-top:4px;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:14px">
+            </label>
+            <label style="font-size:13px;color:#555">
+              LINE 販售結束時間
+              <input type="time" id="lineSellEnd" style="width:100%;margin-top:4px;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:14px">
+            </label>
+          </div>
+          <p style="font-size:11px;color:#aaa;margin-top:6px">販售時段留空 = 不限時段</p>
+        </div>
+      </div>
     <div class="modal-footer">
       <button class="btn-secondary" onclick="closeLineSettingsModal()">取消</button>
       <button class="btn-primary" style="background:#06C755;border-color:#06C755" onclick="saveLineSettings()">💾 儲存 LINE 設定</button>
