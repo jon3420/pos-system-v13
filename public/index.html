@@ -6,7 +6,7 @@
   <title>餐車 POS</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/main.css?v=fix18-09F-h2">
 </head>
 <body>
 
@@ -40,6 +40,9 @@
     </button>
     <button class="nav-btn" data-page="line_preorders" id="nav-btn-line_preorders" onclick="showPage('line_preorders')" style="display:none">
       <span class="nav-icon">📅</span><span>LINE預購</span>
+    </button>
+    <button class="nav-btn" data-page="coupons" id="nav-btn-coupons" onclick="showPage('coupons')" style="display:none">
+      <span class="nav-icon">🎟️</span><span>優惠券</span>
     </button>
     <button class="nav-btn" data-page="settings" onclick="showPage('settings')">
       <span class="nav-icon">⚙️</span><span>設定</span>
@@ -198,6 +201,7 @@
           <button class="shortcut-btn"        data-range="yesterday" onclick="setDateRange('yesterday')">昨日</button>
           <button class="shortcut-btn"        data-range="week"      onclick="setDateRange('week')">本週</button>
           <button class="shortcut-btn"        data-range="month"     onclick="setDateRange('month')">本月</button>
+          <button class="shortcut-btn"        data-range="lastmonth" onclick="setDateRange('lastmonth')">上月</button>
           <button class="shortcut-btn"        data-range="custom"    onclick="setDateRange('custom')">自訂</button>
         </div>
         <div id="customDateRange" style="display:none;gap:4px;align-items:center;display:flex">
@@ -206,6 +210,8 @@
           <input type="date" id="dateTo">
         </div>
         <button class="btn-secondary" onclick="loadCurrentOrderTab()">🔄 查詢</button>
+        <button class="btn-secondary" onclick="openOrderExportModal()" style="white-space:nowrap">📤 匯出訂單</button>
+        <button class="btn-secondary" onclick="openOrderImportModal()" style="white-space:nowrap">📥 匯入訂單</button>
       </div>
     </div>
 
@@ -216,7 +222,17 @@
       <button class="order-tab-btn"        data-tab="delivery" onclick="switchOrderTab('delivery')">🛵 外送報表</button>
     </div>
 
+    <!-- fix18-09B：折扣快速篩選列 (fix18-09E: dynamic from API) -->
+    <div id="discountFilterBar" style="display:flex;flex-wrap:wrap;gap:6px;padding:10px 0 4px 0;border-bottom:1px solid var(--border,#334155);margin-bottom:8px">
+      <button class="disc-filter-btn active" data-filter="all"          onclick="setDiscountFilter('all')">全部</button>
+      <button class="disc-filter-btn"        data-filter="has_discount" onclick="setDiscountFilter('has_discount')">💸 有折扣</button>
+      <button class="disc-filter-btn"        data-filter="no_discount"  onclick="setDiscountFilter('no_discount')">無折扣</button>
+    </div>
+
     <!-- 統計卡片 -->
+    <div style="display:flex;justify-content:flex-end;margin-bottom:4px">
+      <button onclick="openCardVisibilityModal()" style="font-size:12px;padding:4px 12px;border-radius:99px;border:1px solid var(--border,#334155);background:transparent;color:var(--text-secondary,#94a3b8);cursor:pointer">👁 顯示設定</button>
+    </div>
     <div class="stat-cards" id="statCards"></div>
 
     <!-- 全部訂單 / 內用外帶 -->
@@ -472,6 +488,8 @@
       <h1 class="page-title">📅 LINE 預購管理</h1>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <button class="btn-secondary" onclick="loadLinePreorders()">🔄 重新整理</button>
+        <button class="btn-secondary" onclick="openPreorderExportModal()" style="white-space:nowrap">📤 匯出預購</button>
+        <button class="btn-secondary" onclick="openPreorderImportModal()" style="white-space:nowrap">📥 匯入預購</button>
       </div>
     </div>
 
@@ -568,9 +586,14 @@
       <button class="settings-tab-btn"        data-stab="payment"  onclick="switchSettingsTab('payment')">💳 付款方式</button>
       <button class="settings-tab-btn"        data-stab="gateway"  onclick="switchSettingsTab('gateway')" id="tab-btn-gateway">💳 金流 API</button>
       <button class="settings-tab-btn"        data-stab="platform" onclick="switchSettingsTab('platform')">🛵 外送平台</button>
+      <button class="settings-tab-btn"        data-stab="delivery_fee" onclick="switchSettingsTab('delivery_fee')">📍 外送費設定</button>
       <button class="settings-tab-btn"        data-stab="printer"  onclick="switchSettingsTab('printer')">🖨️ 出單機</button>
       <button class="settings-tab-btn"        data-stab="line_biz" onclick="switchSettingsTab('line_biz')" id="tab-btn-line_biz">📡 LINE 營業</button>
       <button class="settings-tab-btn"        data-stab="line_entry" onclick="switchSettingsTab('line_entry')" id="tab-btn-line_entry">📲 LINE 點餐入口</button>
+      <button class="settings-tab-btn"        data-stab="android_features" onclick="switchSettingsTab('android_features')">📱 Android 平板</button>
+      <button class="settings-tab-btn"        data-stab="discount_campaigns" onclick="switchSettingsTab('discount_campaigns')">💸 折扣活動</button>
+      <button class="settings-tab-btn"        data-stab="product_analysis_groups" onclick="switchSettingsTab('product_analysis_groups')">📊 商品分析群組</button>
+      <button class="settings-tab-btn"        data-stab="migration" onclick="switchSettingsTab('migration')">📦 資料備份/搬家</button>
       <!-- fix10: 店家授權 Tab 已移至 /system-admin，一般店家不可存取 -->
     </div>
 
@@ -662,9 +685,93 @@
         </div>
         <p class="settings-hint" style="margin-top:10px">💡 抽成比例建立訂單時寫入，修改後不影響歷史訂單</p>
       </div>
+
+      <!-- fix18-08：外送平台抽成率可設定 -->
+      <div class="settings-card full" style="margin-top:16px">
+        <h3 style="margin-bottom:14px">💰 訂單修改時平台抽成率設定</h3>
+        <p style="color:#888;font-size:13px;margin-bottom:14px">當修改訂單平台來源時，系統依此處設定重算抽成金額與店家實收。</p>
+        <div class="settings-grid" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px">
+          <div class="settings-row"><label style="min-width:120px">Uber Eats 抽成率 (%)</label>
+            <input type="number" id="set-ubereats_commission_rate" min="0" max="100" step="0.1" style="width:90px" placeholder="31"></div>
+          <div class="settings-row"><label style="min-width:120px">foodpanda 抽成率 (%)</label>
+            <input type="number" id="set-foodpanda_commission_rate" min="0" max="100" step="0.1" style="width:90px" placeholder="35"></div>
+          <div class="settings-row"><label style="min-width:120px">LINE 點餐抽成率 (%)</label>
+            <input type="number" id="set-line_commission_rate" min="0" max="100" step="0.1" style="width:90px" placeholder="0"></div>
+          <div class="settings-row"><label style="min-width:120px">POS 現場抽成率 (%)</label>
+            <input type="number" id="set-pos_commission_rate" min="0" max="100" step="0.1" style="width:90px" placeholder="0"></div>
+          <div class="settings-row"><label style="min-width:120px">電話訂購抽成率 (%)</label>
+            <input type="number" id="set-phone_commission_rate" min="0" max="100" step="0.1" style="width:90px" placeholder="0"></div>
+          <div class="settings-row"><label style="min-width:120px">其他抽成率 (%)</label>
+            <input type="number" id="set-other_commission_rate" min="0" max="100" step="0.1" style="width:90px" placeholder="0"></div>
+          <div class="settings-row"><label style="min-width:120px">未知抽成率 (%)</label>
+            <input type="number" id="set-unknown_commission_rate" min="0" max="100" step="0.1" style="width:90px" placeholder="0"></div>
+        </div>
+        <div style="margin-top:14px;text-align:right">
+          <button class="btn-primary" onclick="saveCommissionRates()">💾 儲存抽成設定</button>
+        </div>
+      </div>
     </div>
 
     <!-- 出單機設定 -->
+    <!-- fix18-06: 外送費設定 -->
+    <div class="settings-tab-panel" id="stab-delivery_fee" style="display:none">
+      <div class="settings-grid">
+        <div class="settings-card">
+          <h3>📍 店家座標設定</h3>
+          <p style="color:#888;font-size:13px;margin-bottom:12px">計算外送距離的起點，需設定正確座標。</p>
+          <div class="settings-row">
+            <label>店家地址</label>
+            <input type="text" id="set-store_address" placeholder="例：桃園市中壢區○○路○號" style="flex:1">
+          </div>
+          <div class="settings-row" style="gap:8px;flex-wrap:wrap">
+            <label style="min-width:80px">緯度 (lat)</label>
+            <input type="text" id="set-store_lat" placeholder="例：24.9639" style="flex:1;min-width:120px">
+            <label style="min-width:80px">經度 (lng)</label>
+            <input type="text" id="set-store_lng" placeholder="例：121.2248" style="flex:1;min-width:120px">
+          </div>
+          <button class="btn-secondary" onclick="geocodeStoreAddress()" style="margin-top:8px;width:100%">📍 從店家地址取得座標</button>
+          <div id="geocode-status" style="font-size:12px;color:#888;margin-top:6px;min-height:18px"></div>
+        </div>
+
+        <div class="settings-card">
+          <h3>🛵 外送費規則</h3>
+          <div class="settings-row">
+            <label>啟用距離外送費</label>
+            <label class="toggle"><input type="checkbox" id="set-delivery_distance_fee_enabled"><span class="slider"></span></label>
+          </div>
+          <div class="settings-row">
+            <label>最大外送距離 (km)</label>
+            <input type="number" id="set-delivery_max_distance_km" min="1" max="50" step="0.5" style="width:100px">
+          </div>
+          <div class="settings-row">
+            <label>基本外送費 (NT$)</label>
+            <input type="number" id="set-delivery_basic_fee" min="0" step="10" style="width:100px">
+          </div>
+          <div class="settings-row">
+            <label>滿額免基本外送費 (NT$)</label>
+            <input type="number" id="set-delivery_free_threshold" min="0" step="50"
+              placeholder="0=停用" style="width:100px">
+          </div>
+          <div class="settings-row">
+            <label>優惠券可折抵外送費</label>
+            <label class="toggle"><input type="checkbox" id="set-coupon_apply_to_delivery_fee"><span class="slider"></span></label>
+          </div>
+        </div>
+
+        <div class="settings-card" style="grid-column:1/-1">
+          <h3>📏 距離級距外送費</h3>
+          <p style="color:#888;font-size:13px;margin-bottom:12px">
+            依實際駕車距離（Google Routes API）計算，各級距費用為「達到該距離的費用」。<br>
+            範例：0-3km = NT$50，3-5km = NT$80，5-7km = NT$120
+          </p>
+          <div id="delivery-rules-editor" style="margin-bottom:12px"></div>
+          <button class="btn-secondary" onclick="addDeliveryRule()" style="margin-right:8px">➕ 新增級距</button>
+          <button class="btn-primary"   onclick="saveDeliveryFeeSettings()" style="float:right">💾 儲存外送費設定</button>
+        </div>
+      </div>
+    </div>
+    <!-- end stab-delivery_fee -->
+
     <div class="settings-tab-panel" id="stab-printer" style="display:none">
       <div class="settings-grid">
         <!-- 狀態與測試 -->
@@ -800,11 +907,22 @@
             ⚠️ 外帶與外送完全獨立判斷，關閉其中一種不影響另一種
           </p>
           <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:14px">
-            <label>
-              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">今日最後接單時間</div>
-              <input type="time" id="set-takeout_cutoff_time" class="form-input" style="width:100%">
-              <div style="font-size:11px;color:var(--text-muted);margin-top:4px">超過此時間前台顯示今日售完（不扣庫存）</div>
-            </label>
+            <div>
+              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">
+                今日臨時最後接單時間
+                <span style="font-size:10px;font-weight:400;color:#e65100;margin-left:4px">（僅限今天，隔天自動失效）</span>
+              </div>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <input type="time" id="set-takeout_today_cutoff_time" class="form-input" style="flex:1;min-width:120px">
+                <button type="button" onclick="cancelTodayCutoff('takeout')"
+                  style="padding:8px 12px;background:#f5f5f5;color:#555;border:1px solid #ddd;border-radius:6px;font-size:12px;white-space:nowrap;cursor:pointer">
+                  ✕ 取消今日限制
+                </button>
+              </div>
+              <div id="takeout-today-cutoff-status" style="font-size:11px;color:var(--text-muted);margin-top:4px">
+                尚未設定今日限制
+              </div>
+            </div>
             <label>
               <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">最短備餐時間（分鐘）</div>
               <input type="number" id="set-takeout_prep_minutes" min="0" step="5" placeholder="15" class="form-input" style="width:100%">
@@ -833,11 +951,22 @@
             </label>
           </div>
           <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:14px">
-            <label>
-              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">今日最後接單時間</div>
-              <input type="time" id="set-delivery_cutoff_time" class="form-input" style="width:100%">
-              <div style="font-size:11px;color:var(--text-muted);margin-top:4px">超過此時間前台顯示今日售完（不扣庫存）</div>
-            </label>
+            <div>
+              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">
+                今日臨時最後接單時間
+                <span style="font-size:10px;font-weight:400;color:#e65100;margin-left:4px">（僅限今天，隔天自動失效）</span>
+              </div>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <input type="time" id="set-delivery_today_cutoff_time" class="form-input" style="flex:1;min-width:120px">
+                <button type="button" onclick="cancelTodayCutoff('delivery')"
+                  style="padding:8px 12px;background:#f5f5f5;color:#555;border:1px solid #ddd;border-radius:6px;font-size:12px;white-space:nowrap;cursor:pointer">
+                  ✕ 取消今日限制
+                </button>
+              </div>
+              <div id="delivery-today-cutoff-status" style="font-size:11px;color:var(--text-muted);margin-top:4px">
+                尚未設定今日限制
+              </div>
+            </div>
             <label>
               <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">最短備餐時間（分鐘）</div>
               <input type="number" id="set-delivery_prep_minutes" min="0" step="5" placeholder="30" class="form-input" style="width:100%">
@@ -931,10 +1060,346 @@
 
     <!-- fix10: 店家授權管理已移至 /system-admin，此處不顯示 -->
 
+    <!-- v18-features: Android 平板功能權限 -->
+    <div class="settings-tab-panel" id="stab-android_features" style="display:none">
+      <div class="settings-grid">
+        <div class="settings-card" style="grid-column:1/-1">
+          <h3>📱 Android 平板功能權限</h3>
+          <p style="font-size:13px;color:#666;margin-bottom:16px">
+            控制 Android 平板顯示哪些功能入口。平板同步後立即生效。
+          </p>
+          <div id="android-features-loading" style="color:#888;font-size:13px">載入中...</div>
+          <div id="android-features-form" style="display:none">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:20px">
+              <!-- 每個功能開關 -->
+              <label style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:#f8f9fa;border-radius:8px;cursor:pointer">
+                <input type="checkbox" id="af-pos" style="width:18px;height:18px">
+                <span>🛒 POS 點餐</span>
+              </label>
+              <label style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:#f8f9fa;border-radius:8px;cursor:pointer">
+                <input type="checkbox" id="af-orders" style="width:18px;height:18px">
+                <span>📋 訂單紀錄</span>
+              </label>
+              <label style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:#f8f9fa;border-radius:8px;cursor:pointer">
+                <input type="checkbox" id="af-reports" style="width:18px;height:18px">
+                <span>📊 報表查看</span>
+              </label>
+              <label style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:#f8f9fa;border-radius:8px;cursor:pointer">
+                <input type="checkbox" id="af-products" style="width:18px;height:18px">
+                <span>🍽️ 商品管理</span>
+              </label>
+              <label style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:#f8f9fa;border-radius:8px;cursor:pointer">
+                <input type="checkbox" id="af-inventory" style="width:18px;height:18px">
+                <span>📦 庫存管理</span>
+              </label>
+              <label style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:#f8f9fa;border-radius:8px;cursor:pointer">
+                <input type="checkbox" id="af-payment_methods" style="width:18px;height:18px">
+                <span>💳 付款方式管理</span>
+              </label>
+              <label style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:#f8f9fa;border-radius:8px;cursor:pointer">
+                <input type="checkbox" id="af-delivery_settings" style="width:18px;height:18px">
+                <span>🛵 外送／自取設定</span>
+              </label>
+              <label style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:#f8f9fa;border-radius:8px;cursor:pointer">
+                <input type="checkbox" id="af-line_orders" style="width:18px;height:18px">
+                <span>📲 LINE 訂單管理</span>
+              </label>
+              <label style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:#f8f9fa;border-radius:8px;cursor:pointer">
+                <input type="checkbox" id="af-line_products" style="width:18px;height:18px">
+                <span>🛍️ LINE 商品管理</span>
+              </label>
+              <label style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:#f8f9fa;border-radius:8px;cursor:pointer">
+                <input type="checkbox" id="af-settings" style="width:18px;height:18px">
+                <span>⚙️ 設定頁</span>
+              </label>
+              <label style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:#f8f9fa;border-radius:8px;cursor:pointer">
+                <input type="checkbox" id="af-sync" style="width:18px;height:18px">
+                <span>☁️ 雲端同步</span>
+              </label>
+              <label style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:#f8f9fa;border-radius:8px;cursor:pointer">
+                <input type="checkbox" id="af-print_settings" style="width:18px;height:18px">
+                <span>🖨️ 出單設定</span>
+              </label>
+            </div>
+            <div style="display:flex;gap:10px;align-items:center">
+              <button class="btn-primary" onclick="saveAndroidFeatures()">💾 儲存權限</button>
+              <span id="android-features-status" style="font-size:13px;color:#27ae60;display:none"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- fix18-09D：折扣活動設定 Tab Panel（正確位置：page-settings 內） -->
+    <div class="settings-tab-panel" id="stab-discount_campaigns" style="display:none">
+      <div class="settings-grid">
+        <!-- fix18-09E：上半部 — 折扣分類設定 -->
+        <div class="settings-card" style="grid-column:1/-1">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+            <div>
+              <h3 style="margin:0">🏷️ 折扣分類設定</h3>
+              <p style="font-size:13px;color:#666;margin:4px 0 0">設定折扣的成本分類，用於統計報表。</p>
+            </div>
+            <button class="btn-primary" onclick="openCategoryModal()" style="white-space:nowrap">＋ 新增分類</button>
+          </div>
+          <div id="discountCategoryList" style="display:flex;flex-direction:column;gap:8px">
+            <div style="color:var(--text-muted);font-size:13px">載入中...</div>
+          </div>
+        </div>
+        <!-- 下半部 — 折扣活動設定 -->
+        <div class="settings-card" style="grid-column:1/-1;margin-top:8px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+            <div>
+              <h3 style="margin:0">💸 折扣活動設定</h3>
+              <p style="font-size:13px;color:#666;margin:4px 0 0">設定可套用在訂單折扣的活動名稱，修改訂單時可指定折扣活動。</p>
+            </div>
+            <button class="btn-primary" onclick="openCampaignModal()" style="white-space:nowrap">＋ 新增活動</button>
+          </div>
+          <div id="discountCampaignList" style="display:flex;flex-direction:column;gap:8px">
+            <div style="color:var(--text-muted);font-size:13px">載入中...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- fix18-09F：商品分析群組 Tab Panel -->
+    <div class="settings-tab-panel" id="stab-migration" style="display:none">
+      <div class="settings-grid">
+        <!-- 匯出快速搬家檔 -->
+        <div class="settings-card">
+          <h3>📤 匯出快速搬家檔</h3>
+          <p style="font-size:13px;color:var(--text-secondary,#94a3b8);margin-bottom:16px">
+            下載目前店家的完整營運資料 JSON，可用於升級版本、搬主機、備份還原。
+          </p>
+          <div style="background:rgba(6,199,85,.08);border:1px solid rgba(6,199,85,.25);border-radius:8px;padding:12px;margin-bottom:16px;font-size:12px;color:#a3e0b8">
+            ℹ️ 匯出內容包含：商品、分類、訂單、LINE預購、折扣活動、商品分析群組、設定等完整資料。
+          </div>
+          <button class="btn-primary" onclick="exportMigrationFile()" style="width:100%">⬇️ 下載快速搬家檔</button>
+          <div id="migrationExportStatus" style="margin-top:10px;font-size:13px"></div>
+        </div>
+
+        <!-- 匯入快速搬家檔 -->
+        <div class="settings-card">
+          <h3>📥 匯入快速搬家檔</h3>
+          <p style="font-size:13px;color:var(--text-secondary,#94a3b8);margin-bottom:12px">
+            選擇先前匯出的搬家檔，還原到目前店家。
+          </p>
+
+          <div style="margin-bottom:12px">
+            <label style="font-size:13px;color:var(--text-secondary,#94a3b8);margin-bottom:6px;display:block">選擇 JSON 搬家檔</label>
+            <input type="file" id="migrationFileInput" accept=".json" onchange="onMigrationFileSelected(this)"
+              style="font-size:13px;padding:8px;border:1px dashed var(--border,#334155);border-radius:8px;width:100%;box-sizing:border-box;background:transparent;color:var(--text-primary,#f1f5f9);cursor:pointer">
+          </div>
+
+          <div id="migrationPreviewBox" style="display:none;background:var(--bg-base,#0f172a);border:1px solid var(--border,#334155);border-radius:8px;padding:12px;margin-bottom:12px;font-size:13px">
+            <div style="font-weight:700;margin-bottom:8px;color:var(--accent,#3b82f6)">📋 檔案預覽</div>
+            <div id="migrationPreviewSummary"></div>
+            <div id="migrationCrossStoreWarn" style="display:none;margin-top:8px;padding:8px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:6px;font-size:12px;color:#f87171"></div>
+          </div>
+
+          <div id="migrationModeBox" style="display:none;margin-bottom:12px">
+            <label style="font-size:13px;color:var(--text-secondary,#94a3b8);margin-bottom:6px;display:block">匯入模式</label>
+            <div style="display:flex;flex-direction:column;gap:6px">
+              <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px">
+                <input type="radio" name="migrationMode" value="skip" checked style="margin-top:2px"> 
+                <div><strong>跳過重複</strong> — 已存在的資料不覆蓋（補資料用）</div>
+              </label>
+              <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px">
+                <input type="radio" name="migrationMode" value="overwrite" style="margin-top:2px">
+                <div><strong>覆蓋更新</strong> — 已存在的資料以備份檔為準（搬家用）</div>
+              </label>
+              <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px">
+                <input type="radio" name="migrationMode" value="purge" style="margin-top:2px">
+                <div><strong>清空本店後還原</strong> — 先清空本店資料再匯入（完整還原用，不影響其他店家）</div>
+              </label>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:8px">
+            <button id="migrationPreviewBtn" class="btn-secondary" onclick="previewMigrationFile()" style="display:none;flex:1">🔍 預覽匯入</button>
+            <button id="migrationImportBtn" class="btn-primary" onclick="confirmMigrationImport()" style="display:none;flex:1">✅ 確認匯入</button>
+          </div>
+          <div id="migrationImportStatus" style="margin-top:10px;font-size:13px"></div>
+        </div>
+      </div>
+    </div>
+    <div class="settings-tab-panel" id="stab-product_analysis_groups" style="display:none">
+      <div class="settings-grid">
+        <div class="settings-card" style="grid-column:1/-1">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px">
+            <div>
+              <h3 style="margin:0">📊 商品分析群組</h3>
+              <p style="font-size:13px;color:#666;margin:4px 0 0">將多個商品歸入同一群組，報表統計時合併計算。訂單原始商品名稱不受影響。</p>
+            </div>
+            <button class="btn-primary" onclick="openAnalysisGroupModal()" style="white-space:nowrap">＋ 新增群組</button>
+          </div>
+          <div id="analysisGroupList" style="display:flex;flex-direction:column;gap:8px">
+            <div style="color:var(--text-muted);font-size:13px">載入中...</div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
-<!-- 商品編輯 Modal -->
+
+
+<!-- ═══════════════════════════════════════════════════════════
+     fix18-10 modals: 訂單匯出、訂單匯入、預購匯出、預購匯入、搬家確認
+═════════════════════════════════════════════════════════════ -->
+
+<!-- 訂單匯出 Modal -->
+<div class="modal-overlay" id="orderExportModal" style="display:none" onclick="if(event.target===this)closeOrderExportModal()">
+  <div class="modal" style="max-width:420px">
+    <div class="modal-header">
+      <h3>📤 匯出訂單</h3>
+      <button class="modal-close" onclick="closeOrderExportModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <label style="display:block;margin-bottom:12px">
+        <span style="font-size:13px;color:var(--text-secondary,#94a3b8)">匯出格式</span>
+        <select id="orderExportFormat" style="display:block;width:100%;margin-top:6px;padding:8px;border:1px solid var(--border,#334155);border-radius:6px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9);font-size:13px">
+          <option value="json">JSON（完整備份，含 order_items / order_logs）</option>
+          <option value="csv">CSV（Excel 用）</option>
+        </select>
+      </label>
+      <label style="display:block;margin-bottom:12px">
+        <span style="font-size:13px;color:var(--text-secondary,#94a3b8)">匯出範圍</span>
+        <select id="orderExportScope" style="display:block;width:100%;margin-top:6px;padding:8px;border:1px solid var(--border,#334155);border-radius:6px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9);font-size:13px">
+          <option value="all">全部訂單</option>
+          <option value="filtered">目前查詢日期範圍</option>
+        </select>
+      </label>
+    </div>
+    <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end;padding:16px">
+      <button class="btn-secondary" onclick="closeOrderExportModal()">取消</button>
+      <button class="btn-primary" onclick="doOrderExport()">⬇️ 下載</button>
+    </div>
+  </div>
+</div>
+
+<!-- 訂單匯入 Modal -->
+<div class="modal-overlay" id="orderImportModal" style="display:none" onclick="if(event.target===this)closeOrderImportModal()">
+  <div class="modal" style="max-width:480px">
+    <div class="modal-header">
+      <h3>📥 匯入訂單</h3>
+      <button class="modal-close" onclick="closeOrderImportModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="margin-bottom:12px">
+        <span style="font-size:13px;color:var(--text-secondary,#94a3b8);display:block;margin-bottom:6px">選擇 JSON 備份檔</span>
+        <input type="file" id="orderImportFile" accept=".json,.csv"
+          style="width:100%;box-sizing:border-box;padding:8px;border:1px dashed var(--border,#334155);border-radius:6px;background:transparent;color:var(--text-primary,#f1f5f9);font-size:13px;cursor:pointer"
+          onchange="onOrderImportFileSelected(this)">
+      </div>
+      <div id="orderImportPreview" style="display:none;background:var(--bg-base,#0f172a);border:1px solid var(--border,#334155);border-radius:8px;padding:12px;margin-bottom:12px;font-size:13px"></div>
+      <div style="margin-bottom:12px">
+        <span style="font-size:13px;color:var(--text-secondary,#94a3b8);display:block;margin-bottom:6px">重複單號策略</span>
+        <select id="orderImportMode" style="width:100%;padding:8px;border:1px solid var(--border,#334155);border-radius:6px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9);font-size:13px">
+          <option value="skip">跳過重複（預設）</option>
+          <option value="overwrite">覆蓋更新</option>
+          <option value="copy">建立副本</option>
+        </select>
+      </div>
+      <div id="orderImportResult" style="display:none;font-size:13px;padding:10px;border-radius:6px;margin-top:8px"></div>
+    </div>
+    <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end;padding:16px">
+      <button class="btn-secondary" onclick="closeOrderImportModal()">取消</button>
+      <button class="btn-primary" id="orderImportSubmitBtn" style="display:none" onclick="doOrderImport()">✅ 確認匯入</button>
+    </div>
+  </div>
+</div>
+
+<!-- LINE預購匯出 Modal -->
+<div class="modal-overlay" id="preorderExportModal" style="display:none" onclick="if(event.target===this)closePreorderExportModal()">
+  <div class="modal" style="max-width:420px">
+    <div class="modal-header">
+      <h3>📤 匯出預購</h3>
+      <button class="modal-close" onclick="closePreorderExportModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <label style="display:block;margin-bottom:12px">
+        <span style="font-size:13px;color:var(--text-secondary,#94a3b8)">匯出格式</span>
+        <select id="preorderExportFormat" style="display:block;width:100%;margin-top:6px;padding:8px;border:1px solid var(--border,#334155);border-radius:6px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9);font-size:13px">
+          <option value="json">JSON（完整備份）</option>
+          <option value="csv">CSV（Excel 用）</option>
+        </select>
+      </label>
+      <label style="display:block;margin-bottom:12px">
+        <span style="font-size:13px;color:var(--text-secondary,#94a3b8)">日期範圍（留空 = 全部）</span>
+        <div style="display:flex;gap:8px;margin-top:6px;align-items:center">
+          <input type="date" id="preorderExportFrom" style="flex:1;padding:8px;border:1px solid var(--border,#334155);border-radius:6px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9);font-size:13px">
+          <span style="color:var(--text-muted,#64748b)">～</span>
+          <input type="date" id="preorderExportTo" style="flex:1;padding:8px;border:1px solid var(--border,#334155);border-radius:6px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9);font-size:13px">
+        </div>
+      </label>
+    </div>
+    <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end;padding:16px">
+      <button class="btn-secondary" onclick="closePreorderExportModal()">取消</button>
+      <button class="btn-primary" onclick="doPreorderExport()">⬇️ 下載</button>
+    </div>
+  </div>
+</div>
+
+<!-- LINE預購匯入 Modal -->
+<div class="modal-overlay" id="preorderImportModal" style="display:none" onclick="if(event.target===this)closePreorderImportModal()">
+  <div class="modal" style="max-width:480px">
+    <div class="modal-header">
+      <h3>📥 匯入預購</h3>
+      <button class="modal-close" onclick="closePreorderImportModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="margin-bottom:12px">
+        <span style="font-size:13px;color:var(--text-secondary,#94a3b8);display:block;margin-bottom:6px">選擇 JSON 備份檔</span>
+        <input type="file" id="preorderImportFile" accept=".json"
+          style="width:100%;box-sizing:border-box;padding:8px;border:1px dashed var(--border,#334155);border-radius:6px;background:transparent;color:var(--text-primary,#f1f5f9);font-size:13px;cursor:pointer"
+          onchange="onPreorderImportFileSelected(this)">
+      </div>
+      <div id="preorderImportPreview" style="display:none;background:var(--bg-base,#0f172a);border:1px solid var(--border,#334155);border-radius:8px;padding:12px;margin-bottom:12px;font-size:13px"></div>
+      <div style="margin-bottom:12px">
+        <span style="font-size:13px;color:var(--text-secondary,#94a3b8);display:block;margin-bottom:6px">重複單號策略</span>
+        <select id="preorderImportMode" style="width:100%;padding:8px;border:1px solid var(--border,#334155);border-radius:6px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9);font-size:13px">
+          <option value="skip">跳過重複（預設）</option>
+          <option value="overwrite">覆蓋更新</option>
+          <option value="copy">建立副本</option>
+        </select>
+      </div>
+      <div id="preorderImportResult" style="display:none;font-size:13px;padding:10px;border-radius:6px;margin-top:8px"></div>
+    </div>
+    <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end;padding:16px">
+      <button class="btn-secondary" onclick="closePreorderImportModal()">取消</button>
+      <button class="btn-primary" id="preorderImportSubmitBtn" style="display:none" onclick="doPreorderImport()">✅ 確認匯入</button>
+    </div>
+  </div>
+</div>
+
+<!-- 搬家匯入：清空本店二次確認 Modal -->
+<div class="modal-overlay" id="migrationPurgeConfirmModal" style="display:none" onclick="">
+  <div class="modal" style="max-width:420px">
+    <div class="modal-header" style="border-bottom:2px solid rgba(239,68,68,.5)">
+      <h3 style="color:#f87171">⚠️ 清空本店後還原</h3>
+    </div>
+    <div class="modal-body">
+      <div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);border-radius:8px;padding:14px;margin-bottom:16px;font-size:13px;line-height:1.7;color:#fca5a5">
+        此操作將清空目前店家的商品、分類、訂單、預購、折扣活動、商品分析群組與設定，再從備份檔還原。<br><br>
+        <strong>⚠️ 清空後無法復原，請確認已備份！</strong>
+      </div>
+      <div>
+        <label style="font-size:13px;color:var(--text-secondary,#94a3b8);display:block;margin-bottom:6px">
+          請輸入 <strong style="color:#f87171">確認還原</strong> 繼續
+        </label>
+        <input type="text" id="migrationPurgeConfirmInput"
+          placeholder="確認還原"
+          style="width:100%;box-sizing:border-box;padding:10px;border:1px solid rgba(239,68,68,.4);border-radius:6px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9);font-size:14px">
+      </div>
+    </div>
+    <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end;padding:16px">
+      <button class="btn-secondary" onclick="closeMigrationPurgeConfirm()">取消</button>
+      <button style="padding:10px 20px;border-radius:8px;border:none;background:#ef4444;color:#fff;font-weight:700;cursor:pointer" onclick="executeMigrationImport()">清空並還原</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="productModal" onclick="if(event.target===this)closeProductModal()">
   <div class="modal">
     <div class="modal-header">
@@ -1087,6 +1552,166 @@
 </div>
 
 <!-- 訂單編輯 Modal -->
+<!-- fix18-09B：折扣明細 Modal -->
+<!-- fix18-09B rev：折扣商品 TOP10 Modal -->
+<div class="modal-overlay" id="discTop10Modal" onclick="if(event.target===this)closeDiscTop10()">
+  <div class="modal" style="max-width:560px;max-height:92vh;overflow-y:auto">
+    <div class="modal-header">
+      <h3>📉 折扣最多商品 TOP10</h3>
+      <button class="modal-close" onclick="closeDiscTop10()">✕</button>
+    </div>
+    <div class="modal-body" style="padding:0">
+      <table class="data-table" style="font-size:13px">
+        <thead><tr>
+          <th style="width:36px">#</th>
+          <th>商品名稱</th>
+          <th style="text-align:right">折扣總額</th>
+          <th style="text-align:right">筆數</th>
+          <th style="text-align:right">平均折扣</th>
+        </tr></thead>
+        <tbody id="discTop10Body"></tbody>
+      </table>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeDiscTop10()">關閉</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- fix18-09E：折扣分類新增/編輯 Modal -->
+<div class="modal-overlay" id="categoryEditModal" onclick="if(event.target===this)closeCategoryModal()">
+  <div class="modal" style="max-width:440px">
+    <div class="modal-header">
+      <h3 id="categoryModalTitle">新增折扣分類</h3>
+      <button class="modal-close" onclick="closeCategoryModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="categoryEditId">
+      <label>分類名稱 <span style="color:var(--danger)">*</span>
+        <input type="text" id="categoryEditName" placeholder="例如：試吃推廣" style="width:100%;box-sizing:border-box">
+      </label>
+      <label style="margin-top:12px;display:block">圖示（Emoji）
+        <input type="text" id="categoryEditIcon" placeholder="🟢" style="width:80px">
+      </label>
+      <label style="margin-top:12px;display:block">顏色
+        <input type="color" id="categoryEditColor" value="#94a3b8" style="width:60px;height:34px;cursor:pointer">
+      </label>
+      <label style="margin-top:12px;display:flex;align-items:center;gap:10px;cursor:pointer">
+        <input type="checkbox" id="categoryEditEnabled" checked style="width:16px;height:16px">
+        <span>啟用此分類</span>
+      </label>
+      <label style="margin-top:12px;display:block">排序
+        <input type="number" id="categoryEditSortOrder" value="0" min="0" style="width:100px">
+        <small style="color:var(--text-muted);font-size:11px;margin-left:8px">數字小的排在前面</small>
+      </label>
+    </div>
+    <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn-secondary" onclick="closeCategoryModal()">取消</button>
+      <button class="btn-primary" onclick="saveCategoryModal()">💾 儲存</button>
+    </div>
+  </div>
+</div>
+
+<!-- fix18-09E：報表卡片顯示設定 Modal -->
+<div class="modal-overlay" id="cardVisibilityModal" onclick="if(event.target===this)closeCardVisibilityModal()">
+  <div class="modal" style="max-width:400px">
+    <div class="modal-header">
+      <h3>👁 顯示設定</h3>
+      <button class="modal-close" onclick="closeCardVisibilityModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="display:flex;gap:8px;margin-bottom:16px">
+        <button onclick="setCardVisibilityMode('all')" id="cvModeAll" class="btn-secondary" style="flex:1">全部顯示</button>
+        <button onclick="setCardVisibilityMode('simple')" id="cvModeSimple" class="btn-secondary" style="flex:1">精簡模式</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px" id="cardVisibilityCheckboxes"></div>
+    </div>
+    <div class="modal-footer" style="display:flex;justify-content:flex-end">
+      <button class="btn-primary" onclick="saveCardVisibility()">✅ 套用</button>
+    </div>
+  </div>
+</div>
+
+<!-- fix18-09D：折扣活動新增/編輯 Modal -->
+<div class="modal-overlay" id="campaignEditModal" onclick="if(event.target===this)closeCampaignModal()">
+  <div class="modal" style="max-width:440px">
+    <div class="modal-header">
+      <h3 id="campaignModalTitle">新增折扣活動</h3>
+      <button class="modal-close" onclick="closeCampaignModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="campaignEditId">
+      <label>活動名稱 <span style="color:var(--danger)">*</span>
+        <input type="text" id="campaignEditName" placeholder="例如：買一送一" style="width:100%;box-sizing:border-box">
+      </label>
+      <label style="margin-top:12px;display:block">說明（選填）
+        <input type="text" id="campaignEditDesc" placeholder="活動說明" style="width:100%;box-sizing:border-box">
+      </label>
+      <label style="margin-top:12px;display:flex;align-items:center;gap:10px;cursor:pointer">
+        <input type="checkbox" id="campaignEditEnabled" checked style="width:16px;height:16px">
+        <span>啟用此活動</span>
+      </label>
+      <label style="margin-top:12px;display:block">排序
+        <input type="number" id="campaignEditSortOrder" value="0" min="0" style="width:100px">
+        <small style="color:var(--text-muted);font-size:11px;margin-left:8px">數字小的排在前面</small>
+      </label>
+    </div>
+    <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn-secondary" onclick="closeCampaignModal()">取消</button>
+      <button class="btn-primary" onclick="saveCampaignModal()">💾 儲存</button>
+    </div>
+  </div>
+</div>
+
+<!-- fix18-09C：折扣活動排行榜 TOP10 Modal -->
+<div class="modal-overlay" id="discCampaignTop10Modal" onclick="if(event.target===this)closeDiscCampaignTop10()">
+  <div class="modal" style="max-width:560px;max-height:92vh;overflow-y:auto">
+    <div class="modal-header">
+      <h3>🏆 折扣活動排行榜 TOP10</h3>
+      <button class="modal-close" onclick="closeDiscCampaignTop10()">✕</button>
+    </div>
+    <div class="modal-body" style="padding:0">
+      <table class="data-table" style="font-size:13px">
+        <thead><tr>
+          <th style="width:36px">#</th>
+          <th>活動名稱</th>
+          <th style="text-align:right">折扣總額</th>
+          <th style="text-align:right">筆數</th>
+          <th style="text-align:right">平均折扣</th>
+        </tr></thead>
+        <tbody id="discCampaignTop10Body"></tbody>
+      </table>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeDiscCampaignTop10()">關閉</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="discountDetailModal" onclick="if(event.target===this)closeDiscountDetail()">
+  <div class="modal" style="max-width:720px;max-height:92vh;overflow-y:auto">
+    <div class="modal-header">
+      <h3>💸 折扣明細 <span id="discDetailTitle" style="font-size:13px;color:var(--accent)"></span></h3>
+      <button class="modal-close" onclick="closeDiscountDetail()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="discDetailSummary" style="margin-bottom:12px;padding:10px;background:var(--bg-base);border-radius:6px;font-size:13px"></div>
+      <div class="table-wrap" style="max-height:60vh;overflow-y:auto">
+        <table class="data-table" style="font-size:13px">
+          <thead><tr>
+            <th>日期</th><th>訂單編號</th><th>折扣活動</th><th>折扣商品</th><th>折扣金額</th><th>分類</th><th>備註</th>
+          </tr></thead>
+          <tbody id="discDetailBody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeDiscountDetail()">關閉</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="editOrderModal" onclick="if(event.target===this)closeEditOrder()">
   <div class="modal" style="max-width:600px;max-height:92vh;overflow-y:auto">
     <div class="modal-header">
@@ -1095,6 +1720,12 @@
     </div>
     <div class="modal-body" id="editOrderBody">
       <input type="hidden" id="editOrderId">
+
+      <!-- fix18-09：訂單日期時間（負責人可修改） -->
+      <label id="editCreatedAtLabel">訂單日期時間
+        <input type="datetime-local" id="editOrderCreatedAt" style="font-family:monospace">
+        <small style="color:var(--text-muted);font-size:11px">修改後報表將依新日期重新統計</small>
+      </label>
 
       <!-- 商品列表 -->
       <label>商品明細</label>
@@ -1127,6 +1758,50 @@
           <option value="linepay">💚 LINE Pay</option>
           <option value="card">💳 刷卡</option>
           <option value="transfer">🏦 轉帳</option>
+        </select>
+      </label>
+
+      <!-- fix18-09：折扣分類 -->
+      <label>折扣分類
+        <select id="editDiscountCategory">
+          <option value="none">無折扣</option>
+        </select>
+      </label>
+
+      <!-- fix18-09C：折扣活動 -->
+      <label>折扣活動
+        <select id="editDiscountCampaign" onchange="onDiscountCampaignChange()">
+          <option value="">— 不指定 —</option>
+        </select>
+      </label>
+
+      <!-- fix18-09D：折扣套用商品（多選） -->
+      <label>折扣套用商品
+        <select id="editDiscountTargetType" onchange="onDiscountTargetTypeChange()">
+          <option value="order">整張訂單</option>
+          <option value="products">指定商品</option>
+        </select>
+      </label>
+      <div id="editDiscountProductPanel" style="display:none;margin-top:6px">
+        <div style="font-size:12px;color:var(--text-muted,#94a3b8);margin-bottom:6px">勾選折扣相關商品（可複選）</div>
+        <div id="editDiscountProductCheckboxes" style="display:flex;flex-direction:column;gap:6px;max-height:160px;overflow-y:auto;padding:8px;background:var(--bg-base,#0f172a);border:1px solid var(--border,#334155);border-radius:6px">
+          <!-- 動態填入 -->
+        </div>
+      </div>
+
+      <!-- fix18-09：折扣備註 -->
+      <label>折扣備註<input type="text" id="editDiscountNote" placeholder="選填，說明折扣原因"></label>
+
+      <!-- fix18-08：平台來源 -->
+      <label>平台來源
+        <select id="editOrderPlatform">
+          <option value="unknown">未知</option>
+          <option value="pos">POS現場</option>
+          <option value="ubereats">Uber Eats</option>
+          <option value="foodpanda">foodpanda</option>
+          <option value="line">LINE點餐</option>
+          <option value="phone">電話訂購</option>
+          <option value="other">其他</option>
         </select>
       </label>
 
@@ -1461,12 +2136,110 @@
   </div>
 </div>
 
+<!-- ======= 優惠券管理頁 fix18-05 ======= -->
+<div id="page-coupons" class="page">
+  <div class="page-inner">
+    <div class="page-toolbar">
+      <h1 class="page-title">🎟️ 優惠券管理</h1>
+      <div style="display:flex;gap:8px">
+        <button class="btn-secondary" onclick="loadCouponsPage()">🔄 重新整理</button>
+        <button class="btn-primary" onclick="openCouponModal()">＋ 新增優惠券</button>
+      </div>
+    </div>
+    <div id="coupons-table-wrap" style="overflow-x:auto;margin-top:16px">
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead>
+          <tr style="border-bottom:2px solid var(--border,#334155)">
+            <th style="padding:10px 8px;text-align:left">代碼</th>
+            <th style="padding:10px 8px;text-align:left">名稱</th>
+            <th style="padding:10px 8px;text-align:left">折扣</th>
+            <th style="padding:10px 8px;text-align:left">最低消費</th>
+            <th style="padding:10px 8px;text-align:left">有效期間</th>
+            <th style="padding:10px 8px;text-align:center">使用次數</th>
+            <th style="padding:10px 8px;text-align:center">上限</th>
+            <th style="padding:10px 8px;text-align:center">狀態</th>
+            <th style="padding:10px 8px;text-align:center">操作</th>
+          </tr>
+        </thead>
+        <tbody id="couponsBody">
+          <tr><td colspan="9" style="text-align:center;padding:40px;color:var(--text-muted,#64748b)">載入中…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- 優惠券新增/編輯 Modal fix18-05 -->
+<div class="modal-overlay" id="couponModal" style="display:none" onclick="if(event.target===this)closeCouponModal()">
+  <div class="modal" style="max-width:520px;width:90%;max-height:90vh;overflow-y:auto">
+    <div class="modal-header">
+      <h3 id="couponModalTitle">新增優惠券</h3>
+      <button class="modal-close" onclick="closeCouponModal()">✕</button>
+    </div>
+    <div class="modal-body" style="padding:20px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div class="form-group" style="grid-column:1/3">
+          <label class="form-label">代碼 <span style="color:var(--danger)">*</span><span style="font-size:11px;color:var(--text-muted,#64748b);margin-left:6px">（自動轉大寫）</span></label>
+          <input type="text" id="cf-code" class="form-input" placeholder="如 WELCOME30" oninput="this.value=this.value.toUpperCase().trim()">
+        </div>
+        <div class="form-group" style="grid-column:1/3">
+          <label class="form-label">名稱 <span style="color:var(--danger)">*</span></label>
+          <input type="text" id="cf-name" class="form-input" placeholder="如 新好友折30">
+        </div>
+        <div class="form-group">
+          <label class="form-label">折扣類型 <span style="color:var(--danger)">*</span></label>
+          <select id="cf-discount-type" class="form-input" onchange="updateCouponDiscLabel()">
+            <option value="fixed">固定金額（元）</option>
+            <option value="percent">百分比（%）</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label" id="cf-disc-label">折扣金額（元）<span style="color:var(--danger)">*</span></label>
+          <input type="number" id="cf-discount-value" class="form-input" placeholder="30" min="1">
+        </div>
+        <div class="form-group">
+          <label class="form-label">最低消費（元）</label>
+          <input type="number" id="cf-min-amount" class="form-input" placeholder="0（不限）" min="0">
+        </div>
+        <div class="form-group">
+          <label class="form-label">總使用次數上限</label>
+          <input type="number" id="cf-max-usage" class="form-input" placeholder="0（不限）" min="0">
+        </div>
+        <div class="form-group">
+          <label class="form-label">每支電話使用次數</label>
+          <input type="number" id="cf-max-per-phone" class="form-input" placeholder="0（不限）" min="0">
+        </div>
+        <div class="form-group">
+          <label class="form-label">啟用狀態</label>
+          <select id="cf-enabled" class="form-input">
+            <option value="1">✅ 啟用</option>
+            <option value="0">⛔ 停用</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">開始時間</label>
+          <input type="datetime-local" id="cf-start-at" class="form-input">
+        </div>
+        <div class="form-group">
+          <label class="form-label">結束時間</label>
+          <input type="datetime-local" id="cf-end-at" class="form-input">
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer" style="padding:12px 20px;display:flex;justify-content:flex-end;gap:10px;border-top:1px solid var(--border,#334155)">
+      <button class="btn-secondary" onclick="closeCouponModal()">取消</button>
+      <button class="btn-primary" onclick="saveCoupon()" id="couponSaveBtn">儲存</button>
+    </div>
+  </div>
+</div>
+
 <!-- Toast 通知 -->
 <div class="toast-container" id="toastContainer"></div>
 
-<script src="/js/app.js"></script>
-<script src="/js/qrcode.min.js"></script>
-<script src="/license.js"></script>
+<script src="/js/app.js?v=fix18-09F-h2"></script>
+<script src="/js/coupons.js?v=fix18-06"></script>
+<script src="/js/qrcode.min.js?v=fix18-09F-h2"></script>
+<script src="/license.js?v=fix18-06"></script>
 
 <!-- LINE 商品設定 Modal (v16) -->
 <div class="modal-overlay" id="lineSettingsModal" onclick="if(event.target===this)closeLineSettingsModal()">
@@ -1638,6 +2411,80 @@
     <div class="modal-footer">
       <button class="btn-secondary" onclick="closeLineSettingsModal()">取消</button>
       <button class="btn-primary" style="background:#06C755;border-color:#06C755" onclick="saveLineSettings()">💾 儲存 LINE 設定</button>
+    </div>
+  </div>
+</div>
+
+
+</div>
+<!-- fix18-09F：商品分析群組 Modal (moved to body-end by hotfix2) -->
+<!-- fix18-09F：商品分析群組 新增/編輯 Modal -->
+<div class="modal-overlay" id="analysisGroupModal" onclick="if(event.target===this)closeAnalysisGroupModal()">
+  <div class="modal" style="max-width:680px;width:95%">
+    <div class="modal-header">
+      <h3 id="analysisGroupModalTitle">新增商品分析群組</h3>
+      <button class="modal-close" onclick="closeAnalysisGroupModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="editAnalysisGroupId">
+      <label>群組名稱 *
+        <input type="text" id="editAnalysisGroupName" placeholder="例：冷拌麻油腰子">
+      </label>
+      <label>說明
+        <input type="text" id="editAnalysisGroupDesc" placeholder="選填">
+      </label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <label>排序
+          <input type="number" id="editAnalysisGroupSort" value="0" min="0" step="1">
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;padding-top:22px">
+          <input type="checkbox" id="editAnalysisGroupEnabled" checked style="width:16px;height:16px">
+          <span>啟用</span>
+        </label>
+      </div>
+      <div style="margin-top:12px">
+        <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:var(--text-primary)">
+          📦 群組成員商品 <span style="font-weight:400;color:var(--text-muted);font-size:12px">（勾選要加入此群組的商品）</span>
+        </div>
+        <div style="margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap">
+          <input type="text" id="analysisGroupSearch" placeholder="搜尋商品名稱..." style="flex:1;min-width:160px;padding:6px 10px;border-radius:6px;border:1px solid var(--border,#334155);background:var(--bg-base,#0f172a);color:var(--text-primary);font-size:13px" oninput="filterAnalysisGroupProducts()">
+          <button onclick="selectAllAnalysisGroupProducts(true)" style="padding:5px 10px;border-radius:6px;border:1px solid var(--border,#334155);background:transparent;color:var(--text-secondary);cursor:pointer;font-size:12px">全選</button>
+          <button onclick="selectAllAnalysisGroupProducts(false)" style="padding:5px 10px;border-radius:6px;border:1px solid var(--border,#334155);background:transparent;color:var(--text-secondary);cursor:pointer;font-size:12px">取消全選</button>
+        </div>
+        <div id="analysisGroupProductList" style="max-height:260px;overflow-y:auto;border:1px solid var(--border,#334155);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:4px">
+          <div style="color:var(--text-muted);font-size:13px;padding:8px">載入中...</div>
+        </div>
+      </div>
+
+      <!-- fix18-09F-hotfix4：歷史品名別名 -->
+      <div style="margin-top:16px;border-top:1px solid var(--border,#334155);padding-top:14px">
+        <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:var(--text-primary)">
+          ⏪ 歷史品名別名
+          <span style="font-weight:400;color:var(--text-muted);font-size:12px;margin-left:6px">
+            （歷史訂單中已改名的舊品名，統計時一併歸入此群組）
+          </span>
+        </div>
+        <div id="analysisGroupAliasList" style="min-height:28px;margin-bottom:8px;display:flex;flex-direction:column;gap:2px">
+          <div style="color:var(--text-muted,#64748b);font-size:12px;padding:4px 0">尚無別名</div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <input type="text" id="analysisGroupAliasInput"
+            placeholder="輸入歷史品名，例如：冷拌麻油腰子"
+            style="flex:1;padding:6px 10px;border-radius:6px;border:1px solid var(--border,#334155);background:var(--bg-base,#0f172a);color:var(--text-primary);font-size:13px"
+            onkeydown="if(event.key==='Enter'){event.preventDefault();addAnalysisGroupAlias();}">
+          <button onclick="addAnalysisGroupAlias()"
+            style="padding:6px 14px;border-radius:6px;background:#6366f1;border:none;color:#fff;font-size:13px;cursor:pointer;white-space:nowrap">
+            ＋ 新增
+          </button>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
+          提示：輸入後按 Enter 或點「＋ 新增」。別名僅用於報表統計歸類，不修改訂單原始品名。
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeAnalysisGroupModal()">取消</button>
+      <button class="btn-primary" onclick="saveAnalysisGroup()">💾 儲存群組</button>
     </div>
   </div>
 </div>

@@ -81,11 +81,10 @@ function makeGetHeaders(channelId, signature, nonce) {
 }
 
 // ── 廣播付款成功 ──────────────────────────────────────────
-function broadcastOrderPaid(app, db, storeId, orderUuid) {
+function broadcastOrderPaid(wss, db, storeId, orderUuid) {
   try {
     const order = db.get('SELECT * FROM orders WHERE uuid=? AND store_id=?', [orderUuid, storeId]);
     if (!order) return;
-    const wss = app?.get ? app.get('wss') : null;
     broadcastToStore(wss, storeId, { type: 'order_paid', order });
     broadcastToStore(wss, storeId, { type: 'new_line_order', order });
   } catch(e) { console.error('[linepay] broadcast error:', e.message); }
@@ -97,7 +96,7 @@ function broadcastOrderPaid(app, db, storeId, orderUuid) {
 router.post('/test', async (req, res) => {
   try {
     const db      = getDb();
-    const storeId = req.storeId || 'store_001';
+    const storeId = req.storeId;
 
     // 允許從 body 傳入（儲存前即時測試），否則讀 DB（不需 is_active）
     let channelId     = (req.body?.channel_id     || '').trim();
@@ -261,7 +260,7 @@ router.post('/test', async (req, res) => {
 router.post('/request', async (req, res) => {
   try {
     const db      = getDb();
-    const storeId = req.storeId || 'store_001';
+    const storeId = req.storeId;
     const cfg     = getLinePayConfig(db, storeId);
 
     if (!cfg) return res.status(400).json({ success: false, message: 'LINE Pay 未設定或未啟用' });
@@ -274,26 +273,71 @@ router.post('/request', async (req, res) => {
     const order = db.get('SELECT * FROM orders WHERE uuid=? AND store_id=?', [order_uuid, storeId]);
     if (!order) return res.status(404).json({ success: false, message: '訂單不存在' });
 
-    const linePayProducts = (items || []).map(i => ({
-      name:     String(i.name || '商品').slice(0, 4000),
-      quantity: Number(i.qty || 1),
-      price:    Number(i.price || 0),
-    }));
-    if (!linePayProducts.length) {
-      linePayProducts.push({ name: '訂單費用', quantity: 1, price: Number(total) });
+    // fix18-06: LINE Pay amount 使用 DB order.total（含外送費、折扣後的最終金額）
+    // 不信任前端傳來的 total。
+    const finalTotal  = Number(order.total || 0);
+    const discountAmt = Number(order.discount_amount || 0);
+    const couponCode  = order.coupon_code ? String(order.coupon_code) : '';
+    const delivFee    = Number(order.delivery_fee || 0);
+    let linePayProducts;
+    if (discountAmt > 0) {
+      // 有折扣：方案 C — 單一總品項（避免 2101 Parameter error）
+      const productName = couponCode
+        ? '訂單費用（已套用優惠券 ' + couponCode + '）'
+        : '訂單費用（含優惠折扣）';
+      linePayProducts = [{ name: productName.slice(0, 4000), quantity: 1, price: finalTotal }];
+    } else {
+      // 無折扣：商品明細 + 外送費（若有）
+      linePayProducts = (items || []).map(i => ({
+        name:     String(i.name || '商品').slice(0, 4000),
+        quantity: Number(i.qty || 1),
+        price:    Number(i.price || 0),
+      }));
+      if (!linePayProducts.length) {
+        linePayProducts.push({ name: '訂單費用', quantity: 1, price: finalTotal });
+      }
+      // fix18-06：外送費加一筆（若有）
+      if (delivFee > 0) {
+        linePayProducts.push({ name: '外送費', quantity: 1, price: delivFee });
+      }
     }
 
     const host = `${req.protocol}://${req.get('host')}`;
     const confirmUrl   = redirect_url || `${host}/api/linepay/confirm?store_id=${storeId}`;
     const cancelUrlFinal = cancel_url || `${host}/line-order.html?store_id=${storeId}&linepay=cancel`;
 
+    const lpAmount        = Number(total);
+    const lpPackageAmount = Number(total);
+    const lpProductsTotal = linePayProducts.reduce((s, p) => s + Number(p.quantity) * Number(p.price), 0);
+
+    // ── fix18-06: 送出前三值一致性驗證 ───────────────────
+    console.log(
+      `[LINEPAY] amount=${lpAmount}` +
+      ` packageAmount=${lpPackageAmount}` +
+      ` productsTotal=${lpProductsTotal}` +
+      ` orderId=${order_number || order_uuid}` +
+      ` discount=${discountAmt}` +
+      ` coupon=${couponCode || '(none)'}`
+    );
+    if (lpAmount !== lpProductsTotal) {
+      console.error(
+        `[LINEPAY] MISMATCH — amount(${lpAmount}) !== productsTotal(${lpProductsTotal})` +
+        ` orderId=${order_number || order_uuid}`
+      );
+      return res.status(400).json({
+        success: false,
+        message: `LINE Pay 金額驗證失敗：amount(${lpAmount}) ≠ products加總(${lpProductsTotal})，訂單未送出`,
+        debug: { amount: lpAmount, packageAmount: lpPackageAmount, productsTotal: lpProductsTotal },
+      });
+    }
+
     const requestBody = {
-      amount:   Number(total),
+      amount:   lpAmount,
       currency: 'TWD',
       orderId:  order_number || order_uuid,
       packages: [{
         id:       order_number || order_uuid,
-        amount:   Number(total),
+        amount:   lpPackageAmount,
         name:     String(customer_name || '訂單').slice(0, 100),
         products: linePayProducts,
       }],
@@ -359,7 +403,7 @@ router.post('/request', async (req, res) => {
 // GET /api/linepay/confirm — LINE Pay 付款成功 callback
 // ══════════════════════════════════════════════════════════
 router.get('/confirm', async (req, res) => {
-  const storeId = req.query.store_id || req.storeId || 'store_001';
+  const storeId = req.query.store_id || req.storeId || null;
   try {
     const db  = getDb();
     const cfg = getLinePayConfig(db, storeId);
@@ -453,11 +497,19 @@ router.get('/confirm', async (req, res) => {
       }
     });
 
-    // 廣播付款成功通知（後台列表刷新），不送 new_line_order（接單後才出單）
+    // 廣播付款成功通知（後台列表刷新）
     try {
       const paidOrder = db.get('SELECT * FROM orders WHERE uuid=? AND store_id=?', [order.uuid, storeId]);
-      const wss = app?.get ? app.get('wss') : null;
-      broadcastToStore(wss, storeId, { type: 'linepay_paid', order: paidOrder });
+      const wss = req.app.get('wss');
+      broadcastToStore(wss, storeId, {
+        type:            'linepay_paid',
+        order_uuid:      order.uuid,
+        order_number:    order.order_number,
+        transactionId:   transactionId,
+        payment_status:  'paid'
+      });
+      // 也廣播 order_status_changed 讓列表刷新
+      broadcastToStore(wss, storeId, { type: 'order_status_changed', order: paidOrder });
     } catch(e) { console.error('[linepay] paid broadcast error:', e.message); }
     res.redirect(`/line-order.html?store_id=${storeId}&linepay=success&order=${order.order_number}`);
   } catch(e) {
@@ -470,7 +522,7 @@ router.get('/confirm', async (req, res) => {
 // GET /api/linepay/cancel — 付款取消 callback
 // ══════════════════════════════════════════════════════════
 router.get('/cancel', (req, res) => {
-  const storeId = req.query.store_id || req.storeId || 'store_001';
+  const storeId = req.query.store_id || req.storeId || null;
   res.redirect(`/line-order.html?store_id=${storeId}&linepay=cancel&order=${req.query.orderId || ''}`);
 });
 

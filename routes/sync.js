@@ -3,11 +3,28 @@ const express = require('express');
 const router  = express.Router();
 const { getDb } = require('../utils/db');
 
+// Android 平板功能的預設值（Web 尚未設定 android_features 時使用）
+const ANDROID_FEATURES_DEFAULT = {
+  pos:              true,
+  orders:           true,
+  reports:          false,
+  products:         false,
+  inventory:        false,
+  payment_methods:  false,
+  delivery_settings:false,
+  line_orders:      true,
+  line_products:    false,
+  settings:         true,
+  sync:             true,
+  print_settings:   true
+};
+
 // GET /api/sync/config  — Android 啟動時下載最新設定
+// v18-features：加入 features 欄位，供 Android 控制功能入口顯示
 router.get('/config', (req, res) => {
   try {
     const db = getDb();
-    const storeId = req.storeId || 'store_001';
+    const storeId = req.storeId;
     const products       = db.all('SELECT * FROM products WHERE store_id=? AND enabled=1 ORDER BY sort_order, id', [storeId]);
     const categories     = db.all('SELECT * FROM categories WHERE store_id=? AND is_active=1 ORDER BY sort_order, id', [storeId]);
     const paymentMethods = db.all('SELECT * FROM payment_methods WHERE store_id=? AND is_active=1 ORDER BY sort_order, id', [storeId]);
@@ -16,9 +33,24 @@ router.get('/config', (req, res) => {
     const settings = {};
     settingsRows.forEach(s => { settings[s.key] = s.value; });
 
+    // 讀取 android_features，若未設定則使用預設值
+    let features = { ...ANDROID_FEATURES_DEFAULT };
+    const androidFeaturesRow = db.get(
+      "SELECT value FROM settings WHERE store_id=? AND key='android_features'",
+      [storeId]
+    );
+    if (androidFeaturesRow && androidFeaturesRow.value) {
+      try {
+        const saved = JSON.parse(androidFeaturesRow.value);
+        // merge：DB 有的欄位覆蓋預設，DB 沒有的保留預設（向後相容）
+        features = { ...ANDROID_FEATURES_DEFAULT, ...saved };
+      } catch { /* JSON parse 失敗，保留預設 */ }
+    }
+
     res.json({
       success: true,
       data: { products, categories, paymentMethods, platforms, settings },
+      features,
       store_id: storeId,
       synced_at: new Date().toISOString()
     });
@@ -31,7 +63,7 @@ router.get('/config', (req, res) => {
 router.post('/orders', (req, res) => {
   try {
     const db = getDb();
-    const storeId = req.storeId || 'store_001';
+    const storeId = req.storeId;
     const { device_id, orders } = req.body;
 
     if (!Array.isArray(orders) || orders.length === 0)
@@ -134,7 +166,7 @@ router.post('/orders', (req, res) => {
 router.get('/status', (req, res) => {
   try {
     const db = getDb();
-    const storeId = req.storeId || 'store_001';
+    const storeId = req.storeId;
     const deviceStats = db.all(
       `SELECT device_id,
               COUNT(*) as total_orders,

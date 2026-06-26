@@ -215,9 +215,46 @@ initDb().then((db) => {
   // ── Super Admin 總控台（獨立，不需 storeGuard）────────
   app.use('/api/super-admin', require('./routes/superAdmin'));
 
-  // ── 店家登入（公開，不需 storeGuard）─────────────────
+  // ── hotfix11/12 診斷 API：GET /api/debug/schema ──────────
+  // 部署後呼叫此 API 可確認線上 SQLite schema 是否正確（無需登入）
+  app.get('/api/debug/schema', (req, res) => {
+    try {
+      const db = getDb();
+      const raw = db._db;
+
+      function tableInfo(tbl) {
+        const tableSql = (raw.exec(`SELECT sql FROM sqlite_master WHERE type='table' AND name='${tbl}'`)?.[0]?.values?.[0]?.[0]) || null;
+        const idxListRaw = (raw.exec(`PRAGMA index_list('${tbl}')`)?.[0]?.values) || [];
+        const indexes = [];
+        for (const r of idxListRaw) {
+          const idxName = r[1];
+          const isUnique = r[2] === 1;
+          const cols = (raw.exec(`SELECT name FROM pragma_index_info('${idxName}')`)?.[0]?.values || []).map(v => v[0]);
+          indexes.push({ name: idxName, unique: isUnique, columns: cols });
+        }
+        const hasNameOnly    = indexes.some(i => i.unique && i.columns.length === 1 && i.columns[0] === 'name');
+        const hasStoreIdName = indexes.some(i => i.unique && i.columns.includes('store_id') && i.columns.includes('name'));
+        const status         = hasNameOnly
+          ? 'UNIQUE(name) 仍存在，跨店新增會失敗'
+          : (hasStoreIdName ? 'UNIQUE(store_id,name) OK' : '無 unique index，請確認');
+        return { table_sql: tableSql, indexes, diagnosis: { has_unique_name_only: hasNameOnly, has_unique_store_id_name: hasStoreIdName, status } };
+      }
+
+      res.json({
+        success: true,
+        version: require('./package.json').version,
+        ingredients: tableInfo('ingredients'),
+        delivery_platforms: tableInfo('delivery_platforms')
+      });
+    } catch(e) {
+      res.status(500).json({ success: false, message: e.message });
+    }
+  });
+
+    // ── 店家登入（公開，不需 storeGuard）─────────────────
   // POST /api/store-login        → 登入，取得 JWT
   // POST /api/store-login/set-password → Super Admin 設密碼（另需保護）
+
   app.use('/api/store-login', require('./routes/storeLogin'));
 
   // ── v18+ 授權系統（保持原有相容）────────────────────────
@@ -269,6 +306,20 @@ initDb().then((db) => {
   app.use('/api/payment-gateways', requireStore, requireFeature('payment_api'), require('./routes/payment-gateways'));
   // LINE Pay v3 — 不需要 payment_api feature gate，/confirm 由 LINE 直接呼叫
   app.use('/api/linepay', requireStore, require('./routes/linepay'));
+  // fix18-06: Google Maps proxy & delivery fee calculation
+  app.use('/api/maps',     requireStore, require('./routes/maps'));
+  app.use('/api/delivery', requireStore, require('./routes/delivery'));
+  // fix18-06: 前端取得 Browser Key（只回傳 BROWSER KEY，絕不回傳 SERVER KEY）
+  app.get('/api/config/maps-browser-key', requireStore, (req, res) => {
+    const browserKey = process.env.GOOGLE_MAPS_BROWSER_KEY || '';
+    if (!browserKey) return res.status(503).json({ success: false, message: 'Google Maps Browser Key 未設定' });
+    return res.json({ success: true, key: browserKey });
+  });
+  // fix18-05: 優惠券管理（Web 後台 CRUD + LINE validate）
+  app.use('/api/coupons', requireStore, requireFeature('coupon'), require('./routes/coupons'));
+  app.use('/api/discount-campaigns', requireStore, require('./routes/discount-campaigns'));
+  app.use('/api/discount-categories', requireStore, require('./routes/discount-categories')); // fix18-09E
+  app.use('/api/product-analysis-groups', requireStore, require('./routes/product-analysis-groups')); // fix18-09F
   // LINE Pay 相容路由別名（後台 webhook_url 預設為 /webhook/linepay）
   app.post('/webhook/linepay', (req, res, next) => {
     console.log('[linepay/webhook alias]', JSON.stringify(req.body).slice(0, 200));
@@ -314,6 +365,7 @@ initDb().then((db) => {
   // importExport — inventory endpoints wrapped with featureGate inside the router
   // (full route handled inside importExport.js with inline checks)
   app.use('/api', requireStore, require('./routes/importExport'));
+  app.use('/api', requireStore, require('./routes/migration')); // fix18-10
 
   // ── Super Admin 前端入口（/system-admin 獨立路由）────
   app.get('/system-admin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'system-admin.html')));

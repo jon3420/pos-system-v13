@@ -16,6 +16,95 @@ const { getProductInventoryStatus } = require('../utils/inventoryHelper');
 const { broadcastToStore } = require('../utils/wssBroadcast');
 const { v4: uuidv4 } = require('uuid');
 const fetch = require('node-fetch');
+const { validateCoupon } = require('./coupons'); // fix18-05
+const { getStoreFeatures } = require('../middleware/featureGate'); // fix18-05 coupon gate
+
+// ── fix18-06：外送費後端重算 helper ──────────────────
+const SERVER_KEY = () => process.env.GOOGLE_MAPS_SERVER_KEY || '';
+
+function getSettingVal(db, storeId, key, def = '') {
+  const row = db.get('SELECT value FROM settings WHERE store_id=? AND key=?', [storeId, key]);
+  return row ? row.value : def;
+}
+
+async function recalcDeliveryFee(db, storeId, destLat, destLng, subtotal) {
+  const key = SERVER_KEY();
+  if (!key) throw Object.assign(new Error('GOOGLE_MAPS_SERVER_KEY 未設定'), { reason: 'maps_unavailable' });
+
+  const storeLat = parseFloat(getSettingVal(db, storeId, 'store_lat', ''));
+  const storeLng = parseFloat(getSettingVal(db, storeId, 'store_lng', ''));
+  if (isNaN(storeLat) || isNaN(storeLng) || !storeLat || !storeLng) {
+    throw Object.assign(new Error('店家座標尚未設定，無法計算外送費'), { reason: 'maps_unavailable' });
+  }
+
+  const maxDistKm = parseFloat(getSettingVal(db, storeId, 'delivery_max_distance_km', '7'));
+  const basicFee  = parseFloat(getSettingVal(db, storeId, 'delivery_basic_fee', '50'));
+  const freeThr   = parseFloat(getSettingVal(db, storeId, 'delivery_free_threshold', '1000'));
+  const sub       = parseFloat(subtotal) || 0;
+
+  let rules = [];
+  try {
+    const raw = getSettingVal(db, storeId, 'delivery_distance_fee_rules', '');
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) { rules = parsed; rules.sort((a, b) => a.max_km - b.max_km); }
+  } catch {}
+
+  // Google Routes API
+  const routesBody = {
+    origin:      { location: { latLng: { latitude: storeLat,  longitude: storeLng  } } },
+    destination: { location: { latLng: { latitude: destLat,   longitude: destLng   } } },
+    travelMode: 'DRIVE',
+    routingPreference: 'TRAFFIC_UNAWARE',
+    computeAlternativeRoutes: false,
+    languageCode: 'zh-TW',
+  };
+
+  let distKm;
+  try {
+    const gResp = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
+      method: 'POST',
+      headers: {
+        'Content-Type':     'application/json',
+        'X-Goog-Api-Key':   key,
+        'X-Goog-FieldMask': 'routes.distanceMeters',
+      },
+      body: JSON.stringify(routesBody),
+      timeout: 10000,
+    });
+    if (!gResp.ok) throw new Error(`Routes API HTTP ${gResp.status}`);
+    const gData = await gResp.json();
+    if (!gData.routes || !gData.routes.length) throw new Error('Routes API 無路線');
+    distKm = Math.round(gData.routes[0].distanceMeters / 10) / 100;
+  } catch (gErr) {
+    console.error('[line-orders] Routes API 失敗:', gErr.message);
+    throw Object.assign(new Error('外送距離計算暫時無法使用，請稍後再試或改選外帶取餐'), { reason: 'maps_unavailable' });
+  }
+
+  if (distKm > maxDistKm) {
+    throw Object.assign(
+      new Error(`距離 ${distKm} 公里，超過本店外送範圍（最遠 ${maxDistKm} 公里）`),
+      { reason: 'out_of_range', distance_km: distKm }
+    );
+  }
+
+  const matched = rules.find(r => distKm <= r.max_km);
+  if (!matched) {
+    throw Object.assign(
+      new Error(`距離 ${distKm} 公里，超過外送費級距設定範圍`),
+      { reason: 'out_of_range', distance_km: distKm }
+    );
+  }
+
+  const rawFee = matched.fee;
+  let deliveryFee = rawFee;
+  if (freeThr > 0 && sub >= freeThr) {
+    const reduced = rawFee - basicFee;
+    deliveryFee = reduced > 0 ? reduced : 0;
+  }
+
+  const mapsUrl = `https://www.google.com/maps/dir/?api=1&origin=${storeLat},${storeLng}&destination=${destLat},${destLng}&travelmode=driving`;
+  return { distKm, deliveryFee, rawFee, mapsUrl };
+}
 
 function orderNumber() {
   const n = new Date(), p = (v,l=2) => String(v).padStart(l,'0');
@@ -64,18 +153,33 @@ function isClosedDate(db, storeId, dateStr) {
 // ── 模式（外帶 takeout / 外送 delivery）設定讀取 ─────────
 function getModeSettings(db, storeId, mode) {
   // mode: 'takeout' | 'delivery'
+  // fix18-06: 今日臨時截止時間判斷
+  // today_cutoff 只在 today_cutoff_date == 今天時生效，否則回傳空字串
+  function getTodayCutoff(prefix) {
+    const todayDate = twDateStr();
+    const todayTime = getSetting(db, storeId, prefix + '_today_cutoff_time', '');
+    const todayDateKey = getSetting(db, storeId, prefix + '_today_cutoff_date', '');
+    if (todayTime && todayDateKey === todayDate) return todayTime;
+    return '';  // 日期不符或未設定 → 不套用今日限制
+  }
+
   if (mode === 'takeout') {
+    const todayCutoff = getTodayCutoff('takeout');
     return {
       enabled:      getSetting(db, storeId, 'takeout_enabled', '1') === '1',
-      cutoffTime:   getSetting(db, storeId, 'takeout_cutoff_time', ''),
+      // fix18-06: 優先使用今日臨時截止；若無則沿用舊版固定 cutoff（向後相容）
+      cutoffTime:   todayCutoff || getSetting(db, storeId, 'takeout_cutoff_time', ''),
+      todayCutoff:  todayCutoff,  // 單獨保留，讓前端知道是否為今日臨時設定
       prepMins:     Number(getSetting(db, storeId, 'takeout_prep_minutes', '15')),
       allowNextDay: getSetting(db, storeId, 'takeout_allow_next_day', '1') === '1',
       bizHours:     (() => { try { return JSON.parse(getSetting(db, storeId, 'takeout_business_hours', '{}')); } catch { return {}; } })(),
     };
   } else {
+    const todayCutoff = getTodayCutoff('delivery');
     return {
       enabled:      getSetting(db, storeId, 'delivery_enabled', '1') === '1',
-      cutoffTime:   getSetting(db, storeId, 'delivery_cutoff_time', ''),
+      cutoffTime:   todayCutoff || getSetting(db, storeId, 'delivery_cutoff_time', ''),
+      todayCutoff:  todayCutoff,
       prepMins:     Number(getSetting(db, storeId, 'delivery_prep_minutes', '30')),
       allowNextDay: getSetting(db, storeId, 'delivery_allow_next_day', '1') === '1',
       bizHours:     (() => { try { return JSON.parse(getSetting(db, storeId, 'delivery_business_hours', '{}')); } catch { return {}; } })(),
@@ -160,7 +264,7 @@ async function triggerN8nWebhook(db, storeId, event, payload) {
 function broadcastNewOrder(app, order) {
   try {
     const wss     = app?.get ? app.get('wss') : null;
-    const storeId = order?.store_id || 'store_001';
+    const storeId = order?.store_id;
     broadcastToStore(wss, storeId, { type: 'new_line_order', order });
   } catch {}
 }
@@ -196,7 +300,7 @@ function deductIngredients(db, storeId, items, orderId) {
 router.get('/shop', (req, res) => {
   try {
     const db = getDb();
-    const storeId = req.storeId || 'store_001';
+    const storeId = req.storeId;
     const now = twNow();
     const todayStr = twDateStr(now);
     const nowMins = now.getHours()*60 + now.getMinutes();
@@ -213,6 +317,9 @@ router.get('/shop', (req, res) => {
       'takeout_enabled','takeout_cutoff_time','takeout_prep_minutes','takeout_allow_next_day','takeout_business_hours',
       'delivery_cutoff_time','delivery_prep_minutes','delivery_allow_next_day','delivery_business_hours',
       'next_day_min_hours',
+      // fix18-06: 今日臨時截止設定
+      'takeout_today_cutoff_time','takeout_today_cutoff_date',
+      'delivery_today_cutoff_time','delivery_today_cutoff_date',
     ];
     const settings = {};
     keys.forEach(k => { settings[k] = getSetting(db, storeId, k, ''); });
@@ -233,6 +340,8 @@ router.get('/shop', (req, res) => {
       earliest_today: takeoutMode.enabled && !closedInfo.closed
         ? getEarliestMins(takeoutMode, todayStr, nowMins)
         : null,
+      // fix18-06: 今日臨時截止資訊（供前台顯示用）
+      today_cutoff:   takeoutMode.todayCutoff || '',
     };
     settings.delivery_status = {
       enabled:        deliveryMode.enabled,
@@ -242,6 +351,7 @@ router.get('/shop', (req, res) => {
       earliest_today: deliveryMode.enabled && !closedInfo.closed
         ? getEarliestMins(deliveryMode, todayStr, nowMins)
         : null,
+      today_cutoff:   deliveryMode.todayCutoff || '',
     };
 
     // 找下一個可訂日（最多往後查 14 天）
@@ -274,6 +384,10 @@ router.get('/shop', (req, res) => {
     settings.today = todayStr;
     settings.now_mins = nowMins;
 
+    // fix18-05: 加入 coupon feature 旗標，讓 LINE 前台決定是否顯示優惠券輸入框
+    const lineFeatures = getStoreFeatures(storeId);
+    settings.coupon_feature_enabled = lineFeatures.coupon === true;
+
     res.json({ success: true, data: settings });
   } catch(e) { res.status(500).json({ success: false, message: e.message }); }
 });
@@ -282,7 +396,7 @@ router.get('/shop', (req, res) => {
 router.get('/menu', (req, res) => {
   try {
     const db = getDb();
-    const storeId = req.storeId || 'store_001';
+    const storeId = req.storeId;
     const now = twNow();
     const nowMins = now.getHours()*60 + now.getMinutes();
 
@@ -448,7 +562,7 @@ router.get('/menu', (req, res) => {
 router.get('/timeslots', (req, res) => {
   try {
     const db = getDb();
-    const storeId = req.storeId || 'store_001';
+    const storeId = req.storeId;
     const mode = req.query.mode === 'delivery' ? 'delivery' : 'takeout';
     const dateStr = req.query.date || twDateStr();
     const now = twNow();
@@ -488,7 +602,7 @@ router.get('/timeslots', (req, res) => {
 router.get('/validate-cart', (req, res) => {
   try {
     const db = getDb();
-    const storeId = req.storeId || 'store_001';
+    const storeId = req.storeId;
     const mode = req.query.mode === 'delivery' ? 'delivery' : 'takeout';
     const productIds = String(req.query.product_ids||'').split(',').map(Number).filter(Boolean);
     const now = twNow();
@@ -566,20 +680,33 @@ function validateOrderConditions(db, storeId, mode, dateStr, pickupTime, nowMins
 }
 
 // ── POST /（新 LINE 訂單）──────────────────────────────────
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   try {
     const db = getDb();
-    const storeId = req.storeId || 'store_001';
+    const storeId = req.storeId;
     const {
       customer_name, customer_phone, customer_line_id,
       order_type, pickup_time, pickup_date, delivery_address,
-      note, payment_method, items, subtotal, discount_amount, total
+      delivery_address_note, delivery_lat, delivery_lng,
+      note, payment_method, items, subtotal, discount_amount, total,
+      coupon_code
     } = req.body;
 
     if (!items || !Array.isArray(items) || items.length === 0)
       return res.status(400).json({ success: false, message: '購物車不能為空' });
     if (!customer_name || !customer_phone)
       return res.status(400).json({ success: false, message: '請填寫姓名與電話' });
+
+    // ── fix18-06：外送模式必填地址與座標 ────────────────
+    const isDelivery = order_type === 'delivery';
+    if (isDelivery) {
+      if (!delivery_address || !String(delivery_address).trim())
+        return res.status(400).json({ success: false, message: '外送訂單請填寫外送地址' });
+      const dLat = parseFloat(delivery_lat);
+      const dLng = parseFloat(delivery_lng);
+      if (isNaN(dLat) || isNaN(dLng))
+        return res.status(400).json({ success: false, message: '外送地址座標無效，請重新選擇地址' });
+    }
 
     const now = twNow();
     const nowMins = now.getHours()*60 + now.getMinutes();
@@ -661,14 +788,86 @@ router.post('/', (req, res) => {
       return res.status(400).json({ success: false, message: `付款方式「${payment_method}」目前未開放` });
     const payment_category = payment_method === 'cash' ? 'cash' : 'non_cash';
 
+    // ── fix18-05：優惠券後端重新驗證（不信任前端金額）──────
+    const sub = Number(subtotal) || 0;
+    let discAmt    = 0;
+    let finalTotal = sub;
+    let appliedCouponId   = null;
+    let appliedCouponCode = '';
+    const normalCouponCode = coupon_code ? String(coupon_code).trim().toUpperCase() : '';
+
+    if (normalCouponCode) {
+      // coupon feature gate 檢查（LINE 前台也必須受授權控制）
+      const storeFeatures = getStoreFeatures(storeId);
+      if (storeFeatures.coupon !== true) {
+        return res.status(403).json({
+          success: false,
+          error:   'COUPON_FEATURE_DISABLED',
+          message: '優惠券功能未啟用'
+        });
+      }
+      const phone = String(customer_phone || '').trim();
+      const cvResult = validateCoupon(db, storeId, normalCouponCode, sub, phone);
+      if (!cvResult.ok) {
+        return res.status(400).json({ success: false, message: cvResult.message, reason: 'coupon_invalid' });
+      }
+      discAmt            = cvResult.discount_amount;
+      finalTotal         = cvResult.final_total;
+      appliedCouponId    = cvResult.coupon.id;
+      appliedCouponCode  = cvResult.coupon.code;
+    }
+
+    // ── fix18-06：外送費後端重算（不信任前端）────────────
+    let calcDelivFee    = 0;
+    let calcDistKm      = 0;
+    let calcMapsUrl     = '';
+    const couponApplyToDelivery = getSettingVal(db, storeId, 'coupon_apply_to_delivery_fee', '0') === '1';
+
+    if (isDelivery) {
+      const destLat = parseFloat(delivery_lat);
+      const destLng = parseFloat(delivery_lng);
+      try {
+        const feeResult = await recalcDeliveryFee(db, storeId, destLat, destLng, sub);
+        calcDelivFee = feeResult.deliveryFee;
+        calcDistKm   = feeResult.distKm;
+        calcMapsUrl  = feeResult.mapsUrl;
+      } catch (delivErr) {
+        return res.status(delivErr.reason === 'out_of_range' ? 400 : 503).json({
+          success: false,
+          message: delivErr.message,
+          reason:  delivErr.reason || 'delivery_error',
+          distance_km: delivErr.distance_km,
+        });
+      }
+
+      // 根據 coupon_apply_to_delivery_fee 計算 finalTotal
+      if (couponApplyToDelivery) {
+        // 折扣適用於 subtotal + delivery_fee
+        const couponBase = sub + calcDelivFee;
+        if (normalCouponCode && appliedCouponId) {
+          // 重新以含運費金額計算折扣（需 re-validate）
+          const phone = String(customer_phone || '').trim();
+          const cvResult2 = validateCoupon(db, storeId, normalCouponCode, couponBase, phone);
+          if (cvResult2.ok) {
+            discAmt    = cvResult2.discount_amount;
+            finalTotal = cvResult2.final_total; // = couponBase - discount
+          } else {
+            finalTotal = couponBase - discAmt;
+          }
+        } else {
+          finalTotal = sub - discAmt + calcDelivFee;
+        }
+      } else {
+        // 折扣只適用於 subtotal（預設）
+        finalTotal = sub - discAmt + calcDelivFee;
+      }
+    }
+
     // ── 建立訂單 ──────────────────────────────────────
     const uuid = uuidv4(), orderNo = orderNumber();
     const pad = (n,l=2) => String(n).padStart(l,'0');
     const nowStr = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
     const itemsJson = JSON.stringify(items);
-    const finalTotal = Number(total)||Number(subtotal)||0;
-    const discAmt    = Number(discount_amount)||0;
-    const sub        = Number(subtotal)||0;
     const orderMode  = order_type === 'delivery' ? 'delivery' : 'takeout';
     // 預購訂單：將日期合入 pickup_time，格式 "YYYY-MM-DD HH:MM"，方便後台辨識
     let pickupTimeVal = (pickup_time && pickup_time.trim()) ? pickup_time.trim() : '';
@@ -681,20 +880,49 @@ router.post('/', (req, res) => {
       `INSERT INTO orders (
         id, uuid, order_number, store_id, order_mode, order_status, kitchen_status,
         customer_name, customer_phone, customer_line_id,
-        pickup_time, delivery_address, delivery_platform, platform_order_no,
+        pickup_time, delivery_address, delivery_address_note,
+        delivery_platform, platform_order_no,
+        delivery_lat, delivery_lng, delivery_distance_km, delivery_maps_url,
+        delivery_fee,
         items, payment_method, payment_category, payment_status,
-        subtotal, discount_type, discount_amount, total,
+        subtotal, discount_type, discount_amount, original_total, coupon_code, total,
         note, sync_status, device_id, source, created_at, updated_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         uuid, uuid, orderNo, storeId, orderMode, 'pending', 'pending',
         customer_name, customer_phone, customer_line_id||'',
-        pickupTimeVal, delivery_address||'', 'LINE', '',
+        pickupTimeVal, delivery_address||'', delivery_address_note||'',
+        'LINE', '',
+        isDelivery ? String(parseFloat(delivery_lat)||'') : '',
+        isDelivery ? String(parseFloat(delivery_lng)||'') : '',
+        calcDistKm, calcMapsUrl,
+        calcDelivFee,
         itemsJson, payment_method||'cash', payment_category, 'pending',
-        sub, 'none', discAmt, finalTotal,
+        sub, 'none', discAmt, sub, appliedCouponCode, finalTotal,
         note||'', 'synced', 'LINE', 'line', nowStr, nowStr
       ]
     );
+
+    // ── fix18-05：寫入 coupon_redemptions（訂單建立成功後）
+    if (appliedCouponId) {
+      try {
+        db.run(
+          `INSERT OR IGNORE INTO coupon_redemptions
+             (store_id, coupon_id, coupon_code, order_id, order_number,
+              customer_phone, discount_amount, original_total, final_total, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?)`,
+          [
+            storeId, appliedCouponId, appliedCouponCode,
+            uuid, orderNo,
+            String(customer_phone || '').trim(),
+            discAmt, sub, finalTotal, nowStr
+          ]
+        );
+      } catch (rErr) {
+        console.error('[line-orders] coupon_redemptions 寫入失敗:', rErr.message);
+        // redemption 寫入失敗不中斷訂單，但記錄錯誤
+      }
+    }
 
     // ── 扣 LINE 份數（不動主庫存）────────────────────
     // 規則：
@@ -743,7 +971,10 @@ router.post('/', (req, res) => {
       payment_method: payment_method||'cash', items
     });
 
-    res.json({ success: true, data: { order_number: orderNo, uuid, total: finalTotal } });
+    res.json({ success: true, data: {
+      order_number: orderNo, uuid, total: finalTotal,
+      delivery_fee: calcDelivFee, distance_km: calcDistKm,
+    } });
   } catch(e) {
     console.error('[line-orders] POST error:', e.message);
     res.status(500).json({ success: false, message: e.message });
@@ -754,7 +985,7 @@ router.post('/', (req, res) => {
 router.get('/online', (req, res) => {
   try {
     const db = getDb();
-    const storeId = req.storeId || 'store_001';
+    const storeId = req.storeId;
     const { status, limit=50, offset=0 } = req.query;
     let where = "WHERE store_id=? AND source='line'";
     const params = [storeId];
@@ -777,7 +1008,7 @@ router.get('/online', (req, res) => {
 router.patch('/online/:id/status', (req, res) => {
   try {
     const db = getDb();
-    const storeId = req.storeId || 'store_001';
+    const storeId = req.storeId;
     const rawId = req.params.id;
     const newStatus = req.body.status || req.body.order_status;
     const valid = ['pending','accepted','preparing','ready','completed','cancelled'];
@@ -875,7 +1106,7 @@ function isFullPhone(input) { return /^\d{6,}$/.test(String(input||'').replace(/
 router.get('/status/:orderNo', (req, res) => {
   try {
     const db = getDb();
-    const storeId = req.storeId || 'store_001';
+    const storeId = req.storeId;
     const order = db.get(
       'SELECT order_number, order_status, kitchen_status, created_at, total FROM orders WHERE store_id=? AND order_number=?',
       [storeId, req.params.orderNo]
@@ -888,7 +1119,7 @@ router.get('/status/:orderNo', (req, res) => {
 router.post('/query', (req, res) => {
   try {
     const db = getDb();
-    const storeId = req.storeId || 'store_001';
+    const storeId = req.storeId;
     const rawPhone = String(req.body.phone||req.body.customer_phone||'').trim();
     const rawName  = String(req.body.customer_name||'').trim();
     const rawOrderNo = String(req.body.order_number||'').trim();
@@ -943,7 +1174,7 @@ router.post('/query', (req, res) => {
 router.post('/history', (req, res) => {
   try {
     const db = getDb();
-    const storeId = req.storeId || 'store_001';
+    const storeId = req.storeId;
     const rawPhone = String(req.body.phone||'').trim();
     const rawName  = String(req.body.customer_name||'').trim();
     if (!rawPhone) return res.status(400).json({ success: false, message: '請輸入電話' });
@@ -973,7 +1204,7 @@ router.post('/history', (req, res) => {
 router.post('/quota-reset', (req, res) => {
   try {
     const db = getDb();
-    const storeId = req.storeId || 'store_001';
+    const storeId = req.storeId;
     db.run(
       `UPDATE products SET line_quota_sold=0, updated_at=datetime('now','localtime')
        WHERE store_id=? AND line_quota_enabled=1`,

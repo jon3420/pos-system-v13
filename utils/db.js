@@ -257,6 +257,56 @@ function initTables(w) {
     w._save();
   } catch {}
 
+  // fix18-10-hotfix7：偵測 categories 是否有 UNIQUE(name)（舊版遺留），若有則重建表格
+  // 舊版 categories 可能帶有 UNIQUE(name) 導致跨店匯入衝突
+  // 修正：重建為 UNIQUE(store_id, name)
+  try {
+    const catSql = (w._db.exec("SELECT sql FROM sqlite_master WHERE type='table' AND name='categories'")[0]?.values?.[0]?.[0]) || '';
+    const hasNameUnique = /name\s+TEXT[^,)]*UNIQUE/i.test(catSql) ||
+      (w._db.exec("SELECT name,origin FROM pragma_index_list('categories') WHERE origin='u'")[0]?.values||[])
+        .some(([idxName]) => {
+          const cols = w._db.exec(`SELECT name FROM pragma_index_info('${idxName}')`)[0]?.values||[];
+          return cols.length === 1 && cols[0][0] === 'name';
+        });
+    if (hasNameUnique) {
+      console.log('[DB] fix18-10-hotfix7: categories 偵測到 UNIQUE(name)，重建為 UNIQUE(store_id, name)');
+      w._db.run('BEGIN');
+      try {
+        w._db.run(`CREATE TABLE categories_h7_tmp (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          store_id TEXT NOT NULL DEFAULT 'store_001',
+          name TEXT NOT NULL,
+          icon TEXT DEFAULT '📌',
+          sort_order INTEGER DEFAULT 0,
+          is_active INTEGER DEFAULT 1,
+          created_at TEXT DEFAULT (datetime('now','localtime')),
+          updated_at TEXT DEFAULT (datetime('now','localtime')),
+          UNIQUE(store_id, name)
+        )`);
+        w._db.run(`INSERT INTO categories_h7_tmp (id,store_id,name,icon,sort_order,is_active,created_at,updated_at)
+          SELECT id,store_id,name,icon,sort_order,is_active,created_at,updated_at FROM categories`);
+        w._db.run(`DROP TABLE categories`);
+        w._db.run(`ALTER TABLE categories_h7_tmp RENAME TO categories`);
+        w._db.run('COMMIT');
+        w._save();
+        console.log('[DB] fix18-10-hotfix7: categories 重建完成');
+      } catch(e2) {
+        try { w._db.run('ROLLBACK'); } catch {}
+        console.error('[DB] fix18-10-hotfix7: categories 重建失敗:', e2.message);
+      }
+    } else {
+      // 確保 UNIQUE(store_id, name) index 存在（新裝或已是新版 schema）
+      try {
+        w._db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_categories_store_name ON categories(store_id, name)`);
+        w._save();
+      } catch {}
+    }
+  } catch(e) {
+    console.error('[DB] fix18-10-hotfix7: categories schema 檢查失敗:', e.message);
+    // fallback：強制建立 UNIQUE INDEX（若表格結構允許）
+    try { w._db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_categories_store_name ON categories(store_id, name)`); w._save(); } catch {}
+  }
+
   // ── inventory_logs ────────────────────────────────────
   w._db.run(`CREATE TABLE IF NOT EXISTS inventory_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -343,6 +393,120 @@ function initTables(w) {
     'ALTER TABLE ingredients ADD COLUMN default_thaw_hours REAL DEFAULT 0',
   ];
   ingMig.forEach(sql => { try { w._db.run(sql); w._save(); } catch {} });
+
+  // ── fix18-10-hotfix11：強制驗證 ingredients UNIQUE(store_id,name) ──────────
+  // 根本原因：hotfix10 用 ingredients_h10_tmp 重建，若上次 server 崩潰導致
+  //           tmp 表遺留，CREATE TABLE 失敗 → ROLLBACK → UNIQUE(name) 仍存在。
+  //
+  // hotfix11 修正策略：
+  //   1. 先清掉所有遺留的 ingredients_h??_tmp / h??_new 表
+  //   2. 用 PRAGMA index_list 實際查每個 unique index 的欄位（不用 regex）
+  //   3. 只要有任何 unique index 欄位只含 'name'（不含 store_id）→ 強制重建
+  //   4. 重建完成後再次 PRAGMA 驗證，印出完整 schema
+  //   5. 最終插入兩店同名資料做防彈測試
+  try {
+    // ── 步驟 0：清掉所有可能遺留的 tmp/new 表 ───────────────────────────────
+    const _leftoverTbls = (w._db.exec("SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'ingredients_%tmp' OR name LIKE 'ingredients_%new')"))?.[0]?.values || [];
+    for (const [_tname] of _leftoverTbls) {
+      try { w._db.run(`DROP TABLE IF EXISTS "${_tname}"`); console.log('[DB] hotfix11: 清除遺留表', _tname); }
+      catch(_et) { console.warn('[DB] hotfix11: 無法清除', _tname, _et.message); }
+    }
+
+    // ── 步驟 1：印出目前 schema ────────────────────────────────────────────
+    const _ingTableSql = (w._db.exec("SELECT sql FROM sqlite_master WHERE type='table' AND name='ingredients'")?.[0]?.values?.[0]?.[0]) || '';
+    const _ingIdxList  = (w._db.exec("PRAGMA index_list('ingredients')")?.[0]?.values) || [];
+    console.log('[DB] hotfix11: ingredients TABLE SQL =>', _ingTableSql);
+    console.log('[DB] hotfix11: PRAGMA index_list =>', JSON.stringify(_ingIdxList));
+
+    // ── 步驟 2：逐一查每個 unique index 的欄位（不用 regex）───────────────
+    let _hasNameOnlyUnique = false;
+    for (const _idxRow of _ingIdxList) {
+      const _isUnique = _idxRow[2] === 1;
+      const _idxName  = _idxRow[1];
+      const _idxCols  = (w._db.exec(`SELECT name FROM pragma_index_info('${_idxName}')`)?.[0]?.values || []).map(r => r[0]);
+      console.log(`[DB] hotfix11:   index "${_idxName}" cols=${JSON.stringify(_idxCols)} unique=${_isUnique}`);
+      if (_isUnique && _idxCols.length === 1 && _idxCols[0] === 'name') {
+        _hasNameOnlyUnique = true;
+        console.log(`[DB] hotfix11:   ⚠️  UNIQUE(name) 偵測到，需重建`);
+      }
+    }
+
+    // ── 步驟 3：若需重建 → 不用 transaction，逐步執行 ─────────────────────
+    if (_hasNameOnlyUnique) {
+      console.log('[DB] hotfix11: 開始重建 ingredients → UNIQUE(store_id, name)...');
+      const _ingColRows = w._db.exec("PRAGMA table_info(ingredients)")?.[0]?.values || [];
+      const _ingCols    = _ingColRows.map(r => r[1]);
+      // safeDefault: function-call defaults (e.g. datetime('now','localtime'))
+      // must be wrapped in parens; PRAGMA table_info returns them WITHOUT outer parens
+      const _safeDefault = (_dflt) => {
+        if (_dflt === null || _dflt === undefined) return '';
+        const _s = String(_dflt);
+        return /\(/.test(_s) ? ` DEFAULT (${_s})` : ` DEFAULT ${_s}`;
+      };
+      const _colDefs    = _ingColRows.map(r => {
+        const [, _cn, _ct, _nn, _dflt, _isPk] = r;
+        if (_isPk) return `${_cn} INTEGER PRIMARY KEY AUTOINCREMENT`;
+        let _def = `${_cn} ${_ct || 'TEXT'}`;
+        if (_nn) _def += ' NOT NULL';
+        _def += _safeDefault(_dflt);
+        return _def;
+      }).join(',\n    ');
+
+      const _tmpName = 'ingredients_h11_new';
+      try { w._db.run(`DROP TABLE IF EXISTS "${_tmpName}"`); } catch {}
+
+      try {
+        w._db.run(`CREATE TABLE "${_tmpName}" (\n    ${_colDefs},\n    UNIQUE(store_id, name)\n  )`);
+        const _oldCount = w._db.exec('SELECT COUNT(*) FROM ingredients')?.[0]?.values?.[0]?.[0] || 0;
+        w._db.run(`INSERT OR IGNORE INTO "${_tmpName}" (${_ingCols.join(',')}) SELECT ${_ingCols.join(',')} FROM ingredients`);
+        const _newCount = w._db.exec(`SELECT COUNT(*) FROM "${_tmpName}"`)?.[0]?.values?.[0]?.[0] || 0;
+        if (_oldCount !== _newCount) {
+          console.warn(`[DB] hotfix11: 重建跳過 ${_oldCount - _newCount} 筆重複（同 store_id+name）`);
+        }
+        w._db.run('DROP TABLE ingredients');
+        w._db.run(`ALTER TABLE "${_tmpName}" RENAME TO ingredients`);
+        w._save();
+        console.log(`[DB] hotfix11: ✅ 重建完成，保留 ${_newCount} 筆`);
+      } catch(_e2) {
+        console.error('[DB] hotfix11: ❌ 重建失敗:', _e2.message);
+        try { w._db.run(`DROP TABLE IF EXISTS "${_tmpName}"`); } catch {}
+      }
+    } else {
+      console.log('[DB] hotfix11: schema OK，確保 UNIQUE(store_id,name) index 存在');
+      try {
+        w._db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_ingredients_store_name ON ingredients(store_id, name)');
+        w._save();
+      } catch {}
+    }
+
+    // ── 步驟 4：驗證後印出最終 schema ────────────────────────────────────
+    const _finalSql     = (w._db.exec("SELECT sql FROM sqlite_master WHERE type='table' AND name='ingredients'")?.[0]?.values?.[0]?.[0]) || '';
+    const _finalIdxList = (w._db.exec("PRAGMA index_list('ingredients')")?.[0]?.values) || [];
+    console.log('[DB] hotfix11: [驗證] TABLE SQL =>', _finalSql);
+    for (const _ir of _finalIdxList) {
+      const _ic = (w._db.exec(`SELECT name FROM pragma_index_info('${_ir[1]}')`)?.[0]?.values || []).map(r => r[0]);
+      console.log(`[DB] hotfix11: [驗證]   index "${_ir[1]}" cols=${JSON.stringify(_ic)} unique=${_ir[2]===1}`);
+    }
+
+    // ── 步驟 5：跨店同名防彈測試 ─────────────────────────────────────────
+    try {
+      w._db.run(`INSERT OR IGNORE INTO ingredients (store_id,name,unit,frozen_stock,total_stock) VALUES ('__h11_test_s1__','__h11_test__','g',0,0)`);
+      w._db.run(`INSERT OR IGNORE INTO ingredients (store_id,name,unit,frozen_stock,total_stock) VALUES ('__h11_test_s2__','__h11_test__','g',0,0)`);
+      const _tc = w._db.exec("SELECT COUNT(*) FROM ingredients WHERE name='__h11_test__'")?.[0]?.values?.[0]?.[0] || 0;
+      w._db.run(`DELETE FROM ingredients WHERE name='__h11_test__'`);
+      w._save();
+      if (_tc >= 2) {
+        console.log('[DB] hotfix11: ✅ 跨店同名測試通過');
+      } else {
+        console.error('[DB] hotfix11: ❌ 跨店同名測試失敗，UNIQUE(name) 仍存在！count=', _tc);
+      }
+    } catch(_et) {
+      console.error('[DB] hotfix11: ❌ 跨店同名測試例外:', _et.message);
+    }
+  } catch(_e) {
+    console.error('[DB] hotfix11: 頂層失敗:', _e.message);
+  }
+
 
   // ── ingredient_thaw_batches ──────────────────────────
   w._db.run(`CREATE TABLE IF NOT EXISTS ingredient_thaw_batches (
@@ -747,6 +911,102 @@ function initTables(w) {
     w._save();
   }
 
+  // ── fix18-10-hotfix12：delivery_platforms UNIQUE(store_id,name) ──────────
+  // 舊版 delivery_platforms 可能有 UNIQUE(name)，導致跨店新增同名平台失敗
+  // 修正方式同 hotfix11 ingredients：先清 tmp，再 PRAGMA 查，再重建
+  try {
+    // 步驟 0：清遺留 tmp/new 表
+    const _dpLeftover = (w._db.exec("SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'delivery_platforms_%tmp' OR name LIKE 'delivery_platforms_%new')"))?.[0]?.values || [];
+    for (const [_tn] of _dpLeftover) {
+      try { w._db.run(`DROP TABLE IF EXISTS "${_tn}"`); console.log('[DB] hotfix12: 清除遺留表', _tn); }
+      catch(_et) { console.warn('[DB] hotfix12: 無法清除', _tn, _et.message); }
+    }
+
+    // 步驟 1：印出目前 schema
+    const _dpSql  = (w._db.exec("SELECT sql FROM sqlite_master WHERE type='table' AND name='delivery_platforms'")?.[0]?.values?.[0]?.[0]) || '';
+    const _dpIdxs = (w._db.exec("PRAGMA index_list('delivery_platforms')")?.[0]?.values) || [];
+    console.log('[DB] hotfix12: delivery_platforms TABLE SQL =>', _dpSql);
+    console.log('[DB] hotfix12: PRAGMA index_list =>', JSON.stringify(_dpIdxs));
+
+    // 步驟 2：偵測 UNIQUE(name) — 查每個 unique index 的欄位
+    let _dpNeedRebuild = false;
+    for (const _ir of _dpIdxs) {
+      const _isUniq = _ir[2] === 1;
+      const _iName  = _ir[1];
+      const _iCols  = (w._db.exec(`SELECT name FROM pragma_index_info('${_iName}')`)?.[0]?.values || []).map(r => r[0]);
+      console.log(`[DB] hotfix12:   index "${_iName}" cols=${JSON.stringify(_iCols)} unique=${_isUniq}`);
+      if (_isUniq && _iCols.length === 1 && _iCols[0] === 'name') {
+        _dpNeedRebuild = true;
+        console.log('[DB] hotfix12:   ⚠️  UNIQUE(name) 偵測到，需重建');
+      }
+    }
+
+    // 步驟 3：重建（不用 transaction）
+    if (_dpNeedRebuild) {
+      console.log('[DB] hotfix12: 開始重建 delivery_platforms → UNIQUE(store_id, name)...');
+      const _dpColRows = w._db.exec("PRAGMA table_info(delivery_platforms)")?.[0]?.values || [];
+      const _dpCols    = _dpColRows.map(r => r[1]);
+      const _dpSafeDefault = (_dflt) => {
+        if (_dflt === null || _dflt === undefined) return '';
+        const _s = String(_dflt);
+        return /\(/.test(_s) ? ` DEFAULT (${_s})` : ` DEFAULT ${_s}`;
+      };
+      const _dpColDefs = _dpColRows.map(r => {
+        const [, _cn, _ct, _nn, _dflt, _isPk] = r;
+        if (_isPk) return `${_cn} INTEGER PRIMARY KEY AUTOINCREMENT`;
+        let _def = `${_cn} ${_ct || 'TEXT'}`;
+        if (_nn) _def += ' NOT NULL';
+        _def += _dpSafeDefault(_dflt);
+        return _def;
+      }).join(',\n    ');
+
+      const _dpTmp = 'delivery_platforms_h12_new';
+      try { w._db.run(`DROP TABLE IF EXISTS "${_dpTmp}"`); } catch {}
+
+      try {
+        w._db.run(`CREATE TABLE "${_dpTmp}" (\n    ${_dpColDefs},\n    UNIQUE(store_id, name)\n  )`);
+        const _dpOld = w._db.exec('SELECT COUNT(*) FROM delivery_platforms')?.[0]?.values?.[0]?.[0] || 0;
+        w._db.run(`INSERT OR IGNORE INTO "${_dpTmp}" (${_dpCols.join(',')}) SELECT ${_dpCols.join(',')} FROM delivery_platforms`);
+        const _dpNew = w._db.exec(`SELECT COUNT(*) FROM "${_dpTmp}"`)?.[0]?.values?.[0]?.[0] || 0;
+        if (_dpOld !== _dpNew) console.warn(`[DB] hotfix12: 重建跳過 ${_dpOld - _dpNew} 筆重複（同 store_id+name）`);
+        w._db.run('DROP TABLE delivery_platforms');
+        w._db.run(`ALTER TABLE "${_dpTmp}" RENAME TO delivery_platforms`);
+        w._save();
+        console.log(`[DB] hotfix12: ✅ 重建完成，保留 ${_dpNew} 筆`);
+      } catch(_e2) {
+        console.error('[DB] hotfix12: ❌ 重建失敗:', _e2.message);
+        try { w._db.run(`DROP TABLE IF EXISTS "${_dpTmp}"`); } catch {}
+      }
+    } else {
+      console.log('[DB] hotfix12: delivery_platforms schema OK，確保 UNIQUE(store_id,name) index 存在');
+      try {
+        w._db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_platforms_store_name ON delivery_platforms(store_id, name)');
+        w._save();
+      } catch {}
+    }
+
+    // 步驟 4：驗證
+    const _dpFinalSql  = (w._db.exec("SELECT sql FROM sqlite_master WHERE type='table' AND name='delivery_platforms'")?.[0]?.values?.[0]?.[0]) || '';
+    const _dpFinalIdxs = (w._db.exec("PRAGMA index_list('delivery_platforms')")?.[0]?.values) || [];
+    console.log('[DB] hotfix12: [驗證] TABLE SQL =>', _dpFinalSql);
+    for (const _ir of _dpFinalIdxs) {
+      const _ic = (w._db.exec(`SELECT name FROM pragma_index_info('${_ir[1]}')`)?.[0]?.values || []).map(r => r[0]);
+      console.log(`[DB] hotfix12: [驗證]   index "${_ir[1]}" cols=${JSON.stringify(_ic)} unique=${_ir[2]===1}`);
+    }
+
+    // 步驟 5：跨店同名防彈測試
+    try {
+      w._db.run(`INSERT OR IGNORE INTO delivery_platforms (store_id,name,commission_rate,is_active) VALUES ('__h12_s1__','__h12_test__',0,1)`);
+      w._db.run(`INSERT OR IGNORE INTO delivery_platforms (store_id,name,commission_rate,is_active) VALUES ('__h12_s2__','__h12_test__',0,1)`);
+      const _tc = w._db.exec("SELECT COUNT(*) FROM delivery_platforms WHERE name='__h12_test__'")?.[0]?.values?.[0]?.[0] || 0;
+      w._db.run(`DELETE FROM delivery_platforms WHERE name='__h12_test__'`);
+      w._save();
+      if (_tc >= 2) console.log('[DB] hotfix12: ✅ 跨店同名測試通過');
+      else console.error('[DB] hotfix12: ❌ 跨店同名測試失敗，UNIQUE(name) 仍存在！count=', _tc);
+    } catch(_et) { console.error('[DB] hotfix12: ❌ 跨店同名測試例外:', _et.message); }
+  } catch(_e) { console.error('[DB] hotfix12: 頂層失敗:', _e.message); }
+
+
   // ── Seed categories ────────────────────────────────────
   const catCount = w.get("SELECT COUNT(*) as c FROM categories WHERE store_id='store_001'");
   if (!catCount || Number(catCount.c) === 0) {
@@ -847,6 +1107,88 @@ function initTables(w) {
 
   w._save();
 
+  // ── fix18-05：orders 補欄位（safe migration）──────────
+  // coupon_code / original_total — 優惠券折扣相關
+  // discount_amount 已存在（orderMigrations 中），不重複新增
+  try { w._db.run('ALTER TABLE orders ADD COLUMN coupon_code TEXT DEFAULT ""'); w._save(); } catch {}
+  try { w._db.run('ALTER TABLE orders ADD COLUMN original_total REAL DEFAULT 0'); w._save(); } catch {}
+
+  // ── fix18-05：coupons（優惠券主表）────────────────────
+  w._db.run(`CREATE TABLE IF NOT EXISTS coupons (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_id           TEXT NOT NULL DEFAULT 'store_001',
+    code               TEXT NOT NULL,
+    name               TEXT NOT NULL DEFAULT '',
+    discount_type      TEXT NOT NULL DEFAULT 'fixed',
+    discount_value     REAL NOT NULL DEFAULT 0,
+    min_amount         REAL NOT NULL DEFAULT 0,
+    start_at           TEXT DEFAULT '',
+    end_at             TEXT DEFAULT '',
+    max_usage          INTEGER DEFAULT 0,
+    max_usage_per_phone INTEGER DEFAULT 0,
+    enabled            INTEGER NOT NULL DEFAULT 1,
+    created_at         TEXT DEFAULT (datetime('now','localtime')),
+    updated_at         TEXT DEFAULT (datetime('now','localtime')),
+    UNIQUE(store_id, code)
+  )`);
+  w._save();
+
+  // ── fix18-05：coupon_redemptions（使用紀錄）────────────
+  w._db.run(`CREATE TABLE IF NOT EXISTS coupon_redemptions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_id        TEXT NOT NULL DEFAULT 'store_001',
+    coupon_id       INTEGER NOT NULL,
+    coupon_code     TEXT NOT NULL,
+    order_id        TEXT NOT NULL,
+    order_number    TEXT NOT NULL,
+    customer_phone  TEXT NOT NULL DEFAULT '',
+    discount_amount REAL NOT NULL DEFAULT 0,
+    original_total  REAL NOT NULL DEFAULT 0,
+    final_total     REAL NOT NULL DEFAULT 0,
+    created_at      TEXT DEFAULT (datetime('now','localtime'))
+  )`);
+  // 防止同一訂單重複寫入 redemption
+  try {
+    w._db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_coupon_redemptions_order ON coupon_redemptions(store_id, order_id)');
+    w._save();
+  } catch(e) { console.warn('[DB] coupon_redemptions unique index:', e.message); }
+  w._save();
+
+  // ── fix18-06：orders 補欄位（Google Maps 外送距離計費）──
+  try { w._db.run('ALTER TABLE orders ADD COLUMN delivery_address_note TEXT DEFAULT ""'); w._save(); } catch {}
+  try { w._db.run('ALTER TABLE orders ADD COLUMN delivery_lat TEXT DEFAULT ""'); w._save(); } catch {}
+  try { w._db.run('ALTER TABLE orders ADD COLUMN delivery_lng TEXT DEFAULT ""'); w._save(); } catch {}
+  try { w._db.run('ALTER TABLE orders ADD COLUMN delivery_distance_km REAL DEFAULT 0'); w._save(); } catch {}
+  try { w._db.run('ALTER TABLE orders ADD COLUMN delivery_maps_url TEXT DEFAULT ""'); w._save(); } catch {}
+  // delivery_address & delivery_fee 已在 orderMigrations 中，不重複新增
+
+  // ── fix18-06：settings seed（外送距離費率設定）──────────
+  const deliveryFeeRulesDefault = JSON.stringify([
+    { max_km: 3, fee: 50 },
+    { max_km: 5, fee: 80 },
+    { max_km: 7, fee: 120 },
+  ]);
+  const deliverySeeds = [
+    ['store_address',                 ''],
+    ['store_lat',                     ''],
+    ['store_lng',                     ''],
+    ['delivery_distance_fee_enabled', '1'],
+    ['delivery_distance_fee_rules',   deliveryFeeRulesDefault],
+    ['delivery_max_distance_km',      '7'],
+    ['delivery_basic_fee',            '50'],
+    ['delivery_free_threshold',       '1000'],
+    ['coupon_apply_to_delivery_fee',  '0'],
+  ];
+  deliverySeeds.forEach(([k, v]) => {
+    try {
+      const existing = w.get('SELECT value FROM settings WHERE store_id=? AND key=?', ['store_001', k]);
+      if (!existing) {
+        w._db.run('INSERT OR IGNORE INTO settings (store_id,key,value) VALUES (?,?,?)', ['store_001', k, v]);
+        w._save();
+      }
+    } catch(e) { console.warn('[DB] delivery seed:', k, e.message); }
+  });
+
   // ── licenses ─────────────────────────────────────────
   w._db.run(`CREATE TABLE IF NOT EXISTS licenses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -882,6 +1224,58 @@ function initTables(w) {
       w._save();
     } catch {}
   }
+
+  // ── fix18-09F：商品分析群組 ────────────────────────────
+  w._db.run(`CREATE TABLE IF NOT EXISTS product_analysis_groups (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_id    TEXT NOT NULL DEFAULT 'store_001',
+    group_name  TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    sort_order  INTEGER DEFAULT 0,
+    created_at  TEXT DEFAULT (datetime('now','localtime')),
+    updated_at  TEXT DEFAULT (datetime('now','localtime'))
+  )`);
+  w._save();
+
+  w._db.run(`CREATE TABLE IF NOT EXISTS product_analysis_group_items (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_id     TEXT NOT NULL DEFAULT 'store_001',
+    group_id     INTEGER NOT NULL,
+    product_id   INTEGER DEFAULT 0,
+    product_name TEXT NOT NULL DEFAULT '',
+    created_at   TEXT DEFAULT (datetime('now','localtime')),
+    FOREIGN KEY (group_id) REFERENCES product_analysis_groups(id) ON DELETE CASCADE
+  )`);
+  w._save();
+
+  // Index for fast lookup
+  try {
+    w._db.run('CREATE INDEX IF NOT EXISTS idx_pag_store ON product_analysis_groups(store_id)');
+    w._db.run('CREATE INDEX IF NOT EXISTS idx_pagi_group ON product_analysis_group_items(group_id)');
+    w._db.run('CREATE INDEX IF NOT EXISTS idx_pagi_store ON product_analysis_group_items(store_id)');
+    w._save();
+  } catch(e) { console.warn('[DB] product_analysis index:', e.message); }
+
+  // ── fix18-09F-hotfix4：歷史品名別名表 ────────────────────
+  w._db.run(`CREATE TABLE IF NOT EXISTS product_analysis_group_aliases (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_id   TEXT NOT NULL DEFAULT 'store_001',
+    group_id   INTEGER NOT NULL,
+    alias_name TEXT NOT NULL DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    FOREIGN KEY (group_id) REFERENCES product_analysis_groups(id) ON DELETE CASCADE
+  )`);
+  w._save();
+
+  try {
+    w._db.run('CREATE INDEX IF NOT EXISTS idx_paga_group ON product_analysis_group_aliases(group_id)');
+    w._db.run('CREATE INDEX IF NOT EXISTS idx_paga_store ON product_analysis_group_aliases(store_id)');
+    w._save();
+  } catch(e) { console.warn('[DB] product_analysis_aliases index:', e.message); }
 }
 
 module.exports = { getDb, initDb };
+
+// Note: migration_logs table is created on-demand in routes/migration.js
+// to keep backward compatibility with existing DB instances.

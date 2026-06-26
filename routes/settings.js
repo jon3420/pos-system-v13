@@ -25,7 +25,32 @@ const LINE_KEYS = new Set([
   'delivery_cutoff_time', 'delivery_prep_minutes',
   'delivery_allow_next_day', 'delivery_business_hours',
   'next_day_min_hours',
+  // fix18-06: 今日臨時最後接單時間（有日期綁定，隔天自動失效）
+  'takeout_today_cutoff_time', 'takeout_today_cutoff_date',
+  'delivery_today_cutoff_time', 'delivery_today_cutoff_date',
 ]);
+
+// fix18-06：外送距離費率相關 key
+const DELIVERY_FEE_KEYS = [
+  'store_address', 'store_lat', 'store_lng',
+  'delivery_distance_fee_enabled',
+  'delivery_distance_fee_rules',   // JSON string
+  'delivery_max_distance_km',
+  'delivery_basic_fee',
+  'delivery_free_threshold',
+  'coupon_apply_to_delivery_fee',
+];
+
+// fix18-08：外送平台抽成率 key
+const COMMISSION_KEYS = [
+  'ubereats_commission_rate',
+  'foodpanda_commission_rate',
+  'line_commission_rate',
+  'pos_commission_rate',
+  'phone_commission_rate',
+  'other_commission_rate',
+  'unknown_commission_rate',
+];
 
 // 所有允許修改的 key（包含 LINE key）
 const ALL_ALLOWED = [
@@ -35,14 +60,18 @@ const ALL_ALLOWED = [
   'shop_logo', 'shop_cover', 'shop_address',
   'shop_google_map', 'shop_hours', 'shop_announcement',
   'n8n_new_order_webhook', 'n8n_status_change_webhook',
+  // v18-features: Android 平板功能權限（JSON 字串）
+  'android_features',
+  ...DELIVERY_FEE_KEYS,
   ...LINE_KEYS,
+  ...COMMISSION_KEYS,
 ];
 
 // GET /api/settings
 router.get('/', (req, res) => {
   try {
     const db = getDb();
-    const storeId = req.storeId || 'store_001';
+    const storeId = req.storeId;
     const rows = db.all('SELECT key, value FROM settings WHERE store_id=?', [storeId]);
     const settings = {};
     rows.forEach(r => { settings[r.key] = r.value; });
@@ -54,7 +83,7 @@ router.get('/', (req, res) => {
 router.put('/', (req, res) => {
   try {
     const db      = getDb();
-    const storeId = req.storeId || 'store_001';
+    const storeId = req.storeId;
 
     // ── fix14：檢查是否修改 LINE key ───────────────────────
     const requestedKeys = Object.keys(req.body);

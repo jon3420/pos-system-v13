@@ -22,6 +22,14 @@ async function apiFetch(url, options = {}) {
   const token = getToken();
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
   if (token) headers['Authorization'] = 'Bearer ' + token;
+  // fix18-05: 補 x-store-id header，讓 requireStore 有第二條解析路徑
+  // 當 JWT 失效時仍可透過 x-store-id 識別店家
+  const storeInfo = (() => {
+    try { return JSON.parse(localStorage.getItem('pos_store_info') || '{}'); } catch { return {}; }
+  })();
+  const storeId = (window.currentStore && window.currentStore.store_id)
+    || storeInfo.store_id || '';
+  if (storeId && !headers['x-store-id']) headers['x-store-id'] = storeId;
   const res = await fetch(url, { ...options, headers });
 
   // fix16：正確的 401 / 403 處理
@@ -352,20 +360,78 @@ function _renderDashboard(d, date) {
       <tbody>${srcRows}</tbody></table>` : '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">今日無資料</div>'
   );
 
-  // ── 第五區：熱銷商品 TOP10 ──────────────────────────
-  const topRows = (d.topProducts||[]).map((p,i) =>
+  // ── 第五區：熱銷商品 TOP10（fix18-09F：支援群組統計）────────
+  const _dbMode = getProductStatMode();
+  // 從 topProducts（API 返回的原始商品排行）重新用群組合併
+  const _rawTopMap = {};
+  (d.topProducts||[]).forEach(p => {
+    const dname = resolveProductDisplayName(p.name, _dbMode);
+    if (!_rawTopMap[dname]) _rawTopMap[dname] = { name: dname, qty: 0, revenue: 0 };
+    _rawTopMap[dname].qty     += Number(p.qty     || 0);
+    _rawTopMap[dname].revenue += Number(p.revenue || 0);
+  });
+  const _mergedTop = Object.values(_rawTopMap).sort((a,b) => b.qty - a.qty).slice(0, 10);
+  const _modeToggle = `<div style="display:flex;gap:6px;align-items:center;margin-bottom:12px">
+    <span style="font-size:12px;color:var(--text-secondary,#64748b)">統計模式：</span>
+    <button onclick="setProductStatMode('group');_loadDashboard()" style="font-size:12px;padding:3px 10px;border-radius:99px;border:1px solid var(--border,#2a2d3e);background:${_dbMode==='group'?'#6366f1':'transparent'};color:${_dbMode==='group'?'#fff':'var(--text-secondary,#64748b)'};cursor:pointer">商品群組</button>
+    <button onclick="setProductStatMode('raw');_loadDashboard()" style="font-size:12px;padding:3px 10px;border-radius:99px;border:1px solid var(--border,#2a2d3e);background:${_dbMode==='raw'?'#6366f1':'transparent'};color:${_dbMode==='raw'?'#fff':'var(--text-secondary,#64748b)'};cursor:pointer">原始商品</button>
+  </div>`;
+  const topRows = _mergedTop.map((p,i) =>
     `<tr><td style="padding:5px 0;color:${i<3?'#f59e0b':'inherit'}">${i+1}. ${escHtml(p.name)}</td>
       <td style="padding:5px 0;text-align:right">${p.qty} 份</td>
       <td style="padding:5px 0;text-align:right;color:#10b981">${_nt(p.revenue)}</td></tr>`
   ).join('');
   html += _section('🏆 熱銷商品排行 TOP10',
-    topRows ? `<table style="width:100%;border-collapse:collapse;font-size:.875rem">
+    _modeToggle + (topRows ? `<table style="width:100%;border-collapse:collapse;font-size:.875rem">
       <thead><tr style="color:var(--text-secondary,#64748b);font-size:.75rem">
         <th style="text-align:left;padding-bottom:8px">商品</th>
         <th style="text-align:right;padding-bottom:8px">數量</th>
         <th style="text-align:right;padding-bottom:8px">營收</th></tr></thead>
-      <tbody>${topRows}</tbody></table>` : '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">今日無資料</div>'
+      <tbody>${topRows}</tbody></table>` : '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">今日無資料</div>')
   );
+
+  // ── fix18-09F：商品群組排行 TOP10 ────────────────────
+  // 只在群組模式且有群組時顯示
+  if (_dbMode === 'group' && allProductAnalysisGroups && allProductAnalysisGroups.length) {
+    const _enabledGroups = allProductAnalysisGroups.filter(g => g.enabled);
+    // 從 topProducts 聚合群組統計（包含折扣）
+    const _grpMap = {};
+    _enabledGroups.forEach(g => {
+      _grpMap[g.group_name] = { name: g.group_name, qty: 0, revenue: 0, discount: 0, actual: 0 };
+    });
+    // 掃原始 topProducts
+    (d.topProducts||[]).forEach(p => {
+      const gname = getAnalysisGroupName(p.name);
+      if (gname && _grpMap[gname]) {
+        _grpMap[gname].qty     += Number(p.qty     || 0);
+        _grpMap[gname].revenue += Number(p.revenue || 0);
+      }
+    });
+    // 折扣資料（從 allOrdersCache 若有）
+    const _grpRowsArr = Object.values(_grpMap)
+      .filter(g => g.qty > 0 || g.revenue > 0)
+      .sort((a,b) => b.qty - a.qty)
+      .slice(0, 10);
+    if (_grpRowsArr.length) {
+      const _grpRows = _grpRowsArr.map((g, i) =>
+        `<tr>
+          <td style="padding:6px 0;color:${i<3?'#f59e0b':'inherit'}">${i+1}. ${escHtml(g.name)}</td>
+          <td style="padding:6px 0;text-align:right">${g.qty} 份</td>
+          <td style="padding:6px 0;text-align:right;color:#10b981">${_nt(g.revenue)}</td>
+        </tr>`
+      ).join('');
+      html += _section('📊 商品群組排行 TOP10',
+        `<table style="width:100%;border-collapse:collapse;font-size:.875rem">
+          <thead><tr style="color:var(--text-secondary,#64748b);font-size:.75rem">
+            <th style="text-align:left;padding-bottom:8px">群組</th>
+            <th style="text-align:right;padding-bottom:8px">銷量</th>
+            <th style="text-align:right;padding-bottom:8px">營收</th>
+          </tr></thead>
+          <tbody>${_grpRows}</tbody>
+        </table>`
+      );
+    }
+  }
 
   // ── 第六區：外送平台 ────────────────────────────────
   if (f.delivery !== false) {
@@ -496,6 +562,10 @@ function applyFeatureGateUI() {
 
   // LINE 商品管理 nav（v1）
   initLineProductsNav();
+
+  // fix18-05: 優惠券管理（coupon feature gate）
+  const couponNavBtn = document.getElementById('nav-btn-coupons');
+  if (couponNavBtn) couponNavBtn.style.display = f.coupon ? '' : 'none';
 
   // 外送平台
   const platformBtn = document.querySelector('button[data-stab="platform"]');
@@ -770,8 +840,32 @@ let allPlatforms = [];       // 外送平台列表
 let currentOrderMode = 'dine_in';  // 點餐模式：dine_in | takeout | delivery
 let selectedPlatform = null;       // 選中的外送平台物件
 let currentOrderTab = 'all';       // 訂單分頁
+let currentOrderView = 'all';     // fix18-07：追蹤目前顯示的訂單視圖 ('all'|'takeout'|'delivery')
+let currentDiscountFilter = 'all'; // fix18-09B：折扣篩選 ('all'|'has_discount'|'no_discount'|category)
+let _allOrdersCache = [];          // fix18-09B：目前分頁全部訂單快取（供折扣篩選使用）
 let orderInfoExpanded = true;      // 訂單資訊區展開狀態
 let allPaymentMethods = [];        // 付款方式快取
+let allDiscountCampaigns = [];     // fix18-09C：折扣活動快取
+let allDiscountCategories = [];    // fix18-09E：折扣分類快取
+let allProductAnalysisGroups = []; // fix18-09F：商品分析群組快取
+
+// fix18-09E：報表卡片顯示設定
+const REPORT_CARDS_STORAGE_KEY = 'orders_report_visible_cards';
+const REPORT_ALL_CARDS = ['訂單數','原價營業額','折扣總額','實收營業額','平均客單價','平台抽成','店家實收','熱賣商品','折扣支出','折扣商品排行','折扣活動排行','外送平台卡片'];
+const REPORT_SLIM_CARDS = ['訂單數','實收營業額','平均客單價','折扣總額','平台抽成','店家實收'];
+function getVisibleCards() {
+  try {
+    const saved = localStorage.getItem(REPORT_CARDS_STORAGE_KEY);
+    if (saved) return JSON.parse(saved);
+  } catch {}
+  return [...REPORT_ALL_CARDS]; // default all visible
+}
+function saveVisibleCards(arr) {
+  try { localStorage.setItem(REPORT_CARDS_STORAGE_KEY, JSON.stringify(arr)); } catch {}
+}
+function isCardVisible(label) {
+  return getVisibleCards().includes(label);
+}
 
 // 訂單編輯狀態
 let editOrderItems = [];
@@ -794,6 +888,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadSettings().catch(() => {});
   await loadCategories().catch(() => {});
   await loadPaymentMethods().catch(() => {});
+  await loadDiscountCampaigns().catch(() => {});  // fix18-09C
+  await loadDiscountCategories().catch(() => {}); // fix18-09E
+  await loadProductAnalysisGroups().catch(() => {}); // fix18-09F
 
   // 3. 商品載入（不依賴 inventory，不受 inventory feature gate 影響）
   await loadProducts().catch(() => {});
@@ -819,7 +916,8 @@ function startClock() {
 }
 
 function initDateRange() {
-  const today = new Date().toISOString().slice(0, 10);
+  // fix18-04：用台北時間，避免 UTC 時差導致初始日期錯誤
+  const today = twTodayStr();
   const fromEl = document.getElementById('dateFrom');
   const toEl   = document.getElementById('dateTo');
   if (fromEl) fromEl.value = today;
@@ -830,6 +928,15 @@ function initDateRange() {
 let _invRefreshInterval = null;
 
 function showPage(name) {
+  // fix18-05: coupon feature gate — 攔截未授權的 coupons 頁面切換
+  if (name === 'coupons') {
+    const f = window.currentFeatures || {};
+    if (!f.coupon) {
+      showToast('此功能未授權，請聯絡系統管理員', 'error');
+      name = 'pos'; // 導回點餐頁
+    }
+  }
+
   // fix16f: 強制用 style 切換，確保只有一個 page 顯示
   // classList 操作不夠——某些 page 有獨立 CSS 規則（如 #page-reports）需 style 覆蓋
 
@@ -847,6 +954,16 @@ function showPage(name) {
     const rc = document.getElementById('reports-container');
     if (rp) { rp.style.display = 'none'; rp.style.visibility = 'hidden'; rp.style.pointerEvents = 'none'; }
     if (rc) { rc.style.display = 'none'; rc.style.visibility = 'hidden'; rc.style.pointerEvents = 'none'; }
+  }
+
+  // fix18-09D-hotfix: 離開 settings 頁時強制隱藏所有 settings-tab-panel
+  // 避免折扣活動等 panel 殘留覆蓋其他頁面
+  if (name !== 'settings') {
+    document.querySelectorAll('.settings-tab-panel').forEach(p => {
+      p.style.display       = 'none';
+      p.style.visibility    = 'hidden';
+      p.style.pointerEvents = 'none';
+    });
   }
 
   // 3. 清除所有 nav active 狀態
@@ -883,6 +1000,7 @@ function showPage(name) {
   if (name === 'products')      loadProductsPage();
   if (name === 'line_products') loadLineProductsPage();
   if (name === 'line_preorders') loadLinePreorders();
+  if (name === 'coupons')      loadCouponsPage();   // fix18-05
   if (name === 'settings')   { loadSettingsPage(); switchSettingsTab('basic'); }
   if (name === 'categories') loadCategoriesPage();
   if (name === 'inventory')  loadInventoryPage();
@@ -966,13 +1084,17 @@ function switchSettingsTab(tab) {
   }
 
   // 各 Tab 的資料載入
-  if (tab === 'payment')     loadPaymentMethodsPage();
-  if (tab === 'gateway')     loadGatewayCards();    // fix16e: only provider-based
-  if (tab === 'platform')    loadPlatformsPage();
-  if (tab === 'printer')     loadPrinterSettings();
-  if (tab === 'line_biz')    loadLineBizStatus();
-  if (tab === 'ingredients') loadIngredientsPage();
-  if (tab === 'line_entry')  loadLineEntryPage();
+  if (tab === 'payment')          loadPaymentMethodsPage();
+  if (tab === 'gateway')          loadGatewayCards();    // fix16e: only provider-based
+  if (tab === 'platform')         loadPlatformsPage();
+  if (tab === 'printer')          loadPrinterSettings();
+  if (tab === 'line_biz')         loadLineBizStatus();
+  if (tab === 'ingredients')      loadIngredientsPage();
+  if (tab === 'line_entry')       loadLineEntryPage();
+  if (tab === 'android_features') loadAndroidFeaturesTab(); // v18-features
+  if (tab === 'discount_campaigns') loadDiscountCampaignsTab(); // fix18-09C
+  if (tab === 'delivery_fee')     loadDeliveryFeeTab();     // fix18-06
+  if (tab === 'product_analysis_groups') loadProductAnalysisGroupsTab(); // fix18-09F
 }
 
 // ===== 設定 =====
@@ -993,6 +1115,17 @@ async function loadSettingsPage() {
   fields.forEach(k => {
     const el = document.getElementById('set-' + k);
     if (el) el.value = settings[k] || '';
+  });
+
+  // fix18-08：載入平台抽成率設定
+  const commKeys = ['ubereats','foodpanda','line','pos','phone','other','unknown'];
+  const defaults = { ubereats: 31, foodpanda: 35 };
+  commKeys.forEach(code => {
+    const key = code + '_commission_rate';
+    const el = document.getElementById('set-' + key);
+    if (!el) return;
+    const val = settings[key];
+    el.value = (val !== undefined && val !== '') ? val : (defaults[code] || 0);
   });
 }
 
@@ -1020,6 +1153,28 @@ async function saveSettings() {
 }
 
 // ===== 商品載入（永遠從 server 取最新庫存，不使用舊快取） =====
+// fix18-08：平台抽成率設定儲存
+async function saveCommissionRates() {
+  const commKeys = ['ubereats','foodpanda','line','pos','phone','other','unknown'];
+  const body = {};
+  commKeys.forEach(code => {
+    const el = document.getElementById('set-' + code + '_commission_rate');
+    if (el) body[code + '_commission_rate'] = el.value;
+  });
+  try {
+    const res = await apiFetch('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const json = await res.json();
+    if (json.success) {
+      settings = json.data;
+      showToast('抽成率設定已儲存', 'success');
+    } else { showToast(json.message || '儲存失敗', 'error'); }
+  } catch { showToast('網路錯誤', 'error'); }
+}
+
 async function loadProducts() {
   try {
     // fix16c-hotfix: 商品載入不依賴 inventory，inventory=false 時只跳過庫存 map
@@ -1706,12 +1861,19 @@ function setDateRange(range) {
   document.querySelectorAll('.shortcut-btn').forEach(b => b.classList.toggle('active', b.dataset.range === range));
   const customDiv = document.getElementById('customDateRange');
   if (customDiv) customDiv.style.display = range === 'custom' ? 'flex' : 'none';
-  const today = new Date();
-  const fmt = d => d.toISOString().slice(0, 10);
+  // fix18-04：用台北時間避免 UTC 時差
+  const today = new Date(new Date().toLocaleString('en-US', {timeZone:'Asia/Taipei'}));
+  const fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
   let from = fmt(today), to = fmt(today);
   if (range === 'yesterday') { const y = new Date(today); y.setDate(y.getDate()-1); from = to = fmt(y); }
   else if (range === 'week') { const mon = new Date(today); mon.setDate(today.getDate()-today.getDay()+(today.getDay()===0?-6:1)); from = fmt(mon); to = fmt(today); }
   else if (range === 'month') { from = fmt(new Date(today.getFullYear(),today.getMonth(),1)); to = fmt(today); }
+  else if (range === 'lastmonth') {
+    const firstOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+    const lastMonthFirst = new Date(firstOfMonth); lastMonthFirst.setMonth(lastMonthFirst.getMonth()-1);
+    const lastMonthLast  = new Date(firstOfMonth); lastMonthLast.setDate(0);
+    from = fmt(lastMonthFirst); to = fmt(lastMonthLast);
+  }
   const fromEl = document.getElementById('dateFrom'); const toEl = document.getElementById('dateTo');
   if (fromEl && range !== 'custom') fromEl.value = from;
   if (toEl   && range !== 'custom') toEl.value   = to;
@@ -1721,16 +1883,150 @@ function setDateRange(range) {
 // ===== 訂單分頁切換 =====
 function switchOrderTab(tab) {
   currentOrderTab = tab;
+  // fix18-07：切換分頁時同步更新 currentOrderView
+  if (tab === 'delivery') currentOrderView = 'delivery';
+  else if (tab === 'pos') currentOrderView = 'takeout';
+  else currentOrderView = 'all';
   document.querySelectorAll('.order-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   document.getElementById('order-tab-all').style.display      = tab === 'delivery' ? 'none' : 'block';
   document.getElementById('order-tab-delivery').style.display = tab === 'delivery' ? 'block' : 'none';
-  loadCurrentOrderTab();
+  // fix18-09B：切換分頁時重置折扣篩選
+  currentDiscountFilter = 'all';
+  document.querySelectorAll('.disc-filter-btn').forEach(b => b.classList.toggle('active', b.dataset.filter === 'all'));
+  refreshCurrentOrderView();
+}
+
+// fix18-07：統一刷新函式，依 currentOrderView 決定呼叫哪個載入函式
+function refreshCurrentOrderView() {
+  switch (currentOrderView) {
+    case 'delivery':
+      loadDeliveryReport();
+      break;
+    case 'takeout':
+      loadOrders('pos');
+      break;
+    default:
+      loadOrders(null);
+  }
 }
 
 function loadCurrentOrderTab() {
-  if (currentOrderTab === 'delivery') loadDeliveryReport();
-  else loadOrders(currentOrderTab === 'pos' ? 'pos' : null);
+  refreshCurrentOrderView();
 }
+
+// fix18-09E：折扣分類動態版（從 allDiscountCategories 讀取，fallback 預設）
+const DISCOUNT_CATEGORY_DISPLAY_FALLBACK = {
+  none: '無折扣', marketing: '廣告行銷', product_promo: '商品活動',
+  complaint: '客訴補償', loyalty: '老客優惠', staff_family: '員工親友',
+  platform_promo: '平台活動', other: '其他'
+};
+// 動態取得分類顯示名稱（優先 DB，fallback 預設）
+function getDiscountCategoryDisplay(code) {
+  if (!code || code === 'none') return '無折扣';
+  if (allDiscountCategories.length) {
+    const found = allDiscountCategories.find(c => c.code === code);
+    if (found) return found.name;
+  }
+  return DISCOUNT_CATEGORY_DISPLAY_FALLBACK[code] || code;
+}
+// 相容舊呼叫：DISCOUNT_CATEGORY_DISPLAY[cat] 改成 proxy
+const DISCOUNT_CATEGORY_DISPLAY = new Proxy(DISCOUNT_CATEGORY_DISPLAY_FALLBACK, {
+  get(target, key) {
+    if (allDiscountCategories.length) {
+      const found = allDiscountCategories.find(c => c.code === key);
+      if (found) return found.name;
+    }
+    return target[key];
+  }
+});
+
+function normalizeDiscountCategory(value) {
+  if (!value || value === '' || value === 'undefined') return 'none';
+  const v = String(value).trim().toLowerCase();
+  if (v === 'none') return 'none';
+  // fix18-09E：動態分類支援
+  if (allDiscountCategories.length) {
+    const found = allDiscountCategories.find(c => c.code === v);
+    if (found) return found.code;
+  }
+  // fallback 預設 code 列表
+  const defaults = ['marketing','product_promo','complaint','loyalty','staff_family','platform_promo','other'];
+  return defaults.includes(v) ? v : v; // 保留原始值，讓歷史資料顯示
+}
+// fix18-09B：折扣篩選邏輯
+function applyDiscountFilter(orders, filter) {
+  if (!filter || filter === 'all') return orders;
+  if (filter === 'has_discount') return orders.filter(o => Number(o.discount_amount || 0) > 0);
+  if (filter === 'no_discount')  return orders.filter(o => Number(o.discount_amount || 0) <= 0);
+  // 分類篩選
+  return orders.filter(o => {
+    if (Number(o.discount_amount || 0) <= 0) return false;
+    return normalizeDiscountCategory(o.discount_category) === filter;
+  });
+}
+
+// fix18-09B：設定折扣篩選並刷新列表
+function setDiscountFilter(filter) {
+  currentDiscountFilter = filter;
+  // 更新 button active 狀態
+  document.querySelectorAll('.disc-filter-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.filter === filter);
+  });
+  // 用快取重新 render（不重新請求 API）
+  const filtered = applyDiscountFilter(_allOrdersCache, filter);
+  if (currentOrderView === 'delivery') {
+    renderDeliveryTable(filtered);
+  } else {
+    renderOrdersTable(filtered);
+  }
+}
+
+// fix18-09B：開啟折扣明細彈窗
+function openDiscountDetail() {
+  const orders = (_allOrdersCache || []).filter(o => {
+    if (o.status === 'void' || o.order_status === 'cancelled') return false;
+    if (o.order_mode === 'delivery' && o.delivery_status === 'cancelled') return false;
+    return Number(o.discount_amount || 0) > 0;
+  }).sort((a, b) => Number(b.discount_amount) - Number(a.discount_amount));
+
+  const totalDisc = orders.reduce((s, o) => s + Number(o.discount_amount || 0), 0);
+  document.getElementById('discDetailTitle').textContent = `共 ${orders.length} 筆，折扣總額 NT$${Math.round(totalDisc)}`;
+  document.getElementById('discDetailSummary').innerHTML =
+    `<span style="color:var(--text-secondary)">篩選範圍：</span> 目前分頁所有有折扣訂單（${orders.length} 筆）｜折扣合計：<span style="color:var(--danger);font-weight:700">NT$${Math.round(totalDisc)}</span>`;
+
+  document.getElementById('discDetailBody').innerHTML = orders.length
+    ? orders.map(o => {
+        const disc = Number(o.discount_amount || 0);
+        const cat = normalizeDiscountCategory(o.discount_category);
+        const catLabel = DISCOUNT_CATEGORY_DISPLAY[cat] || '—';
+        const dateStr = o.created_at ? o.created_at.slice(0, 10) : '—';
+        // fix18-09C：顯示折扣活動、折扣商品
+        const campaignName = o.discount_campaign_name || '—';
+        // fix18-09D：多商品
+        const _pnms = Array.isArray(o.discount_product_names)&&o.discount_product_names.length
+          ? o.discount_product_names
+          : (o.discount_product_name ? o.discount_product_name.split('、').map(s=>s.trim()).filter(Boolean) : []);
+        const _isProd = (o.discount_target_type==='products'||o.discount_target_type==='product');
+        const productName  = (_isProd && _pnms.length) ? _pnms.join('、') : '整張訂單';
+        return `<tr>
+          <td style="font-size:12px;color:#999;white-space:nowrap">${dateStr}</td>
+          <td><span class="order-num" style="font-size:12px">${escHtml(o.order_number)}</span></td>
+          <td style="font-size:12px;color:var(--text-secondary)">${escHtml(campaignName)}</td>
+          <td style="font-size:12px;color:var(--text-secondary)">${escHtml(productName)}</td>
+          <td style="font-family:monospace;color:var(--danger);font-weight:700">-NT$${disc}</td>
+          <td>${cat && cat !== 'none' ? `<span class="disc-badge disc-badge-${cat}">${catLabel}</span>` : '<span style="color:var(--text-muted);font-size:12px">—</span>'}</td>
+          <td style="font-size:12px;color:var(--text-secondary);max-width:120px">${escHtml(o.discount_note || '—')}</td>
+        </tr>`;
+      }).join('')
+    : '<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:16px">無折扣訂單</td></tr>';
+
+  document.getElementById('discountDetailModal').classList.add('open');
+}
+
+function closeDiscountDetail() {
+  document.getElementById('discountDetailModal').classList.remove('open');
+}
+
 
 // ===== 訂單頁 =====
 // 計算統計（從前端已篩選 orders 陣列計算，確保列表與統計一致）
@@ -1743,10 +2039,16 @@ function calcStatsFromOrders(orders) {
     if (o.order_mode === 'delivery' && o.delivery_status === 'cancelled') return false;
     return true;
   });
-  const order_count   = valid.length;
-  const total_revenue = valid.reduce((s, o) => s + Number(o.total || 0), 0);
-  const avg_order     = order_count > 0 ? total_revenue / order_count : 0;
-  const total_commission  = valid.reduce((s, o) => s + Number(o.platform_commission_amount || 0), 0);
+  const order_count        = valid.length;
+  const total_revenue      = valid.reduce((s, o) => s + Number(o.total || 0), 0);
+  const total_discount     = valid.reduce((s, o) => s + Number(o.discount_amount || 0), 0);
+  const total_original     = valid.reduce((s, o) => {
+    const disc = Number(o.discount_amount || 0);
+    const tot  = Number(o.total || 0);
+    return s + (o.original_total ? Number(o.original_total) : tot + disc);
+  }, 0);
+  const avg_order          = order_count > 0 ? total_revenue / order_count : 0;
+  const total_commission   = valid.reduce((s, o) => s + Number(o.platform_commission_amount || 0), 0);
   const total_store_income = valid.reduce((s, o) => s + Number(o.store_actual_income || o.total || 0), 0);
 
   // 熱賣商品
@@ -1761,13 +2063,25 @@ function calcStatsFromOrders(orders) {
   });
   const top_products = Object.values(productMap).sort((a, b) => b.qty - a.qty).slice(0, 5);
 
-  return { order_count, total_revenue, avg_order, total_commission, total_store_income, top_products };
+  // fix18-09：折扣分類統計
+  const discount_by_category = {};
+  valid.forEach(o => {
+    const disc = Number(o.discount_amount || 0);
+    if (disc <= 0) return;
+    const cat = normalizeDiscountCategory(o.discount_category);
+    if (!discount_by_category[cat]) discount_by_category[cat] = 0;
+    discount_by_category[cat] += disc;
+  });
+
+  return { order_count, total_revenue, total_discount, total_original, avg_order,
+           total_commission, total_store_income, top_products, discount_by_category };
 }
 
 async function loadOrders(modeFilter) {
   const from = document.getElementById('dateFrom')?.value;
   const to   = document.getElementById('dateTo')?.value;
-  const today = new Date().toISOString().slice(0, 10);
+  // fix18-04：用台北時間 today，避免 UTC 時差導致 LINE 訂單消失
+  const today = twTodayStr();
   const dateFrom = from || today, dateTo = to || today;
   try {
     const res = await apiFetch(`/api/orders?date_from=${dateFrom}&date_to=${dateTo}`);
@@ -1781,17 +2095,22 @@ async function loadOrders(modeFilter) {
     }
     // 全部訂單：不過濾
 
+    // fix18-09B：儲存全部訂單快取（供折扣篩選 & 明細彈窗使用）
+    _allOrdersCache = orders;
+
     // 從篩選後的 orders 計算統計（確保列表與統計一致）
     const stats = calcStatsFromOrders(orders);
 
-    renderOrdersTable(orders);
-    renderStatCards(stats);
+    // fix18-09B：套用折扣篩選後再 render 列表
+    const filteredOrders = applyDiscountFilter(orders, currentDiscountFilter);
+    renderOrdersTable(filteredOrders);
+    renderStatCards(stats, orders);
   } catch { showToast('訂單載入失敗', 'error'); }
 }
 
 async function loadDeliveryReport() {
-  const from = document.getElementById('dateFrom')?.value || new Date().toISOString().slice(0,10);
-  const to   = document.getElementById('dateTo')?.value   || new Date().toISOString().slice(0,10);
+  const from = document.getElementById('dateFrom')?.value || twTodayStr();
+  const to   = document.getElementById('dateTo')?.value   || twTodayStr();
   try {
     const res  = await apiFetch(`/api/orders/delivery-report?date_from=${from}&date_to=${to}`);
     const json = await res.json();
@@ -1799,9 +2118,11 @@ async function loadDeliveryReport() {
 
     // 從回傳的外送訂單陣列重新計算統計（確保一致）
     const delivOrders = json.data || [];
+    // fix18-09B：儲存快取
+    _allOrdersCache = delivOrders;
     const stats = calcStatsFromOrders(delivOrders);
     // 外送報表額外加平台分組
-    renderStatCards({ ...stats, _hasDelivery: true });
+    renderStatCards({ ...stats, _hasDelivery: true }, delivOrders);
 
     const byPlat = json.by_platform || [];
     const platStats = document.getElementById('platformStats');
@@ -1812,22 +2133,743 @@ async function loadDeliveryReport() {
          <div class="psc-detail">訂單${p.count}筆 ｜ 抽成NT$${Math.round(p.commission)} ｜ 實收NT$${Math.round(p.store_income)}</div>
          </div>`).join('')}</div>` : '';
     }
-    renderDeliveryTable(delivOrders);
+    // fix18-09B：套用折扣篩選
+    const filteredDelivOrders = applyDiscountFilter(delivOrders, currentDiscountFilter);
+    renderDeliveryTable(filteredDelivOrders);
   } catch { showToast('外送報表載入失敗', 'error'); }
 }
 
-function renderStatCards(stats) {
+function renderStatCards(stats, allOrders) {
   const container = document.getElementById('statCards');
   if (!container) return;
+  // fix18-09F：快取最近 stats 供模式切換重繪
+  window._lastOrderStats = stats;
   // _hasDelivery: 明確傳入時才顯示抽成卡片（外送報表分頁）
-  const showDelivery = stats._hasDelivery && stats.total_commission > 0;
+  const showDelivery = stats._hasDelivery;
+  const orders = allOrders || _allOrdersCache || [];
+
+  // fix18-09B：折扣分類明細（含筆數）
+  const discByCat = stats.discount_by_category || {};
+  const discCatEntries = Object.entries(discByCat).filter(([,v]) => v > 0);
+
+  // 計算各分類筆數
+  const catCount = {};
+  orders.forEach(o => {
+    if (o.status === 'void' || o.order_status === 'cancelled') return;
+    if (o.order_mode === 'delivery' && o.delivery_status === 'cancelled') return;
+    const disc = Number(o.discount_amount || 0);
+    if (disc <= 0) return;
+    const cat = normalizeDiscountCategory(o.discount_category);
+    catCount[cat] = (catCount[cat] || 0) + 1;
+  });
+  const totalDiscOrders = Object.values(catCount).reduce((a,b) => a+b, 0);
+
+  const discCatRows = discCatEntries.length
+    ? discCatEntries.map(([cat, amt]) => {
+        const cnt = catCount[cat] || 0;
+        return `<div class="stat-card-clickable" onclick="setDiscountFilter('${cat}')"
+          style="display:flex;justify-content:space-between;align-items:center;font-size:12px;padding:5px 6px;border-radius:5px;margin-bottom:4px;background:var(--bg-base,#0f172a);border:1px solid var(--border,#334155)">
+          <span style="color:var(--text-secondary,#94a3b8)">${DISCOUNT_CATEGORY_DISPLAY[cat]||cat}</span>
+          <span style="text-align:right">
+            <span style="color:var(--danger,#ef4444);font-weight:700;font-family:monospace">-NT$${Math.round(amt)}</span>
+            <br><span style="color:var(--text-muted,#64748b);font-size:11px">${cnt}筆</span>
+          </span>
+        </div>`;
+      }).join('')
+    : '<div style="color:var(--text-muted,#64748b);font-size:12px">無折扣支出</div>';
+
+  const totalDiscount  = Number(stats.total_discount || 0);
+  const totalOriginal  = Number(stats.total_original || 0);
+  const totalRevenue   = Number(stats.total_revenue || 0);
+
   container.innerHTML = `
-    <div class="stat-card"><div class="stat-card-label">訂單數</div><div class="stat-card-value">${stats.order_count||0}</div><div class="stat-card-sub">筆訂單</div></div>
-    <div class="stat-card"><div class="stat-card-label">總營業額</div><div class="stat-card-value">$${Math.round(stats.total_revenue||0)}</div><div class="stat-card-sub">新台幣</div></div>
-    <div class="stat-card"><div class="stat-card-label">平均客單價</div><div class="stat-card-value">$${Math.round(stats.avg_order||0)}</div><div class="stat-card-sub">每筆訂單</div></div>
-    ${showDelivery ? `<div class="stat-card"><div class="stat-card-label">平台抽成</div><div class="stat-card-value" style="color:var(--danger)">$${Math.round(stats.total_commission)}</div></div><div class="stat-card"><div class="stat-card-label">店家實收</div><div class="stat-card-value" style="color:var(--success)">$${Math.round(stats.total_store_income)}</div></div>` : ''}
-    ${stats.top_products?.length ? `<div class="stat-card"><div class="stat-card-label">🏆 熱賣</div><div class="stat-card-value" style="font-size:14px;line-height:1.6">${stats.top_products.slice(0,3).map(p=>`${escHtml(p.name)} <small style="color:#999">×${p.qty}</small>`).join('<br>')}</div></div>` : ''}`;
+    ${isCardVisible('訂單數') ? `<div class="stat-card"><div class="stat-card-label">訂單數</div><div class="stat-card-value">${stats.order_count||0}</div><div class="stat-card-sub">筆訂單</div></div>` : ''}
+    ${isCardVisible('原價營業額') ? `<div class="stat-card"><div class="stat-card-label">原價營業額</div><div class="stat-card-value" style="font-size:18px">$${Math.round(totalOriginal)}</div><div class="stat-card-sub">未扣折扣</div></div>` : ''}
+    ${isCardVisible('折扣總額') && totalDiscount > 0 ? `<div class="stat-card"><div class="stat-card-label">折扣總額</div><div class="stat-card-value" style="color:var(--danger)">-$${Math.round(totalDiscount)}</div><div class="stat-card-sub">已折抵</div></div>` : ''}
+    ${isCardVisible('實收營業額') ? `<div class="stat-card"><div class="stat-card-label">實收營業額</div><div class="stat-card-value" style="color:var(--success)">$${Math.round(totalRevenue)}</div><div class="stat-card-sub">新台幣</div></div>` : ''}
+    ${isCardVisible('平均客單價') ? `<div class="stat-card"><div class="stat-card-label">平均客單價</div><div class="stat-card-value">$${Math.round(stats.avg_order||0)}</div><div class="stat-card-sub">每筆訂單</div></div>` : ''}
+    ${isCardVisible('平台抽成') && showDelivery ? `<div class="stat-card"><div class="stat-card-label">平台抽成</div><div class="stat-card-value" style="color:var(--danger)">$${Math.round(stats.total_commission||0)}</div></div>` : ''}
+    ${isCardVisible('店家實收') && showDelivery ? `<div class="stat-card"><div class="stat-card-label">店家實收</div><div class="stat-card-value" style="color:var(--success)">$${Math.round(stats.total_store_income||0)}</div></div>` : ''}
+    ${isCardVisible('熱賣商品') ? renderHotProductsCard(orders) : ''}
+    ${isCardVisible('折扣支出') ? `<div class="stat-card" style="min-width:220px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div class="stat-card-label" style="margin:0">💸 折扣支出</div>
+        <button onclick="openDiscountDetail()" style="font-size:11px;padding:2px 8px;border-radius:99px;border:1px solid var(--border,#334155);background:transparent;color:var(--text-secondary,#94a3b8);cursor:pointer">📄 查看明細</button>
+      </div>
+      <div class="stat-card-value" style="color:var(--danger);font-size:18px;margin-bottom:8px" onclick="setDiscountFilter('has_discount')" style="cursor:pointer">NT$${Math.round(totalDiscount)}<small style="font-size:12px;color:var(--text-muted);font-weight:400;margin-left:6px">${totalDiscOrders}筆</small></div>
+      ${discCatRows}
+    </div>` : ''}
+    ${isCardVisible('折扣商品排行') ? renderDiscountTopProductsWithGroups(orders) : ''}
+    ${isCardVisible('折扣活動排行') ? renderDiscountCampaignRanking(orders) : ''}`;
+  // fix18-09E：外送平台卡片顯示控制
+  const platEl = document.getElementById('platformStats');
+  if (platEl) platEl.style.display = isCardVisible('外送平台卡片') ? '' : 'none';
 }
+
+// fix18-09C：折扣活動排行卡（TOP3 preview）
+function renderDiscountCampaignRanking(orders) {
+  const ranked = buildDiscountCampaignMap(orders);
+  if (!ranked.length) return '';
+  const preview = ranked.slice(0, 3);
+  const previewRows = preview.map((c, i) =>
+    `<div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;padding:4px 0;border-bottom:1px solid var(--border,#334155)">
+      <span style="color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${i+1}. ${escHtml(c.name)}</span>
+      <span style="text-align:right;white-space:nowrap;margin-left:6px">
+        <span style="color:var(--danger);font-family:monospace;font-weight:700">NT$${Math.round(c.total)}</span>
+        <span style="color:var(--text-muted);font-size:11px;margin-left:4px">${c.count}筆</span>
+      </span>
+    </div>`
+  ).join('');
+  return `<div class="stat-card" style="min-width:200px;max-width:260px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <div class="stat-card-label" style="margin:0">🏆 折扣活動排行</div>
+      <button onclick="openDiscCampaignTop10()" style="font-size:11px;padding:2px 8px;border-radius:99px;border:1px solid var(--border,#334155);background:transparent;color:var(--text-secondary,#94a3b8);cursor:pointer;white-space:nowrap">查看 TOP10</button>
+    </div>
+    ${previewRows}
+    ${ranked.length > 3 ? `<div style="font-size:11px;color:var(--text-muted);text-align:center;margin-top:6px;cursor:pointer" onclick="openDiscCampaignTop10()">還有 ${ranked.length - 3} 項 →</div>` : ''}
+  </div>`;
+}
+
+// fix18-09B：折扣商品排行（TOP 10）
+// fix18-09B rev：計算折扣商品排行（共用）
+function buildDiscountProdMap(orders) {
+  const valid = (orders || []).filter(o => {
+    if (o.status === 'void' || o.order_status === 'cancelled') return false;
+    if (o.order_mode === 'delivery' && o.delivery_status === 'cancelled') return false;
+    return Number(o.discount_amount || 0) > 0;
+  });
+  const prodMap = {};
+  valid.forEach(o => {
+    const disc = Number(o.discount_amount || 0);
+    const items = typeof o.items === 'string' ? JSON.parse(o.items) : (o.items || []);
+    const totalQty = items.reduce((s, i) => s + Number(i.qty || 0), 0);
+    items.forEach(item => {
+      const share = totalQty > 0 ? disc * Number(item.qty || 0) / totalQty : 0;
+      if (!prodMap[item.name]) prodMap[item.name] = { name: item.name, total: 0, count: 0 };
+      prodMap[item.name].total += share;
+      prodMap[item.name].count += 1;
+    });
+  });
+  return Object.values(prodMap).sort((a, b) => b.total - a.total);
+}
+
+// 統計卡只顯示 TOP3，右上角附「查看 TOP10」按鈕（fix18-09C：使用 V2 版本）
+function renderDiscountTopProducts(orders) {
+  const ranked = buildDiscountProdMapV2(orders);
+  if (!ranked.length) return '';
+  const preview = ranked.slice(0, 3);
+  const previewRows = preview.map((p, i) =>
+    `<div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;padding:4px 0;border-bottom:1px solid var(--border,#334155)">
+      <span style="color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${i+1}. ${escHtml(p.name)}</span>
+      <span style="text-align:right;white-space:nowrap;margin-left:6px">
+        <span style="color:var(--danger);font-family:monospace;font-weight:700">NT$${Math.round(p.total)}</span>
+        <span style="color:var(--text-muted);font-size:11px;margin-left:4px">${p.count}筆</span>
+      </span>
+    </div>`
+  ).join('');
+  return `<div class="stat-card" style="min-width:200px;max-width:260px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <div class="stat-card-label" style="margin:0">📉 折扣商品排行</div>
+      <button onclick="openDiscTop10()" style="font-size:11px;padding:2px 8px;border-radius:99px;border:1px solid var(--border,#334155);background:transparent;color:var(--text-secondary,#94a3b8);cursor:pointer;white-space:nowrap">查看 TOP10</button>
+    </div>
+    ${previewRows}
+    ${ranked.length > 3 ? `<div style="font-size:11px;color:var(--text-muted);text-align:center;margin-top:6px;cursor:pointer" onclick="openDiscTop10()">還有 ${ranked.length - 3} 項 →</div>` : ''}
+  </div>`;
+}
+
+// 開啟 TOP10 Modal（fix18-09C：使用 V2；fix18-09F：支援群組）
+function openDiscTop10() {
+  openDiscTop10WithGroups();
+}
+
+function closeDiscTop10() {
+  document.getElementById('discTop10Modal').classList.remove('open');
+}
+
+// ═══════════════════════════════════════════════════════════
+// fix18-09E：折扣分類功能
+// ═══════════════════════════════════════════════════════════
+
+// 載入折扣分類（全域快取）
+async function loadDiscountCategories() {
+  try {
+    const res = await apiFetch('/api/discount-categories');
+    const json = await res.json();
+    if (json.success) {
+      allDiscountCategories = json.data || [];
+      renderDiscountFilterBar(); // 同步更新快速篩選列
+    }
+  } catch (e) {
+    console.warn('[DiscountCategories] 載入失敗', e.message);
+  }
+}
+
+// 設定中心：折扣分類 Tab
+async function loadDiscountCategoriesSection() {
+  await loadDiscountCategories();
+  renderDiscountCategoryList();
+}
+
+function renderDiscountCategoryList() {
+  const el = document.getElementById('discountCategoryList');
+  if (!el) return;
+  const cats = allDiscountCategories;
+  if (!cats.length) {
+    el.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:16px 0">尚無分類，點擊「＋ 新增分類」開始設定</div>';
+    return;
+  }
+  el.innerHTML = `
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead>
+        <tr style="border-bottom:2px solid var(--border,#334155)">
+          <th style="text-align:left;padding:8px 10px;color:var(--text-muted)">圖示</th>
+          <th style="text-align:left;padding:8px 10px;color:var(--text-muted)">分類名稱</th>
+          <th style="text-align:left;padding:8px 10px;color:var(--text-muted)">代碼</th>
+          <th style="text-align:center;padding:8px 10px;color:var(--text-muted)">狀態</th>
+          <th style="text-align:center;padding:8px 10px;color:var(--text-muted)">排序</th>
+          <th style="text-align:right;padding:8px 10px;color:var(--text-muted)">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${cats.map(c => `
+          <tr style="border-bottom:1px solid var(--border,#334155)">
+            <td style="padding:10px;font-size:18px">${escHtml(c.icon||'⚪')}</td>
+            <td style="padding:10px;font-weight:600;color:${c.enabled?'var(--text-primary,#f1f5f9)':'var(--text-muted,#64748b)'}">${escHtml(c.name)}</td>
+            <td style="padding:10px;color:var(--text-muted,#64748b);font-size:11px;font-family:monospace">${escHtml(c.code)}</td>
+            <td style="padding:10px;text-align:center">
+              <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                <input type="checkbox" ${c.enabled?'checked':''} onchange="toggleDiscountCategory(${c.id},this.checked)" style="width:14px;height:14px">
+                <span style="font-size:12px;color:${c.enabled?'#10b981':'var(--text-muted)'}">${c.enabled?'啟用':'停用'}</span>
+              </label>
+            </td>
+            <td style="padding:10px;text-align:center;color:var(--text-muted);font-size:12px">${c.sort_order}</td>
+            <td style="padding:10px;text-align:right;white-space:nowrap">
+              <button onclick="openCategoryModal(${c.id})" style="padding:4px 12px;font-size:12px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--text-secondary);cursor:pointer;margin-right:6px">✏️ 編輯</button>
+              <button onclick="deleteDiscountCategory(${c.id},'${escHtml(c.name)}')" style="padding:4px 12px;font-size:12px;border-radius:6px;border:1px solid var(--danger,#ef4444);background:transparent;color:var(--danger,#ef4444);cursor:pointer">🗑 刪除</button>
+            </td>
+          </tr>`).join('')}
+      </tbody>
+    </table>`;
+}
+
+function openCategoryModal(id) {
+  const modal = document.getElementById('categoryEditModal');
+  if (!modal) return;
+  const titleEl = document.getElementById('categoryModalTitle');
+  const idEl    = document.getElementById('categoryEditId');
+  const nameEl  = document.getElementById('categoryEditName');
+  const iconEl  = document.getElementById('categoryEditIcon');
+  const colorEl = document.getElementById('categoryEditColor');
+  const enaEl   = document.getElementById('categoryEditEnabled');
+  const sortEl  = document.getElementById('categoryEditSortOrder');
+  if (id) {
+    const c = allDiscountCategories.find(x => x.id === id);
+    if (!c) return;
+    if (titleEl) titleEl.textContent = '編輯折扣分類';
+    if (idEl)    idEl.value     = c.id;
+    if (nameEl)  nameEl.value   = c.name;
+    if (iconEl)  iconEl.value   = c.icon || '⚪';
+    if (colorEl) colorEl.value  = c.color || '#94a3b8';
+    if (enaEl)   enaEl.checked  = !!c.enabled;
+    if (sortEl)  sortEl.value   = c.sort_order || 0;
+  } else {
+    if (titleEl) titleEl.textContent = '新增折扣分類';
+    if (idEl)    idEl.value     = '';
+    if (nameEl)  nameEl.value   = '';
+    if (iconEl)  iconEl.value   = '⚪';
+    if (colorEl) colorEl.value  = '#94a3b8';
+    if (enaEl)   enaEl.checked  = true;
+    if (sortEl)  sortEl.value   = allDiscountCategories.length;
+  }
+  modal.classList.add('open');
+  if (nameEl) setTimeout(() => nameEl.focus(), 100);
+}
+
+function closeCategoryModal() {
+  const modal = document.getElementById('categoryEditModal');
+  if (modal) modal.classList.remove('open');
+}
+
+async function saveCategoryModal() {
+  const id      = document.getElementById('categoryEditId')?.value;
+  const name    = document.getElementById('categoryEditName')?.value?.trim();
+  const icon    = document.getElementById('categoryEditIcon')?.value?.trim() || '⚪';
+  const color   = document.getElementById('categoryEditColor')?.value || '#94a3b8';
+  const enabled = document.getElementById('categoryEditEnabled')?.checked ?? true;
+  const sort    = parseInt(document.getElementById('categoryEditSortOrder')?.value || '0', 10);
+  if (!name) { showToast('請輸入分類名稱', 'error'); return; }
+  try {
+    const res = await apiFetch(id ? `/api/discount-categories/${id}` : '/api/discount-categories', {
+      method: id ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, icon, color, enabled, sort_order: sort })
+    });
+    const json = await res.json();
+    if (json.success) {
+      closeCategoryModal();
+      await loadDiscountCategories();
+      renderDiscountCategoryList();
+      showToast(id ? '✅ 已更新' : '✅ 折扣分類已新增', 'success');
+    } else { showToast(json.message || '儲存失敗', 'error'); }
+  } catch (e) { showToast('網路錯誤', 'error'); }
+}
+
+async function toggleDiscountCategory(id, enabled) {
+  try {
+    await apiFetch('/api/discount-categories/' + id, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled })
+    });
+    await loadDiscountCategories();
+    renderDiscountCategoryList();
+  } catch (e) { showToast('更新失敗', 'error'); }
+}
+
+async function deleteDiscountCategory(id, name) {
+  if (!confirm(`確定要刪除「${name}」分類嗎？`)) return;
+  try {
+    const res = await apiFetch('/api/discount-categories/' + id, { method: 'DELETE' });
+    const json = await res.json();
+    if (json.success) {
+      await loadDiscountCategories();
+      renderDiscountCategoryList();
+      showToast('已刪除', 'success');
+    } else { showToast(json.message || '刪除失敗', 'error'); }
+  } catch (e) { showToast('網路錯誤', 'error'); }
+}
+
+// fix18-09E：動態渲染快速篩選列（折扣分類按鈕）
+function renderDiscountFilterBar() {
+  const bar = document.getElementById('discountFilterBar');
+  if (!bar) return;
+  const cats = allDiscountCategories.filter(c => c.enabled);
+  const current = currentDiscountFilter;
+  let html = `
+    <button class="disc-filter-btn ${current==='all'?'active':''}" data-filter="all" onclick="setDiscountFilter('all')">全部</button>
+    <button class="disc-filter-btn ${current==='has_discount'?'active':''}" data-filter="has_discount" onclick="setDiscountFilter('has_discount')">💸 有折扣</button>
+    <button class="disc-filter-btn ${current==='no_discount'?'active':''}" data-filter="no_discount" onclick="setDiscountFilter('no_discount')">無折扣</button>`;
+  if (cats.length) {
+    cats.forEach(c => {
+      html += `<button class="disc-filter-btn ${current===c.code?'active':''}" data-filter="${escHtml(c.code)}" onclick="setDiscountFilter('${escHtml(c.code)}')">${escHtml(c.icon||'')} ${escHtml(c.name)}</button>`;
+    });
+  } else {
+    // fallback 預設分類
+    const defaults = [
+      {code:'product_promo',label:'🟢 商品活動'},{code:'marketing',label:'🔵 廣告行銷'},
+      {code:'complaint',label:'🟠 客訴補償'},{code:'loyalty',label:'🟣 老客優惠'},
+      {code:'staff_family',label:'⚫ 員工親友'},{code:'platform_promo',label:'🟡 平台活動'},
+      {code:'other',label:'⚪ 其他'}
+    ];
+    defaults.forEach(d => {
+      html += `<button class="disc-filter-btn ${current===d.code?'active':''}" data-filter="${d.code}" onclick="setDiscountFilter('${d.code}')">${d.label}</button>`;
+    });
+  }
+  bar.innerHTML = html;
+}
+
+// fix18-09E：動態渲染訂單修改 Modal 折扣分類下拉
+function refreshEditOrderCategoryDropdown(selectedCode) {
+  const sel = document.getElementById('editDiscountCategory');
+  if (!sel) return;
+  const cats = allDiscountCategories.length
+    ? allDiscountCategories.filter(c => c.enabled)
+    : Object.entries(DISCOUNT_CATEGORY_DISPLAY_FALLBACK).filter(([k]) => k !== 'none').map(([code,name]) => ({code,name}));
+  sel.innerHTML = '<option value="none">無折扣</option>' +
+    cats.map(c => `<option value="${escHtml(c.code)}">${escHtml(c.name)}</option>`).join('');
+  if (selectedCode) sel.value = selectedCode;
+}
+
+// ═══════════════════════════════════════════════════════════
+// fix18-09E：報表卡片顯示設定 Modal
+// ═══════════════════════════════════════════════════════════
+
+// fix18-09E：報表卡片顯示 Modal — 對應 HTML id="cardVisibilityModal"
+function openCardVisibilityModal() {
+  const modal = document.getElementById('cardVisibilityModal');
+  if (!modal) return;
+  const visible = getVisibleCards();
+  // 動態渲染 checkboxes
+  const container = document.getElementById('cardVisibilityCheckboxes');
+  if (container) {
+    container.innerHTML = REPORT_ALL_CARDS.map(label => `
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:6px 0;border-bottom:1px solid var(--border,#334155)">
+        <input type="checkbox" class="cv-checkbox" data-card="${label}" ${visible.includes(label)?'checked':''} style="width:16px;height:16px">
+        <span style="font-size:14px">${label}</span>
+      </label>`).join('') +
+    // fix18-09F：商品分析群組標籤
+    `<div style="border-top:2px solid var(--border,#334155);margin-top:10px;padding-top:10px">
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">📊 訂單列表顯示</div>
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:6px 0">
+        <input type="checkbox" id="cvGroupLabelToggle" ${isGroupLabelEnabled()?'checked':''} style="width:16px;height:16px">
+        <span style="font-size:14px">商品分析群組標籤</span>
+        <span style="font-size:11px;color:var(--text-muted)">在訂單商品下方顯示 📊 群組：xxx</span>
+      </label>
+    </div>`;
+  }
+  _updateCardModeButtons(visible);
+  modal.classList.add('open');
+}
+
+function closeCardVisibilityModal() {
+  const modal = document.getElementById('cardVisibilityModal');
+  if (modal) modal.classList.remove('open');
+}
+
+function saveCardVisibility() {
+  const modal = document.getElementById('cardVisibilityModal');
+  if (!modal) return;
+  const checked = [];
+  modal.querySelectorAll('.cv-checkbox:checked').forEach(cb => checked.push(cb.dataset.card));
+  saveVisibleCards(checked);
+  // fix18-09F：儲存群組標籤開關
+  const glToggle = document.getElementById('cvGroupLabelToggle');
+  if (glToggle) setGroupLabelEnabled(glToggle.checked);
+  closeCardVisibilityModal();
+  // Re-render stats
+  if (_allOrdersCache.length) {
+    const stats = calcStatsFromOrders(_allOrdersCache);
+    renderStatCards(stats, _allOrdersCache);
+  }
+  showToast('✅ 顯示設定已儲存', 'success');
+}
+
+function setCardVisibilityMode(mode) {
+  if (mode === 'all') {
+    saveVisibleCards([...REPORT_ALL_CARDS]);
+  } else if (mode === 'simple') {
+    saveVisibleCards([...REPORT_SLIM_CARDS]);
+  }
+  // Update checkboxes in modal
+  const visible = getVisibleCards();
+  document.querySelectorAll('.cv-checkbox').forEach(cb => {
+    cb.checked = visible.includes(cb.dataset.card);
+  });
+  _updateCardModeButtons(visible);
+}
+
+function _updateCardModeButtons(visible) {
+  const allBtn    = document.getElementById('cvModeAll');
+  const slimBtn   = document.getElementById('cvModeSimple');
+  if (!allBtn || !slimBtn) return;
+  const isAll  = REPORT_ALL_CARDS.every(c => visible.includes(c));
+  const isSlim = REPORT_SLIM_CARDS.length === visible.length && REPORT_SLIM_CARDS.every(c => visible.includes(c));
+  allBtn.style.background  = isAll  ? 'var(--accent,#3b82f6)' : '';
+  allBtn.style.color       = isAll  ? '#fff' : '';
+  slimBtn.style.background = isSlim ? 'var(--accent,#3b82f6)' : '';
+  slimBtn.style.color      = isSlim ? '#fff' : '';
+}
+
+// alias — for code inside saveCardVisibility that calls renderOrderStats
+function renderOrderStats(stats, orders) { renderStatCards(stats, orders); }
+// legacy compat
+function openReportCardSettings() { openCardVisibilityModal(); }
+function closeReportCardSettings() { closeCardVisibilityModal(); }
+function saveReportCardSettings() { saveCardVisibility(); }
+function setReportCardMode(mode) { setCardVisibilityMode(mode === 'slim' ? 'simple' : mode); }
+
+// ═══════════════════════════════════════════════════════════
+// fix18-09C：折扣活動 Campaign 相關功能
+
+// 載入折扣活動列表（全域快取，供 modal 下拉使用）
+async function loadDiscountCampaigns() {
+  try {
+    const res = await apiFetch('/api/discount-campaigns');
+    const json = await res.json();
+    if (json.success) {
+      allDiscountCampaigns = json.data || [];
+    }
+  } catch (e) {
+    console.warn('[DiscountCampaigns] 載入失敗', e.message);
+  }
+}
+
+// 設定中心：折扣活動 Tab（fix18-09E：同時渲染折扣分類＋折扣活動）
+async function loadDiscountCampaignsTab() {
+  await Promise.all([
+    loadDiscountCampaigns(),
+    loadDiscountCategories()
+  ]);
+  renderDiscountCategoryList();
+  renderDiscountCampaignList();
+}
+
+function renderDiscountCampaignList() {
+  const el = document.getElementById('discountCampaignList');
+  if (!el) return;
+  if (!allDiscountCampaigns.length) {
+    el.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:16px 0">尚無折扣活動，點擊「＋ 新增活動」開始設定</div>';
+    return;
+  }
+  el.innerHTML = `
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead>
+        <tr style="border-bottom:2px solid var(--border,#334155)">
+          <th style="text-align:left;padding:8px 10px;color:var(--text-muted)">活動名稱</th>
+          <th style="text-align:left;padding:8px 10px;color:var(--text-muted)">說明</th>
+          <th style="text-align:center;padding:8px 10px;color:var(--text-muted)">狀態</th>
+          <th style="text-align:center;padding:8px 10px;color:var(--text-muted)">排序</th>
+          <th style="text-align:right;padding:8px 10px;color:var(--text-muted)">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${allDiscountCampaigns.map(c => `
+          <tr style="border-bottom:1px solid var(--border,#334155)">
+            <td style="padding:10px;font-weight:600;color:${c.enabled?'var(--text-primary,#f1f5f9)':'var(--text-muted,#64748b)'}">${escHtml(c.name)}</td>
+            <td style="padding:10px;color:var(--text-muted,#64748b);font-size:12px">${escHtml(c.description||'—')}</td>
+            <td style="padding:10px;text-align:center">
+              <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                <input type="checkbox" ${c.enabled?'checked':''} onchange="toggleDiscountCampaign(${c.id},this.checked)" style="width:14px;height:14px">
+                <span style="font-size:12px;color:${c.enabled?'#10b981':'var(--text-muted)'}">${c.enabled?'啟用':'停用'}</span>
+              </label>
+            </td>
+            <td style="padding:10px;text-align:center;color:var(--text-muted);font-size:12px">${c.sort_order}</td>
+            <td style="padding:10px;text-align:right;white-space:nowrap">
+              <button onclick="openCampaignModal(${c.id})" style="padding:4px 12px;font-size:12px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--text-secondary);cursor:pointer;margin-right:6px">✏️ 編輯</button>
+              <button onclick="deleteDiscountCampaign(${c.id},'${escHtml(c.name)}')" style="padding:4px 12px;font-size:12px;border-radius:6px;border:1px solid var(--danger,#ef4444);background:transparent;color:var(--danger,#ef4444);cursor:pointer">🗑 刪除</button>
+            </td>
+          </tr>`).join('')}
+      </tbody>
+    </table>`;
+}
+
+// fix18-09D：Modal 新增/編輯
+function openCampaignModal(id) {
+  const modal = document.getElementById('campaignEditModal');
+  if (!modal) return;
+  const titleEl = document.getElementById('campaignModalTitle');
+  const idEl    = document.getElementById('campaignEditId');
+  const nameEl  = document.getElementById('campaignEditName');
+  const descEl  = document.getElementById('campaignEditDesc');
+  const enaEl   = document.getElementById('campaignEditEnabled');
+  const sortEl  = document.getElementById('campaignEditSortOrder');
+  if (id) {
+    const c = allDiscountCampaigns.find(x => x.id === id);
+    if (!c) return;
+    if (titleEl) titleEl.textContent = '編輯折扣活動';
+    if (idEl)    idEl.value     = c.id;
+    if (nameEl)  nameEl.value   = c.name;
+    if (descEl)  descEl.value   = c.description || '';
+    if (enaEl)   enaEl.checked  = !!c.enabled;
+    if (sortEl)  sortEl.value   = c.sort_order || 0;
+  } else {
+    if (titleEl) titleEl.textContent = '新增折扣活動';
+    if (idEl)    idEl.value     = '';
+    if (nameEl)  nameEl.value   = '';
+    if (descEl)  descEl.value   = '';
+    if (enaEl)   enaEl.checked  = true;
+    if (sortEl)  sortEl.value   = allDiscountCampaigns.length;
+  }
+  modal.classList.add('open');
+  if (nameEl) setTimeout(() => nameEl.focus(), 100);
+}
+
+function closeCampaignModal() {
+  const modal = document.getElementById('campaignEditModal');
+  if (modal) modal.classList.remove('open');
+}
+
+async function saveCampaignModal() {
+  const id      = document.getElementById('campaignEditId')?.value;
+  const name    = document.getElementById('campaignEditName')?.value?.trim();
+  const desc    = document.getElementById('campaignEditDesc')?.value?.trim() || '';
+  const enabled = document.getElementById('campaignEditEnabled')?.checked ?? true;
+  const sort    = parseInt(document.getElementById('campaignEditSortOrder')?.value || '0', 10);
+  if (!name) { showToast('請輸入活動名稱', 'error'); return; }
+  try {
+    const res = await apiFetch(id ? `/api/discount-campaigns/${id}` : '/api/discount-campaigns', {
+      method: id ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, description: desc, enabled, sort_order: sort })
+    });
+    const json = await res.json();
+    if (json.success) {
+      closeCampaignModal();
+      await loadDiscountCampaigns();
+      renderDiscountCampaignList();
+      showToast(id ? '✅ 已更新' : '✅ 折扣活動已新增', 'success');
+    } else { showToast(json.message || '儲存失敗', 'error'); }
+  } catch (e) { showToast('網路錯誤', 'error'); }
+}
+
+async function addDiscountCampaign() { openCampaignModal(); } // 相容舊呼叫
+
+async function toggleDiscountCampaign(id, enabled) {
+  try {
+    await apiFetch('/api/discount-campaigns/' + id, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled })
+    });
+    await loadDiscountCampaigns();
+    renderDiscountCampaignList();
+  } catch (e) { showToast('更新失敗', 'error'); }
+}
+
+async function editDiscountCampaign(id) { openCampaignModal(id); } // 相容舊呼叫
+
+async function deleteDiscountCampaign(id, name) {
+  if (!confirm(`確定要刪除「${name}」活動嗎？`)) return;
+  try {
+    const res = await apiFetch('/api/discount-campaigns/' + id, { method: 'DELETE' });
+    const json = await res.json();
+    if (json.success) {
+      await loadDiscountCampaigns();
+      renderDiscountCampaignList();
+      showToast('已刪除', 'success');
+    } else { showToast(json.message || '刪除失敗', 'error'); }
+  } catch (e) { showToast('網路錯誤', 'error'); }
+}
+
+// ─── 修改訂單 Modal：折扣活動下拉刷新 ────────────────────
+function refreshEditOrderCampaignDropdown(selectedId) {
+  const sel = document.getElementById('editDiscountCampaign');
+  if (!sel) return;
+  const active = allDiscountCampaigns.filter(c => c.enabled);
+  sel.innerHTML = '<option value="">— 不指定 —</option>' +
+    active.map(c => `<option value="${c.id}" data-name="${escHtml(c.name)}">${escHtml(c.name)}</option>`).join('');
+  if (selectedId) sel.value = selectedId;
+}
+
+// 折扣活動變更時自動帶活動名稱
+function onDiscountCampaignChange() {
+  // 名稱由 saveEditOrder 時從 option text 讀取，這裡不需額外處理
+}
+
+// 折扣套用商品切換（fix18-09D：多選 checkbox）
+function onDiscountTargetTypeChange() {
+  const type = document.getElementById('editDiscountTargetType')?.value;
+  const panel = document.getElementById('editDiscountProductPanel');
+  if (!panel) return;
+  if (type === 'products') {
+    panel.style.display = 'block';
+    refreshEditDiscountProductCheckboxes();
+  } else {
+    panel.style.display = 'none';
+  }
+}
+
+// fix18-09D：checkbox 多選
+function refreshEditDiscountProductCheckboxes(selectedNames) {
+  const container = document.getElementById('editDiscountProductCheckboxes');
+  if (!container) return;
+  if (!editOrderItems.length) {
+    container.innerHTML = '<div style="color:var(--text-muted);font-size:12px">無商品</div>';
+    return;
+  }
+  // 去重（同名商品只顯示一次）
+  const seen = new Set();
+  const unique = editOrderItems.filter(i => {
+    if (seen.has(i.name)) return false;
+    seen.add(i.name); return true;
+  });
+  const selSet = new Set(selectedNames || []);
+  container.innerHTML = unique.map(i => {
+    const checked = selSet.has(i.name) ? 'checked' : '';
+    const totalQty = editOrderItems.filter(x => x.name === i.name).reduce((s, x) => s + (x.qty||0), 0);
+    return `<label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:4px 0">
+      <input type="checkbox" value="${escHtml(i.name)}" ${checked} style="width:15px;height:15px;flex-shrink:0">
+      <span style="font-size:13px">${escHtml(i.name)} <span style="color:var(--text-muted);font-size:12px">×${totalQty}</span></span>
+    </label>`;
+  }).join('');
+}
+
+// 取得 checkbox 勾選結果
+function getCheckedDiscountProducts() {
+  const container = document.getElementById('editDiscountProductCheckboxes');
+  if (!container) return [];
+  return Array.from(container.querySelectorAll('input[type=checkbox]:checked'))
+    .map(cb => cb.value).filter(Boolean);
+}
+
+// 相容舊呼叫（不再使用，保留空函式避免 ReferenceError）
+function refreshEditDiscountProductDropdown(selectedId, selectedName) {
+  // 已被 refreshEditDiscountProductCheckboxes 取代
+}
+
+// ─── 折扣活動排行榜 TOP10 ────────────────────────────────
+function buildDiscountCampaignMap(orders) {
+  const valid = (orders || []).filter(o => {
+    if (o.status === 'void' || o.order_status === 'cancelled') return false;
+    if (o.order_mode === 'delivery' && o.delivery_status === 'cancelled') return false;
+    return Number(o.discount_amount || 0) > 0;
+  });
+  const map = {};
+  valid.forEach(o => {
+    const disc = Number(o.discount_amount || 0);
+    // fix18-09C：用 discount_campaign_name；舊資料無活動視為「其他」
+    const name = o.discount_campaign_name || '其他';
+    if (!map[name]) map[name] = { name, total: 0, count: 0 };
+    map[name].total += disc;
+    map[name].count += 1;
+  });
+  return Object.values(map).sort((a, b) => b.total - a.total);
+}
+
+// 折扣商品 TOP10（fix18-09D 升級版：支援多商品陣列平攤）
+function buildDiscountProdMapV2(orders) {
+  const valid = (orders || []).filter(o => {
+    if (o.status === 'void' || o.order_status === 'cancelled') return false;
+    if (o.order_mode === 'delivery' && o.delivery_status === 'cancelled') return false;
+    return Number(o.discount_amount || 0) > 0;
+  });
+  const prodMap = {};
+  valid.forEach(o => {
+    const disc = Number(o.discount_amount || 0);
+    // fix18-09D：優先使用 discount_product_names 陣列
+    const targetIsProduct = (o.discount_target_type === 'products' || o.discount_target_type === 'product');
+    const names = Array.isArray(o.discount_product_names) && o.discount_product_names.length
+      ? o.discount_product_names
+      : (o.discount_product_name
+          ? o.discount_product_name.split('、').map(s => s.trim()).filter(Boolean)
+          : []);
+    if (targetIsProduct && names.length) {
+      // 多商品：平均分攤
+      const share = disc / names.length;
+      names.forEach(pname => {
+        if (!prodMap[pname]) prodMap[pname] = { name: pname, total: 0, count: 0 };
+        prodMap[pname].total += share;
+        prodMap[pname].count += 1;
+      });
+    } else {
+      // 整張訂單：平攤到各商品項目
+      const items = typeof o.items === 'string' ? JSON.parse(o.items) : (o.items || []);
+      const totalQty = items.reduce((s, i) => s + Number(i.qty || 0), 0);
+      items.forEach(item => {
+        const share = totalQty > 0 ? disc * Number(item.qty || 0) / totalQty : 0;
+        if (!prodMap[item.name]) prodMap[item.name] = { name: item.name, total: 0, count: 0 };
+        prodMap[item.name].total += share;
+        prodMap[item.name].count += 1;
+      });
+    }
+  });
+  return Object.values(prodMap).sort((a, b) => b.total - a.total);
+}
+
+function openDiscCampaignTop10() {
+  const ranked = buildDiscountCampaignMap(_allOrdersCache || []);
+  const top10  = ranked.slice(0, 10);
+  const tbody  = document.getElementById('discCampaignTop10Body');
+  if (!tbody) return;
+  tbody.innerHTML = top10.length
+    ? top10.map((c, i) => {
+        const avg = c.count > 0 ? Math.round(c.total / c.count) : 0;
+        return `<tr>
+          <td style="font-size:13px;color:var(--text-muted);text-align:center">${i + 1}</td>
+          <td style="font-size:13px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(c.name)}</td>
+          <td style="text-align:right;font-family:monospace;color:var(--danger);font-weight:700">NT$${Math.round(c.total)}</td>
+          <td style="text-align:right;color:var(--text-secondary)">${c.count}筆</td>
+          <td style="text-align:right;font-family:monospace;color:var(--text-secondary)">NT$${avg}</td>
+        </tr>`;
+      }).join('')
+    : '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:16px">無資料</td></tr>';
+  document.getElementById('discCampaignTop10Modal').classList.add('open');
+}
+
+function closeDiscCampaignTop10() {
+  document.getElementById('discCampaignTop10Modal').classList.remove('open');
+}
+
 
 function renderOrdersTable(orders) {
   const tbody = document.getElementById('ordersBody');
@@ -1865,9 +2907,38 @@ function renderOrdersTable(orders) {
         <td><span class="mode-badge mode-${modeKey}">${modeLabel[modeKey]||modeKey}</span></td>
         <td style="font-size:12px;color:#999">${twTime(o.created_at,'time')}</td>
         <td style="font-size:13px">${escHtml(ident)}${pickupTag}</td>
-        <td style="font-size:12px">${o.items.map(i=>`${i.name}×${i.qty}`).join('、')}</td>
-        <td style="font-size:12px">${payLabel[o.payment_method]||o.payment_method}</td>
-        <td style="font-family:monospace;font-weight:700;color:#f5a623">NT$${o.total}</td>
+        <td style="font-size:12px">${o.items.map(i => {
+          const groupName = isGroupLabelEnabled() ? getAnalysisGroupName(i.name) : null;
+          return `${i.name}×${i.qty}` + (groupName ? `<br><span style="font-size:10px;color:#818cf8;background:rgba(99,102,241,0.12);border-radius:3px;padding:0 4px">📊 ${escHtml(groupName)}</span>` : '');
+        }).join('<br><span style="color:var(--border,#334155)">─</span><br>')}</td>
+        <td style="font-size:12px">${payLabel[o.payment_method]||o.payment_method}${o.payment_method==='linepay'?
+            (o.payment_status==='paid'&&o.payment_confirm_source==='manual'?'<br><span style="font-size:10px;background:#27AE60;color:#fff;padding:1px 5px;border-radius:4px">現場確認已收</span>':
+             o.payment_status==='paid'?'<br><span style="font-size:10px;background:#27AE60;color:#fff;padding:1px 5px;border-radius:4px">已付款</span>':
+             o.payment_status==='failed'?'<br><span style="font-size:10px;background:#E74C3C;color:#fff;padding:1px 5px;border-radius:4px">付款失敗</span>':
+             o.payment_status==='expired'?'<br><span style="font-size:10px;background:#E74C3C;color:#fff;padding:1px 5px;border-radius:4px">付款逾時</span>':
+             '<br><span style="font-size:10px;background:#2980B9;color:#fff;padding:1px 5px;border-radius:4px">待付款</span>')
+          :''}</td>
+        <td style="font-family:monospace;white-space:nowrap">
+          ${(function(){
+            const disc=Number(o.discount_amount||0);
+            if(disc<=0) return '<span style="font-weight:700;color:#f5a623">NT$'+o.total+'</span>';
+            const origTotal=o.original_total||Number(o.total)+disc;
+            const isHighDisc = origTotal > 0 && disc/origTotal >= 0.5;
+            const cat = normalizeDiscountCategory(o.discount_category);
+            const catLabel = DISCOUNT_CATEGORY_DISPLAY[cat] || '';
+            const catBadge = cat && cat!=='none' ? '<br><span class="disc-badge disc-badge-'+cat+'">'+(catLabel||cat)+'</span>' : '';
+            const highWarn = isHighDisc ? '<br><span class="high-discount-warn">⚠ 高折扣</span>' : '';
+            // fix18-09D：顯示折扣活動與多商品名稱
+            const campDisp = o.discount_campaign_name ? '<div style="font-size:11px;color:#fbbf24">🎯 '+escHtml(o.discount_campaign_name)+'</div>' : '';
+            const _pnames09d = Array.isArray(o.discount_product_names)&&o.discount_product_names.length ? o.discount_product_names : (o.discount_product_name?o.discount_product_name.split('、').map(s=>s.trim()).filter(Boolean):[]);
+            const _isProd09d = (o.discount_target_type==='products'||o.discount_target_type==='product');
+            const prodDisp = (_isProd09d&&_pnames09d.length) ? '<div style="font-size:11px;color:#a78bfa">📦 '+escHtml(_pnames09d.join('、'))+'</div>' : '';
+            return '<div style="font-size:11px;color:var(--text-muted,#94a3b8)">原價 NT$'+origTotal+'</div>'
+              +'<div style="font-size:12px;color:#ef4444">💸 -NT$'+disc+'</div>'
+              +'<div style="font-weight:700;color:#f5a623;font-size:15px">NT$'+o.total+'</div>'
+              +catBadge+campDisp+prodDisp+highWarn;
+          })()}
+        </td>
         <td>
           <span class="order-status ${sCls}">${sLabel}</span>
           ${o.order_status&&o.order_status!=='completed'?`<br><span class="ostatus-badge ${ostatusCls[o.order_status]||''}">${ostatusLabel[o.order_status]||o.order_status}</span>`:''}
@@ -1879,6 +2950,7 @@ function renderOrdersTable(orders) {
             ${!isVoid?`<button class="btn-icon void-btn" onclick="openVoidModal('${o.id}','${escHtml(o.order_number)}','${o.total}')">🚫</button>`:''}
             <button class="btn-icon print-btn" onclick="reprintOrder('${o.id}')">🖨️</button>
             ${o.payment_method==='cash'?`<button class="btn-icon" style="background:var(--success);color:#fff" title="開錢櫃" onclick="openDrawerFromOrder('${o.id}')">💰</button>`:''}
+            ${o.payment_method==='linepay'&&o.payment_status!=='paid'&&!isVoid?`<button class="btn-icon" style="background:#06C755;color:#fff;font-size:11px" title="確認收款" onclick="confirmLinePayPayment('${o.uuid||o.id}','${escHtml(o.order_number)}')">💚 確認收款</button>`:''}
           </div>
         </td>
       </tr>`;
@@ -1919,7 +2991,27 @@ function renderDeliveryTable(orders) {
         <td style="font-size:12px;color:var(--text-muted);font-family:monospace">${escHtml(o.platform_order_no||'—')}</td>
         <td style="font-size:13px">${escHtml(o.customer_name||o.pickup_name||'—')}</td>
         <td style="font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${itemsText}">${itemsText||'—'}</td>
-        <td style="font-family:monospace;font-weight:700;color:${isCancelled?'var(--text-muted)':'#f5a623'};white-space:nowrap;${isCancelled?'text-decoration:line-through':''}">NT$${o.total}</td>
+        <td style="font-family:monospace;white-space:nowrap;${isCancelled?'opacity:0.5':''}">
+          ${(function(){
+            const disc=Number(o.discount_amount||0);
+            if(disc<=0) return '<span style="font-weight:700;color:#f5a623">NT$'+o.total+'</span>';
+            const origTotal=o.original_total||Number(o.total)+disc;
+            const isHighDisc = origTotal > 0 && disc/origTotal >= 0.5;
+            const cat = normalizeDiscountCategory(o.discount_category);
+            const catLabel = DISCOUNT_CATEGORY_DISPLAY[cat] || '';
+            const catBadge = cat && cat!=='none' ? '<br><span class="disc-badge disc-badge-'+cat+'">'+(catLabel||cat)+'</span>' : '';
+            const highWarn = isHighDisc ? '<br><span class="high-discount-warn">⚠ 高折扣</span>' : '';
+            // fix18-09D：顯示折扣活動與多商品名稱
+            const campDisp2 = o.discount_campaign_name ? '<div style="font-size:11px;color:#fbbf24">🎯 '+escHtml(o.discount_campaign_name)+'</div>' : '';
+            const _pnames09d2 = Array.isArray(o.discount_product_names)&&o.discount_product_names.length ? o.discount_product_names : (o.discount_product_name?o.discount_product_name.split('、').map(s=>s.trim()).filter(Boolean):[]);
+            const _isProd09d2 = (o.discount_target_type==='products'||o.discount_target_type==='product');
+            const prodDisp2 = (_isProd09d2&&_pnames09d2.length) ? '<div style="font-size:11px;color:#a78bfa">📦 '+escHtml(_pnames09d2.join('、'))+'</div>' : '';
+            return '<div style="font-size:11px;color:var(--text-muted,#94a3b8)">原價 NT$'+origTotal+'</div>'
+              +'<div style="font-size:12px;color:#ef4444">💸 -NT$'+disc+'</div>'
+              +'<div style="font-weight:700;color:#f5a623;font-size:15px">NT$'+o.total+'</div>'
+              +catBadge+campDisp2+prodDisp2+highWarn;
+          })()}
+        </td>
         <td style="font-family:monospace;color:${isCancelled?'var(--text-muted)':'var(--danger)'};white-space:nowrap;${isCancelled?'text-decoration:line-through':''}">${commText}</td>
         <td style="font-family:monospace;color:${isCancelled?'var(--text-muted)':'var(--success)'};white-space:nowrap;${isCancelled?'text-decoration:line-through':''}">NT$${o.store_actual_income||o.total}</td>
         <td style="font-size:12px">${payLabel[o.payment_method]||o.payment_method||'—'}</td>
@@ -1976,19 +3068,49 @@ async function showOrderDetail(orderId) {
     const logsHtml = logs.length ? `
       <div class="order-log-section">
         <h4>📝 修改 / 作廢記錄（共 ${logs.length} 筆）</h4>
-        ${logs.map(l => `
+        ${logs.map(l => {
+          // fix18-09：解析 after_data 的所有 diff
+          let diffHtml = '';
+          try {
+            const afterData = typeof l.after_data === 'string' ? JSON.parse(l.after_data) : (l.after_data || {});
+            const pd = afterData.platform_diff;
+            if (pd) {
+              if (pd.created_at_before && pd.created_at_after && pd.created_at_before !== pd.created_at_after) {
+                diffHtml += `<div class="log-diff" style="color:#a78bfa">訂單日期：${escHtml(pd.created_at_before)} → ${escHtml(pd.created_at_after)}</div>`;
+              }
+              if (pd.discount_category_before && pd.discount_category_after && pd.discount_category_before !== pd.discount_category_after) {
+                diffHtml += `<div class="log-diff" style="color:#fbbf24">折扣分類：${escHtml(pd.discount_category_before)} → ${escHtml(pd.discount_category_after)}</div>`;
+              }
+              if (pd.discount_note_before !== undefined && pd.discount_note_before !== pd.discount_note_after) {
+                diffHtml += `<div class="log-diff" style="color:#fbbf24">折扣備註：${escHtml(pd.discount_note_before||'空白')} → ${escHtml(pd.discount_note_after||'空白')}</div>`;
+              }
+              // fix18-09C
+              if (pd.discount_campaign_before !== undefined && pd.discount_campaign_before !== pd.discount_campaign_after) {
+                diffHtml += `<div class="log-diff" style="color:#fbbf24">折扣活動：${escHtml(pd.discount_campaign_before||'無')} → ${escHtml(pd.discount_campaign_after||'無')}</div>`;
+              }
+              if (pd.discount_product_before !== undefined && pd.discount_product_before !== pd.discount_product_after) {
+                diffHtml += `<div class="log-diff" style="color:#a78bfa">折扣商品：${escHtml(pd.discount_product_before||'無')} → ${escHtml(pd.discount_product_after||'無')}</div>`;
+              }
+              if (pd.platform_before && pd.platform_after && pd.platform_before !== pd.platform_after) {
+                diffHtml += `<div class="log-diff" style="color:#ce93d8">平台來源：${escHtml(pd.platform_before)} → ${escHtml(pd.platform_after)}｜抽成率：${pd.commission_rate_before}% → ${pd.commission_rate_after}%</div>`;
+              }
+            }
+          } catch {}
+          const reasonDisplay = (l.reason||'—').split('｜')[0];
+          return `
           <div class="log-item">
             <div class="log-item-header">
               <span class="log-action-${l.action}">${l.action === 'void' ? '🚫 作廢' : '✏️ 修改'}</span>
               <span class="log-time">${twTime(l.created_at,'datetime')}</span>
             </div>
-            <div class="log-reason">原因：${escHtml(l.reason||'—')}</div>
+            <div class="log-reason">原因：${escHtml(reasonDisplay)}</div>
             <div class="log-diff">
               金額：NT$${l.before_total} → NT$${l.after_total}
               ${l.amount_diff !== 0 ? `（${l.amount_diff > 0 ? '＋' : ''}${l.amount_diff}）` : ''}
               ｜付款：${l.before_payment} → ${l.after_payment}
             </div>
-          </div>`).join('')}
+            ${diffHtml}
+          </div>`;}).join('')}
       </div>` : '';
 
     document.getElementById('orderDetailBody').innerHTML = `
@@ -2018,8 +3140,29 @@ async function showOrderDetail(orderId) {
         <div style="display:flex;justify-content:space-between;font-size:14px;margin-bottom:6px;color:#999">
           <span>備註</span><span>${escHtml(o.note)}</span>
         </div>` : ''}
-        <div style="display:flex;justify-content:space-between;font-size:20px;font-weight:900;margin-top:12px;border-top:1px solid #333;padding-top:12px">
-          <span>應收</span><span style="color:#f5a623;font-family:monospace">NT$${o.total}</span>
+        <div style="border-top:1px solid #333;margin-top:12px;padding-top:12px">
+          ${(function(){
+            const disc=Number(o.discount_amount||0);
+            const origTotal=o.original_total||Number(o.total)+disc;
+            const codeRow=o.coupon_code
+              ? '<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;color:#999"><span>🎟️ 優惠券</span><span style="font-family:monospace">'+escHtml(o.coupon_code)+'</span></div>'
+              : '';
+            const discRows=disc>0
+              ? codeRow
+                +'<div style="display:flex;justify-content:space-between;font-size:14px;margin-bottom:4px;color:#999"><span>原價</span><span style="font-family:monospace">NT$'+origTotal+'</span></div>'
+                +'<div style="display:flex;justify-content:space-between;font-size:14px;margin-bottom:4px;color:#06C755"><span>折扣</span><span style="font-family:monospace">-NT$'+disc+'</span></div>'
+                +(o.discount_category&&o.discount_category!=='none'?'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;color:#fbbf24"><span>折扣分類</span><span>'+(DISCOUNT_CATEGORY_DISPLAY[o.discount_category]||o.discount_category)+'</span></div>':'')
+                +(o.discount_campaign_name?'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;color:#fbbf24"><span>折扣活動</span><span>'+escHtml(o.discount_campaign_name)+'</span></div>':'')
+                +(function(){
+                  const _pnms2=Array.isArray(o.discount_product_names)&&o.discount_product_names.length?o.discount_product_names:(o.discount_product_name?o.discount_product_name.split('、').map(s=>s.trim()).filter(Boolean):[]);
+                  const _isProd2=(o.discount_target_type==='products'||o.discount_target_type==='product');
+                  return(_isProd2&&_pnms2.length)?'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;color:#a78bfa"><span>折扣商品</span><span>'+escHtml(_pnms2.join('、'))+'</span></div>':'';
+                })()
+                +(o.discount_note?'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:6px;color:#94a3b8"><span>折扣備註</span><span>'+escHtml(o.discount_note)+'</span></div>':'')
+              : '';
+            const label=disc>0?'實收':'應收';
+            return discRows+'<div style="display:flex;justify-content:space-between;font-size:20px;font-weight:900"><span>'+label+'</span><span style="color:#f5a623;font-family:monospace">NT$'+o.total+'</span></div>';
+          })()}
         </div>
         ${isCash ? `
         <div style="display:flex;justify-content:space-between;font-size:14px;padding-top:6px;color:#999">
@@ -2440,6 +3583,27 @@ async function saveLineSettings() {
 
 
 // ===== 重新列印 =====
+// fix18-02：LINE Pay 現場確認收款
+async function confirmLinePayPayment(orderId, orderNo) {
+  if (!confirm(`確認已收到「${orderNo}」的 LINE Pay 款項？\n\n確認後 payment_status 將更新為 paid。`)) return;
+  try {
+    const res  = await apiFetch(`/api/online-orders/${encodeURIComponent(orderId)}/confirm-payment`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    const json = await res.json();
+    if (json.success) {
+      showToast('💚 已確認收款：' + orderNo);
+      if (typeof refreshCurrentOrderView === 'function') refreshCurrentOrderView(); // fix18-07：維持目前分頁
+    } else {
+      showToast('❌ 確認收款失敗：' + (json.error || json.message || ''), 'error');
+    }
+  } catch(e) {
+    showToast('❌ 確認收款失敗：' + e.message, 'error');
+  }
+}
+
 async function reprintOrder(orderId) {
   try {
     const res = await apiFetch('/api/orders/' + orderId);
@@ -2477,7 +3641,7 @@ async function confirmVoid() {
     if (json.success) {
       showToast('訂單已作廢，庫存已回補', 'success');
       closeVoidModal();
-      loadOrders();
+      refreshCurrentOrderView(); // fix18-07：維持目前分頁
       // 作廢後後端回補庫存，立即重載點餐頁商品
       _invProducts = [];
       loadProducts();
@@ -2488,6 +3652,28 @@ async function confirmVoid() {
 }
 
 // ===== 訂單編輯 =====
+// ===== fix18-08：平台來源標準化 =====
+function normalizePlatform(v) {
+  if (!v || v === 'unknown' || v === 'undefined' || v === '未知' || v === '—' || v === '-') return 'unknown';
+  const s = String(v).toLowerCase().replace(/\s/g,'');
+  if (['pos','pos現場'].includes(s)) return 'pos';
+  if (['ubereats','ubereats','uber eats','uber'].some(k => s.includes(k.replace(/\s/g,'')))) return 'ubereats';
+  if (['foodpanda','panda'].includes(s)) return 'foodpanda';
+  if (['line','line點餐','line_order'].includes(s)) return 'line';
+  if (['phone','電話訂購'].includes(s)) return 'phone';
+  if (['other','其他'].includes(s)) return 'other';
+  return 'unknown';
+}
+
+const PLATFORM_LABEL_MAP = {
+  unknown:'未知', pos:'POS現場', ubereats:'Uber Eats',
+  foodpanda:'foodpanda', line:'LINE點餐', phone:'電話訂購', other:'其他'
+};
+
+function platformLabel(code) {
+  return PLATFORM_LABEL_MAP[normalizePlatform(code)] || '未知';
+}
+
 async function openEditOrder(orderId) {
   try {
     const res = await apiFetch('/api/orders/' + orderId);
@@ -2506,6 +3692,40 @@ async function openEditOrder(orderId) {
     document.getElementById('editOrderReason').value = '';
     document.getElementById('editReceivedAmount').value = o.payment_method === 'cash' ? (o.received_amount || '') : '';
 
+    // fix18-08：自動帶入平台來源
+    const platformEl = document.getElementById('editOrderPlatform');
+    if (platformEl) {
+      platformEl.value = normalizePlatform(o.delivery_platform || o.platform || '');
+    }
+
+    // fix18-09：訂單日期時間
+    const createdAtEl = document.getElementById('editOrderCreatedAt');
+    if (createdAtEl && o.created_at) {
+      // 轉換為 datetime-local 格式 YYYY-MM-DDTHH:MM
+      const dt = o.created_at.replace(' ', 'T').slice(0, 16);
+      createdAtEl.value = dt;
+    }
+
+    // fix18-09：折扣分類（fix18-09E：動態分類）
+    const discCatEl = document.getElementById('editDiscountCategory');
+    refreshEditOrderCategoryDropdown(o.discount_category || 'none');
+
+    // fix18-09：折扣備註
+    const discNoteEl = document.getElementById('editDiscountNote');
+    if (discNoteEl) discNoteEl.value = o.discount_note || '';
+
+    // fix18-09C：折扣活動下拉
+    await loadDiscountCampaigns();
+    refreshEditOrderCampaignDropdown(o.discount_campaign_id || '');
+
+    // fix18-09D：折扣套用商品（多選）
+    const targetTypeEl = document.getElementById('editDiscountTargetType');
+    // 向下相容：舊資料 'product' → 'products'
+    const ttype = (o.discount_target_type === 'product' || o.discount_target_type === 'products') ? 'products' : 'order';
+    if (targetTypeEl) targetTypeEl.value = ttype;
+    const prodPanel = document.getElementById('editDiscountProductPanel');
+    if (prodPanel) prodPanel.style.display = (ttype === 'products') ? 'block' : 'none';
+
     // 填入可選商品清單
     const sel = document.getElementById('addItemSelect');
     sel.innerHTML = '<option value="">選擇商品...</option>' +
@@ -2514,6 +3734,14 @@ async function openEditOrder(orderId) {
     document.getElementById('addItemPanel').style.display = 'none';
     onEditPaymentChange();
     renderEditOrderItems();
+    // fix18-09D：填入折扣商品 checkbox（需在 editOrderItems 設定後執行）
+    if (ttype === 'products') {
+      // 優先使用 discount_product_names 陣列，否則 fallback 到 discount_product_name 字串
+      const initNames = Array.isArray(o.discount_product_names) && o.discount_product_names.length
+        ? o.discount_product_names
+        : (o.discount_product_name ? o.discount_product_name.split('、').map(s=>s.trim()).filter(Boolean) : []);
+      refreshEditDiscountProductCheckboxes(initNames);
+    }
     document.getElementById('editOrderModal').classList.add('open');
   } catch(e) { showToast('載入失敗：' + e.message, 'error'); }
 }
@@ -2526,6 +3754,12 @@ function closeEditOrder() {
 
 function renderEditOrderItems() {
   const total = editOrderItems.reduce((s,i) => s + i.price * i.qty, 0);
+  // fix18-09D：商品變動時同步刷新 checkbox（保持勾選狀態）
+  const ttype09d = document.getElementById('editDiscountTargetType')?.value;
+  if (ttype09d === 'products') {
+    const checked09d = getCheckedDiscountProducts();
+    setTimeout(() => refreshEditDiscountProductCheckboxes(checked09d), 0);
+  }
   document.getElementById('editOrderItems').innerHTML = editOrderItems.length
     ? editOrderItems.map((item, idx) => `
         <div class="edit-item-row">
@@ -2641,6 +3875,38 @@ async function saveEditOrder() {
 
   if (isCash && received < newTotal) { showToast('實收金額不足', 'error'); return; }
 
+  // fix18-09：取得折扣分類，若有折扣金額則必須選分類
+  const discCat = document.getElementById('editDiscountCategory')?.value || 'none';
+  // 計算折扣（商品小計 vs 新總金額差異，或直接取原始折扣）
+  // 這裡以原始訂單 discount_amount 為基礎，讓後端重算
+  const discNote = document.getElementById('editDiscountNote')?.value?.trim() || '';
+
+  // fix18-09C：折扣活動
+  const campSel = document.getElementById('editDiscountCampaign');
+  const campId   = campSel?.value ? Number(campSel.value) : null;
+  const campName = campSel?.value ? (campSel.options[campSel.selectedIndex]?.dataset?.name || campSel.options[campSel.selectedIndex]?.text || '') : '';
+
+  // fix18-09D：折扣套用商品（多選 checkbox）
+  const targetType = document.getElementById('editDiscountTargetType')?.value || 'order';
+  const isMultiProd = (targetType === 'products');
+  const checkedNames = isMultiProd ? getCheckedDiscountProducts() : [];
+  // 向下相容欄位（prodId 留空；prodName 存多商品逗號串）
+  const prodId    = '';
+  const prodName  = checkedNames.join('、');
+  // fix18-09D 新欄位（JSON 陣列）
+  const prodIds   = [];  // 不存 id，只存 name
+  const prodNames = checkedNames;
+  // target_type 統一用 products / order
+  const effectiveTargetType = isMultiProd ? 'products' : 'order';
+
+  // fix18-09：訂單日期時間
+  const createdAtEl = document.getElementById('editOrderCreatedAt');
+  let createdAt = null;
+  if (createdAtEl && createdAtEl.value) {
+    // datetime-local 格式轉換為 "YYYY-MM-DD HH:MM:SS"
+    createdAt = createdAtEl.value.replace('T', ' ') + ':00';
+  }
+
   const payload = {
     items: editOrderItems.map(i => ({ ...i, subtotal: i.price * i.qty })),
     payment_method: payment,
@@ -2648,7 +3914,21 @@ async function saveEditOrder() {
     customer_phone: document.getElementById('editCustomerPhone').value.trim(),
     note: document.getElementById('editOrderNote').value.trim(),
     received_amount: received,
-    reason
+    reason,
+    // fix18-08：平台來源
+    platform: document.getElementById('editOrderPlatform')?.value || 'unknown',
+    // fix18-09：新增欄位
+    discount_category: discCat,
+    discount_note: discNote,
+    ...(createdAt ? { created_at: createdAt } : {}),
+    // fix18-09D：折扣活動與多商品
+    discount_campaign_id:   campId,
+    discount_campaign_name: campName,
+    discount_target_type:   effectiveTargetType,
+    discount_product_id:    prodId,
+    discount_product_name:  prodName,
+    discount_product_ids:   prodIds,
+    discount_product_names: prodNames,
   };
 
   try {
@@ -2665,7 +3945,7 @@ async function saveEditOrder() {
       else showToast('訂單已修改', 'success');
       _editOriginalTotal = 0;
       closeEditOrder();
-      loadOrders();
+      refreshCurrentOrderView(); // fix18-07：維持目前分頁
       // 訂單修改後後端已同步庫存，重載點餐頁
       _invProducts = [];
       loadProducts();
@@ -3773,9 +5053,18 @@ async function loadLineBizStatus() {
       const nowMins = now.getHours()*60+now.getMinutes();
       const toCard = document.getElementById('takeout-live-status');
       const dlCard = document.getElementById('delivery-live-status');
+      // fix18-06: 即時狀態判斷用今日臨時截止（若有且今天）
+      function _effectiveCutoff(prefix, d) {
+        const twN = new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Taipei'}));
+        const todayS = twN.getFullYear()+'-'+String(twN.getMonth()+1).padStart(2,'0')+'-'+String(twN.getDate()).padStart(2,'0');
+        const todayCT = d[prefix+'_today_cutoff_time'];
+        const todayCDate = d[prefix+'_today_cutoff_date'];
+        if(todayCT && todayCDate === todayS) return todayCT;
+        return d[prefix+'_cutoff_time'] || '';
+      }
       if(toCard){
         const enabled = d.takeout_enabled !== '0';
-        const cutoff = d.takeout_cutoff_time;
+        const cutoff = _effectiveCutoff('takeout', d);
         const cutoffPassed = cutoff && nowMins > cutoff.split(':').reduce((h,m,i)=>i?h*60+Number(m):Number(m)*60,0)/60;
         toCard.innerHTML = !enabled ? '<span style="color:#e53935">已關閉</span>'
           : cutoffPassed ? '<span style="color:#ff6d00">截止售完</span>'
@@ -3783,7 +5072,7 @@ async function loadLineBizStatus() {
       }
       if(dlCard){
         const enabled = d.delivery_enabled !== '0';
-        const cutoff = d.delivery_cutoff_time;
+        const cutoff = _effectiveCutoff('delivery', d);
         const cutoffPassed = cutoff && nowMins > cutoff.split(':').reduce((h,m,i)=>i?h*60+Number(m):Number(m)*60,0)/60;
         dlCard.innerHTML = !enabled ? '<span style="color:#e53935">已關閉</span>'
           : cutoffPassed ? '<span style="color:#ff6d00">截止售完</span>'
@@ -3804,13 +5093,14 @@ async function loadLineBizStatus() {
     const setV = (id, val) => { const el = document.getElementById(id); if(el) el.value = val||''; };
     const setC = (id, val) => { const el = document.getElementById(id); if(el) el.checked = !!val; };
     setC('set-takeout_enabled',        d.takeout_enabled !== '0');
-    setV('set-takeout_cutoff_time',    d.takeout_cutoff_time);
     setV('set-takeout_prep_minutes',   d.takeout_prep_minutes || 15);
     setC('set-takeout_allow_next_day', d.takeout_allow_next_day !== '0');
     setC('set-delivery_enabled',       d.delivery_enabled !== '0');
-    setV('set-delivery_cutoff_time',   d.delivery_cutoff_time);
     setV('set-delivery_prep_minutes',  d.delivery_prep_minutes || 30);
     setC('set-delivery_allow_next_day',d.delivery_allow_next_day !== '0');
+    // fix18-06: 今日臨時截止時間顯示（只顯示今天的設定，舊的忽略）
+    _renderTodayCutoffStatus('takeout',   d.takeout_today_cutoff_time,   d.takeout_today_cutoff_date);
+    _renderTodayCutoffStatus('delivery',  d.delivery_today_cutoff_time,  d.delivery_today_cutoff_date);
     renderModeHoursGrid('takeoutBizHoursGrid', d.takeout_business_hours);
     renderModeHoursGrid('deliveryBizHoursGrid', d.delivery_business_hours);
     // ── 整體營業時間（舊版相容）──────────────────────────
@@ -3992,6 +5282,52 @@ function renderModeHoursGrid(gridId, hoursJsonStr) {
 }
 
 // ── 外帶/外送接單規則儲存 ─────────────────────────────
+// ── fix18-06: 今日臨時截止時間輔助函式 ──────────────────────
+function _renderTodayCutoffStatus(mode, cutoffTime, cutoffDate) {
+  const statusEl = document.getElementById(mode + '-today-cutoff-status');
+  const inputEl  = document.getElementById('set-' + mode + '_today_cutoff_time');
+  if (!statusEl) return;
+
+  const twNow = new Date(new Date().toLocaleString('en-US', {timeZone:'Asia/Taipei'}));
+  const todayStr = twNow.getFullYear() + '-'
+    + String(twNow.getMonth()+1).padStart(2,'0') + '-'
+    + String(twNow.getDate()).padStart(2,'0');
+
+  const isToday = cutoffTime && cutoffDate === todayStr;
+
+  if (inputEl) inputEl.value = isToday ? cutoffTime : '';
+
+  if (isToday) {
+    statusEl.innerHTML = '<span style="color:#e65100;font-weight:600">⏰ 今日臨時截止：' + cutoffTime
+      + '</span>（儲存時可修改，或點「✕ 取消今日限制」清除）';
+  } else {
+    statusEl.textContent = '尚未設定今日限制（每週固定營業時間生效）';
+  }
+}
+
+async function cancelTodayCutoff(mode) {
+  const m = mode === 'delivery' ? 'delivery' : 'takeout';
+  // 清空輸入框
+  const inputEl = document.getElementById('set-' + m + '_today_cutoff_time');
+  if (inputEl) inputEl.value = '';
+  // 儲存清空值
+  try {
+    await apiFetch('/api/settings', {
+      method: 'PUT',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        [m + '_today_cutoff_time']: '',
+        [m + '_today_cutoff_date']: '',
+      })
+    });
+    showToast('✅ 今日' + (m==='takeout'?'外帶':'外送') + '限制已取消，恢復固定營業時間', 'success');
+    // 重新整理顯示
+    if (typeof loadLineBizStatus === 'function') loadLineBizStatus();
+  } catch(e) {
+    showToast('取消失敗：' + e.message, 'error');
+  }
+}
+
 async function saveTakeoutDeliveryRule(mode) {
   const m = mode === 'delivery' ? 'delivery' : 'takeout';
   const hours = {};
@@ -4005,12 +5341,23 @@ async function saveTakeoutDeliveryRule(mode) {
   const cutoff     = document.getElementById(`set-${m}_cutoff_time`)?.value || '';
   const prep       = document.getElementById(`set-${m}_prep_minutes`)?.value || (m==='takeout'?'15':'30');
   const allowNext  = document.getElementById(`set-${m}_allow_next_day`)?.checked ? '1' : '0';
+  // fix18-06: 讀取今日臨時截止時間
+  const todayCutoffEl = document.getElementById(`set-${m}_today_cutoff_time`);
+  const todayCutoffVal = todayCutoffEl ? todayCutoffEl.value.trim() : '';
+  // 今天的台灣日期
+  const _twToday = (() => {
+    const _n = new Date(new Date().toLocaleString('en-US', {timeZone:'Asia/Taipei'}));
+    return `${_n.getFullYear()}-${String(_n.getMonth()+1).padStart(2,'0')}-${String(_n.getDate()).padStart(2,'0')}`;
+  })();
+
   const body = {
-    [`${m}_enabled`]:           enabled,
-    [`${m}_cutoff_time`]:       cutoff,
-    [`${m}_prep_minutes`]:      String(prep),
-    [`${m}_allow_next_day`]:    allowNext,
-    [`${m}_business_hours`]:    JSON.stringify(hours),
+    [`${m}_enabled`]:              enabled,
+    [`${m}_prep_minutes`]:         String(prep),
+    [`${m}_allow_next_day`]:       allowNext,
+    [`${m}_business_hours`]:       JSON.stringify(hours),
+    // fix18-06: today cutoff — 有值時寫入今天日期，無值時清空
+    [`${m}_today_cutoff_time`]:    todayCutoffVal,
+    [`${m}_today_cutoff_date`]:    todayCutoffVal ? _twToday : '',
   };
   // 同步舊版 pickup_enabled / delivery_enabled
   if (m === 'takeout')   body.pickup_enabled   = enabled;
@@ -4192,11 +5539,16 @@ function renderLinePreordersTable() {
   if (modeFilter)   orders = orders.filter(o => o.order_mode === modeFilter);
   if (statusFilter) orders = orders.filter(o => (o.order_status || o.status) === statusFilter);
 
-  // 統計
-  const pending = orders.filter(o => ['pending','accepted','preparing'].includes(o.order_status || o.status)).length;
-  const revenue = orders.reduce((s, o) => s + Number(o.total||0), 0);
+  // fix18-03：排除取消 / 作廢 / 失效狀態再計算統計
+  const INVALID_STATUSES = new Set([
+    'cancelled', 'canceled', 'void', 'voided',
+    'invalid', 'expired', 'failed', 'payment_failed'
+  ]);
+  const validOrders = orders.filter(o => !INVALID_STATUSES.has(o.order_status || o.status || ''));
+  const pending = validOrders.filter(o => ['pending','pending_accept','accepted'].includes(o.order_status || o.status)).length;
+  const revenue = validOrders.reduce((s, o) => s + Number(o.total||0), 0);
   const setStat = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
-  setStat('lp-stat-total',   orders.length);
+  setStat('lp-stat-total',   validOrders.length);
   setStat('lp-stat-pending', pending);
   setStat('lp-stat-revenue', 'NT$' + revenue.toLocaleString());
   const badge = document.getElementById('lp-count-badge');
@@ -5522,7 +6874,35 @@ function downloadTemplate(type) {
 }
 
 function exportCsv(type) {
-  window.open(`/api/export/${type}`, '_blank');
+  // ★ 不用 window.open（不帶 token）→ 改用 apiFetch 帶 token 後 blob 下載
+  downloadWithAuth(`/api/export/${type}`, `${type}_export.csv`);
+}
+
+async function downloadWithAuth(url, defaultFilename) {
+  try {
+    const res = await apiFetch(url, { method: 'GET' });
+    if (!res.ok) {
+      let msg = '匯出失敗';
+      try { const err = await res.json(); msg = err.message || err.error || msg; } catch {}
+      showToast('❌ ' + msg, 'error');
+      return;
+    }
+    // 從 Content-Disposition 取檔名（若有的話）
+    const cd = res.headers.get('Content-Disposition') || '';
+    const match = cd.match(/filename="?([^";]+)"?/);
+    const filename = match ? match[1] : defaultFilename;
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = objectUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(objectUrl);
+  } catch(e) {
+    showToast('❌ 匯出失敗：' + e.message, 'error');
+  }
 }
 
 function parseCsvText(text) {
@@ -5681,8 +7061,8 @@ function notifyInventoryChanged() {
       if (name === 'orders') {
         if (!_pollInterval) {
           _pollInterval = setInterval(() => {
-            if (typeof loadOrders === 'function') {
-              loadOrders(window.currentOrderTab === 'pos' ? 'pos' : null);
+            if (typeof refreshCurrentOrderView === 'function') {
+              refreshCurrentOrderView(); // fix18-07：維持目前分頁
             }
           }, 10000); // 每 10 秒
         }
@@ -5726,8 +7106,8 @@ function notifyInventoryChanged() {
 
         // v18修正：Web POS 用 page-orders class.active 控制顯示，不是 style.display
         // 無論訂單頁是否顯示，都更新資料；若在訂單頁則立即重新渲染
-        if (typeof loadOrders === 'function') {
-          loadOrders(window.currentOrderTab === 'pos' ? 'pos' : null);
+        if (typeof refreshCurrentOrderView === 'function') {
+          refreshCurrentOrderView(); // fix18-07：維持目前分頁
         }
 
         // 若目前在訂單頁，更新狀態 badge（不需等 loadOrders 完成）
@@ -5743,8 +7123,27 @@ function notifyInventoryChanged() {
         if (typeof showToast === 'function') {
           showToast('🔔 LINE 新訂單：' + (o?.order_number || '') + ' / ' + (o?.customer_name || ''));
         }
-        if (typeof loadOrders === 'function') {
-          loadOrders(window.currentOrderTab === 'pos' ? 'pos' : null);
+        if (typeof refreshCurrentOrderView === 'function') {
+          refreshCurrentOrderView(); // fix18-07：維持目前分頁
+        }
+      }
+
+      // linepay_paid → LINE Pay 付款成功通知 + 刷新（fix18-02）
+      if (msg.type === 'linepay_paid') {
+        const orderNo = msg.order_number || '';
+        const source  = msg.confirm_source || '';
+        const label   = source === 'manual' ? 'LINE Pay 現場確認已收款' : 'LINE Pay 付款成功';
+        if (typeof showToast === 'function') {
+          showToast('💚 ' + label + (orderNo ? '：' + orderNo : ''));
+        }
+        // 刷新訂單列表（無論目前在哪個頁面）
+        if (typeof refreshCurrentOrderView === 'function') {
+          refreshCurrentOrderView(); // fix18-07：維持目前分頁
+        }
+        // 刷新儀表板統計
+        if (typeof loadDashboard === 'function') {
+          const dash = document.getElementById('page-dashboard');
+          if (dash?.classList.contains('active')) loadDashboard();
         }
       }
     };
@@ -5939,3 +7338,1317 @@ async function testGateway(code) {
     if (resEl) resEl.innerHTML = `<span style="color:#ef4444">❌ ${e.message}</span>`;
   }
 }
+
+// ===== v18-features: Android 平板功能權限 =====
+
+const ANDROID_FEATURES_DEFAULT_WEB = {
+  pos: true, orders: true, reports: false, products: false,
+  inventory: false, payment_methods: false, delivery_settings: false,
+  line_orders: true, line_products: false, settings: true,
+  sync: true, print_settings: true
+};
+
+const ANDROID_FEATURE_KEYS = [
+  'pos', 'orders', 'reports', 'products', 'inventory',
+  'payment_methods', 'delivery_settings', 'line_orders',
+  'line_products', 'settings', 'sync', 'print_settings'
+];
+
+async function loadAndroidFeaturesTab() {
+  const loadingEl = document.getElementById('android-features-loading');
+  const formEl    = document.getElementById('android-features-form');
+  if (!loadingEl || !formEl) return;
+
+  loadingEl.style.display = 'block';
+  formEl.style.display    = 'none';
+
+  try {
+    const res  = await apiFetch('/api/settings');
+    const json = await res.json();
+    if (!json.success) throw new Error('無法載入設定');
+
+    let features = { ...ANDROID_FEATURES_DEFAULT_WEB };
+    const raw = json.data && json.data.android_features;
+    if (raw) {
+      try { features = { ...features, ...JSON.parse(raw) }; } catch {}
+    }
+
+    ANDROID_FEATURE_KEYS.forEach(key => {
+      const el = document.getElementById('af-' + key);
+      if (el) el.checked = features[key] !== false;
+    });
+
+    loadingEl.style.display = 'none';
+    formEl.style.display    = 'block';
+  } catch (e) {
+    loadingEl.textContent = '載入失敗：' + e.message;
+  }
+}
+
+async function saveAndroidFeatures() {
+  const statusEl = document.getElementById('android-features-status');
+  const features = {};
+  ANDROID_FEATURE_KEYS.forEach(key => {
+    const el = document.getElementById('af-' + key);
+    features[key] = el ? el.checked : true;
+  });
+
+  try {
+    const res  = await apiFetch('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ android_features: JSON.stringify(features) })
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.message || '儲存失敗');
+
+    if (statusEl) {
+      statusEl.textContent = '✅ 已儲存，平板同步後生效';
+      statusEl.style.color = '#27ae60';
+      statusEl.style.display = 'inline';
+      setTimeout(() => { statusEl.style.display = 'none'; }, 3000);
+    }
+    showToast('Android 平板權限已儲存', 'success');
+  } catch (e) {
+    if (statusEl) {
+      statusEl.textContent = '❌ ' + e.message;
+      statusEl.style.color = '#e53935';
+      statusEl.style.display = 'inline';
+    }
+    showToast('儲存失敗：' + e.message, 'error');
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// fix18-06: 外送費設定 Tab
+// ═══════════════════════════════════════════════════════
+
+let _deliveryRules = [];
+
+async function loadDeliveryFeeTab() {
+  await loadSettings();
+  // 填入基本欄位
+  const setVal = (id, key, fallback = '') => {
+    const el = document.getElementById(id);
+    if (el) el.value = settings[key] ?? fallback;
+  };
+  const setChk = (id, key, fallback = false) => {
+    const el = document.getElementById(id);
+    if (el) el.checked = (settings[key] ?? (fallback ? '1' : '0')) === '1';
+  };
+  setVal('set-store_address',               'store_address');
+  setVal('set-store_lat',                   'store_lat');
+  setVal('set-store_lng',                   'store_lng');
+  setVal('set-delivery_max_distance_km',    'delivery_max_distance_km',  '7');
+  setVal('set-delivery_basic_fee',          'delivery_basic_fee',        '50');
+  setVal('set-delivery_free_threshold',     'delivery_free_threshold',   '1000');
+  setChk('set-delivery_distance_fee_enabled', 'delivery_distance_fee_enabled', true);
+  setChk('set-coupon_apply_to_delivery_fee',  'coupon_apply_to_delivery_fee',  false);
+
+  // 級距規則
+  try {
+    const raw = settings['delivery_distance_fee_rules'] || '';
+    _deliveryRules = raw ? JSON.parse(raw) : [
+      { max_km: 3, fee: 50 }, { max_km: 5, fee: 80 }, { max_km: 7, fee: 120 }
+    ];
+  } catch { _deliveryRules = [{ max_km: 3, fee: 50 }, { max_km: 5, fee: 80 }, { max_km: 7, fee: 120 }]; }
+  renderDeliveryRules();
+}
+
+function renderDeliveryRules() {
+  const cont = document.getElementById('delivery-rules-editor');
+  if (!cont) return;
+  cont.innerHTML = _deliveryRules.map((r, i) => `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <span style="color:#888;font-size:13px;min-width:32px">${i + 1}.</span>
+      <span style="font-size:13px;color:#555">距離 ≤</span>
+      <input type="number" value="${r.max_km}" min="0.1" step="0.5"
+        style="width:80px;padding:6px;border:1px solid #ddd;border-radius:6px"
+        onchange="_deliveryRules[${i}].max_km=parseFloat(this.value)||0">
+      <span style="font-size:13px;color:#555">km，外送費</span>
+      <input type="number" value="${r.fee}" min="0" step="10"
+        style="width:80px;padding:6px;border:1px solid #ddd;border-radius:6px"
+        onchange="_deliveryRules[${i}].fee=parseInt(this.value)||0">
+      <span style="font-size:13px;color:#555">NT$</span>
+      <button onclick="_deliveryRules.splice(${i},1);renderDeliveryRules()"
+        style="background:#ffebee;color:#e53935;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:13px">✕</button>
+    </div>
+  `).join('');
+}
+
+function addDeliveryRule() {
+  const last = _deliveryRules[_deliveryRules.length - 1];
+  _deliveryRules.push({ max_km: (last ? last.max_km + 2 : 3), fee: (last ? last.fee + 30 : 50) });
+  renderDeliveryRules();
+}
+
+async function geocodeStoreAddress() {
+  const addr = (document.getElementById('set-store_address')?.value || '').trim();
+  const statusEl = document.getElementById('geocode-status');
+  if (!addr) { if (statusEl) statusEl.textContent = '請先填寫店家地址'; return; }
+  if (statusEl) statusEl.textContent = '座標取得中…';
+  try {
+    const res  = await apiFetch('/api/maps/geocode', { method: 'POST', body: JSON.stringify({ address: addr }) });
+    const json = await res.json();
+    if (json.success) {
+      const latEl = document.getElementById('set-store_lat');
+      const lngEl = document.getElementById('set-store_lng');
+      if (latEl) latEl.value = json.lat;
+      if (lngEl) lngEl.value = json.lng;
+      if (statusEl) {
+        statusEl.textContent = `✅ ${json.formatted_address}（${json.lat}, ${json.lng}）`;
+        statusEl.style.color = '#2e7d32';
+      }
+    } else {
+      if (statusEl) { statusEl.textContent = '❌ ' + (json.message || '無法取得座標'); statusEl.style.color = '#e53935'; }
+    }
+  } catch (e) {
+    if (statusEl) { statusEl.textContent = '❌ ' + e.message; statusEl.style.color = '#e53935'; }
+  }
+}
+
+async function saveDeliveryFeeSettings() {
+  // 讀取規則並排序
+  _deliveryRules.sort((a, b) => a.max_km - b.max_km);
+  const body = {
+    store_address:                 document.getElementById('set-store_address')?.value || '',
+    store_lat:                     document.getElementById('set-store_lat')?.value     || '',
+    store_lng:                     document.getElementById('set-store_lng')?.value     || '',
+    delivery_distance_fee_enabled: document.getElementById('set-delivery_distance_fee_enabled')?.checked ? '1' : '0',
+    delivery_max_distance_km:      document.getElementById('set-delivery_max_distance_km')?.value  || '7',
+    delivery_basic_fee:            document.getElementById('set-delivery_basic_fee')?.value         || '50',
+    delivery_free_threshold:       document.getElementById('set-delivery_free_threshold')?.value    || '1000',
+    coupon_apply_to_delivery_fee:  document.getElementById('set-coupon_apply_to_delivery_fee')?.checked ? '1' : '0',
+    delivery_distance_fee_rules:   JSON.stringify(_deliveryRules),
+  };
+  try {
+    const res  = await apiFetch('/api/settings', { method: 'PUT', body: JSON.stringify(body) });
+    const json = await res.json();
+    if (json.success) {
+      settings = { ...settings, ...json.data };
+      showToast('✅ 外送費設定已儲存', 'success');
+    } else {
+      showToast('❌ 儲存失敗：' + (json.message || ''), 'error');
+    }
+  } catch (e) {
+    showToast('❌ ' + e.message, 'error');
+  }
+}
+
+// ── fix18-05: window 全域函式匯出 ─────────────────────────────────────────
+// 確保 onclick 屬性與外部 JS（coupons.js 等）可直接呼叫這些函式
+// 不包在 DOMContentLoaded 內，讓函式在 HTML 解析到 onclick 時就已存在
+(function exportGlobals() {
+  window.showPage              = window.showPage              || showPage;
+  window.escHtml               = window.escHtml               || escHtml;
+  window.apiFetch              = window.apiFetch              || apiFetch;
+  window.showToast             = window.showToast             || showToast;
+  window.switchSettingsTab     = window.switchSettingsTab     || switchSettingsTab;
+  window.hasFeature            = window.hasFeature            || hasFeature;
+  window.cancelTodayCutoff     = window.cancelTodayCutoff     || cancelTodayCutoff;     // fix18-06
+  // fix18-06: 外送費設定
+  window.geocodeStoreAddress   = geocodeStoreAddress;
+  window.addDeliveryRule       = addDeliveryRule;
+  window.saveDeliveryFeeSettings = saveDeliveryFeeSettings;
+  window.renderDeliveryRules   = renderDeliveryRules;
+})();
+
+// ═══════════════════════════════════════════════════════════
+// fix18-09F：商品分析群組
+// ═══════════════════════════════════════════════════════════
+
+// ── 載入群組資料 ────────────────────────────────────────────
+async function loadProductAnalysisGroups() {
+  try {
+    const res  = await apiFetch('/api/product-analysis-groups');
+    const json = await res.json();
+    if (json.success) {
+      allProductAnalysisGroups = json.data || [];
+    }
+  } catch(e) {
+    console.warn('[fix18-09F] loadProductAnalysisGroups error:', e.message);
+  }
+}
+
+// ── 核心：商品名稱 → 群組名稱 mapping ───────────────────────
+// 若商品在某個啟用群組中，回傳群組名稱；否則回傳原始商品名稱
+// fix18-09F-hotfix4：比對順序 product_name → alias_name
+function getAnalysisGroupName(productName) {
+  if (!allProductAnalysisGroups || !allProductAnalysisGroups.length) return null;
+  for (const g of allProductAnalysisGroups) {
+    if (!g.enabled) continue;
+    // 1. 先比對現有商品名稱（items）
+    if (g.items && g.items.some(item => item.product_name === productName)) {
+      return g.group_name;
+    }
+    // 2. 再比對歷史品名別名（aliases）
+    if (g.aliases && g.aliases.some(a => a.alias_name === productName)) {
+      return g.group_name;
+    }
+  }
+  return null;
+}
+
+// 根據統計模式回傳顯示名稱（'group'模式 or 'raw'模式）
+function resolveProductDisplayName(productName, mode) {
+  if (mode === 'raw') return productName;
+  const groupName = getAnalysisGroupName(productName);
+  return groupName || productName;
+}
+
+// ── 統計模式 localStorage key ────────────────────────────────
+const PRODUCT_STAT_MODE_KEY = 'product_stat_mode_09f'; // 'group' | 'raw'
+function getProductStatMode() {
+  try { return localStorage.getItem(PRODUCT_STAT_MODE_KEY) || 'group'; } catch { return 'group'; }
+}
+function setProductStatMode(m) {
+  try { localStorage.setItem(PRODUCT_STAT_MODE_KEY, m); } catch {}
+}
+
+// ── 訂單列表：商品分析群組標籤顯示控制 ──────────────────────
+const GROUP_LABEL_DISPLAY_KEY = 'show_group_label_09f';
+function isGroupLabelEnabled() {
+  try {
+    const v = localStorage.getItem(GROUP_LABEL_DISPLAY_KEY);
+    return v === null ? true : v === '1'; // 預設開啟
+  } catch { return true; }
+}
+function setGroupLabelEnabled(v) {
+  try { localStorage.setItem(GROUP_LABEL_DISPLAY_KEY, v ? '1' : '0'); } catch {}
+}
+
+// ── 建立統計 Map（支援群組合併）─────────────────────────────
+function buildProductStatMap(orders, mode) {
+  const map = {};
+  (orders || []).forEach(o => {
+    if (o.status === 'void' || o.order_status === 'cancelled') return;
+    if (o.order_mode === 'delivery' && o.delivery_status === 'cancelled') return;
+    const items = typeof o.items === 'string' ? JSON.parse(o.items || '[]') : (o.items || []);
+    items.forEach(item => {
+      const displayName = resolveProductDisplayName(item.name, mode);
+      if (!map[displayName]) map[displayName] = { name: displayName, qty: 0, revenue: 0 };
+      map[displayName].qty     += Number(item.qty || 1);
+      map[displayName].revenue += Number(item.subtotal || 0);
+    });
+  });
+  return Object.values(map).sort((a, b) => b.qty - a.qty);
+}
+
+// ── 折扣商品排行：支援群組合併 ──────────────────────────────
+function buildDiscountProdMapWithGroups(orders, mode) {
+  const valid = (orders || []).filter(o => {
+    if (o.status === 'void' || o.order_status === 'cancelled') return false;
+    if (o.order_mode === 'delivery' && o.delivery_status === 'cancelled') return false;
+    return Number(o.discount_amount || 0) > 0;
+  });
+  const prodMap = {};
+  valid.forEach(o => {
+    const disc = Number(o.discount_amount || 0);
+    const targetIsProduct = (o.discount_target_type === 'products' || o.discount_target_type === 'product');
+    const names = Array.isArray(o.discount_product_names) && o.discount_product_names.length
+      ? o.discount_product_names
+      : (o.discount_product_name
+          ? o.discount_product_name.split('、').map(s => s.trim()).filter(Boolean)
+          : []);
+    if (targetIsProduct && names.length) {
+      const share = disc / names.length;
+      names.forEach(pname => {
+        const dname = resolveProductDisplayName(pname, mode);
+        if (!prodMap[dname]) prodMap[dname] = { name: dname, total: 0, count: 0 };
+        prodMap[dname].total += share;
+        prodMap[dname].count += 1;
+      });
+    } else {
+      const items = typeof o.items === 'string' ? JSON.parse(o.items) : (o.items || []);
+      const totalQty = items.reduce((s, i) => s + Number(i.qty || 0), 0);
+      items.forEach(item => {
+        const share = totalQty > 0 ? disc * Number(item.qty || 0) / totalQty : 0;
+        const dname = resolveProductDisplayName(item.name, mode);
+        if (!prodMap[dname]) prodMap[dname] = { name: dname, total: 0, count: 0 };
+        prodMap[dname].total += share;
+        prodMap[dname].count += 1;
+      });
+    }
+  });
+  return Object.values(prodMap).sort((a, b) => b.total - a.total);
+}
+
+// ── 熱賣商品：帶模式切換按鈕的渲染函式 ─────────────────────
+function renderHotProductsCard(orders) {
+  const mode = getProductStatMode();
+  const ranked = buildProductStatMap(orders, mode).slice(0, 3);
+  const modeBtn = `<div style="display:flex;gap:4px;align-items:center;margin-bottom:8px">
+    <span style="font-size:11px;color:var(--text-muted)">統計：</span>
+    <button onclick="setProductStatMode('group');window._rerenderStatCards&&_rerenderStatCards()" style="font-size:11px;padding:2px 7px;border-radius:99px;border:1px solid var(--border,#334155);background:${mode==='group'?'#6366f1':'transparent'};color:${mode==='group'?'#fff':'var(--text-secondary)'};cursor:pointer">商品群組</button>
+    <button onclick="setProductStatMode('raw');window._rerenderStatCards&&_rerenderStatCards()" style="font-size:11px;padding:2px 7px;border-radius:99px;border:1px solid var(--border,#334155);background:${mode==='raw'?'#6366f1':'transparent'};color:${mode==='raw'?'#fff':'var(--text-secondary)'};cursor:pointer">原始商品</button>
+  </div>`;
+  if (!ranked.length) return '';
+  const rows = ranked.map(p => `<div style="font-size:13px;line-height:1.8">${escHtml(p.name)} <small style="color:#999">×${p.qty}</small></div>`).join('');
+  return `<div class="stat-card">
+    <div class="stat-card-label">🏆 熱賣</div>
+    ${modeBtn}
+    <div class="stat-card-value" style="font-size:14px">${rows}</div>
+  </div>`;
+}
+
+// ── 折扣商品排行卡（帶群組模式）────────────────────────────
+function renderDiscountTopProductsWithGroups(orders) {
+  const mode = getProductStatMode();
+  const ranked = buildDiscountProdMapWithGroups(orders, mode);
+  if (!ranked.length) return '';
+  const preview = ranked.slice(0, 3);
+  const modeBtn = `<div style="display:flex;gap:4px;align-items:center;margin-bottom:6px">
+    <button onclick="setProductStatMode('group');window._rerenderStatCards&&_rerenderStatCards()" style="font-size:11px;padding:2px 7px;border-radius:99px;border:1px solid var(--border,#334155);background:${mode==='group'?'#6366f1':'transparent'};color:${mode==='group'?'#fff':'var(--text-secondary)'};cursor:pointer">商品群組</button>
+    <button onclick="setProductStatMode('raw');window._rerenderStatCards&&_rerenderStatCards()" style="font-size:11px;padding:2px 7px;border-radius:99px;border:1px solid var(--border,#334155);background:${mode==='raw'?'#6366f1':'transparent'};color:${mode==='raw'?'#fff':'var(--text-secondary)'};cursor:pointer">原始商品</button>
+  </div>`;
+  const previewRows = preview.map((p, i) =>
+    `<div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;padding:4px 0;border-bottom:1px solid var(--border,#334155)">
+      <span style="color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${i+1}. ${escHtml(p.name)}</span>
+      <span style="text-align:right;white-space:nowrap;margin-left:6px">
+        <span style="color:var(--danger);font-family:monospace;font-weight:700">NT$${Math.round(p.total)}</span>
+        <span style="color:var(--text-muted);font-size:11px;margin-left:4px">${p.count}筆</span>
+      </span>
+    </div>`
+  ).join('');
+  return `<div class="stat-card" style="min-width:200px;max-width:280px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+      <div class="stat-card-label" style="margin:0">📉 折扣商品排行</div>
+      <button onclick="openDiscTop10WithGroups()" style="font-size:11px;padding:2px 8px;border-radius:99px;border:1px solid var(--border,#334155);background:transparent;color:var(--text-secondary,#94a3b8);cursor:pointer;white-space:nowrap">查看 TOP10</button>
+    </div>
+    ${modeBtn}
+    ${previewRows}
+    ${ranked.length > 3 ? `<div style="font-size:11px;color:var(--text-muted);text-align:center;margin-top:6px;cursor:pointer" onclick="openDiscTop10WithGroups()">還有 ${ranked.length - 3} 項 →</div>` : ''}
+  </div>`;
+}
+
+function openDiscTop10WithGroups() {
+  const mode = getProductStatMode();
+  const ranked = buildDiscountProdMapWithGroups(_allOrdersCache || [], mode);
+  const top10  = ranked.slice(0, 10);
+  document.getElementById('discTop10Body').innerHTML = top10.length
+    ? top10.map((p, i) => {
+        const avg = p.count > 0 ? Math.round(p.total / p.count) : 0;
+        return `<tr>
+          <td style="font-size:13px;color:var(--text-muted);text-align:center">${i + 1}</td>
+          <td style="font-size:13px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(p.name)}</td>
+          <td style="text-align:right;font-family:monospace;color:var(--danger);font-weight:700">NT$${Math.round(p.total)}</td>
+          <td style="text-align:right;color:var(--text-secondary)">${p.count}筆</td>
+          <td style="text-align:right;font-family:monospace;color:var(--text-secondary)">NT$${avg}</td>
+        </tr>`;
+      }).join('')
+    : '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:16px">無資料</td></tr>';
+  document.getElementById('discTop10Modal').classList.add('open');
+}
+
+// ── 重新渲染統計卡（供模式切換按鈕呼叫）────────────────────
+window._rerenderStatCards = function() {
+  if (_allOrdersCache && typeof renderStatCards === 'function') {
+    // 重新觸發渲染
+    const statsEl = document.getElementById('orderStats');
+    if (statsEl) {
+      // 讀取最近快取的 stats
+      if (window._lastOrderStats) {
+        renderStatCards(window._lastOrderStats, _allOrdersCache);
+      }
+    }
+  }
+};
+
+// ── 設定中心：商品分析群組 Tab ──────────────────────────────
+async function loadProductAnalysisGroupsTab() {
+  await loadProductAnalysisGroups();
+  renderAnalysisGroupList();
+}
+
+function renderAnalysisGroupList() {
+  const el = document.getElementById('analysisGroupList');
+  if (!el) return;
+  if (!allProductAnalysisGroups.length) {
+    el.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:16px 0">尚無群組，點擊「＋ 新增群組」開始設定</div>';
+    return;
+  }
+  el.innerHTML = `
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead>
+        <tr style="border-bottom:2px solid var(--border,#334155)">
+          <th style="text-align:left;padding:8px 10px;color:var(--text-muted)">群組名稱</th>
+          <th style="text-align:left;padding:8px 10px;color:var(--text-muted)">說明</th>
+          <th style="text-align:left;padding:8px 10px;color:var(--text-muted)">成員 / 歷史別名</th>
+          <th style="text-align:center;padding:8px 10px;color:var(--text-muted)">狀態</th>
+          <th style="text-align:center;padding:8px 10px;color:var(--text-muted)">排序</th>
+          <th style="text-align:right;padding:8px 10px;color:var(--text-muted)">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${allProductAnalysisGroups.map(g => {
+          const itemTags = (g.items || []).map(i =>
+            '<span style="display:inline-block;background:var(--bg-base,#0f172a);border:1px solid var(--border,#334155);border-radius:4px;padding:1px 6px;margin:1px;font-size:11px">' + escHtml(i.product_name) + '</span>'
+          ).join('');
+          const aliasTags = (g.aliases || []).map(a =>
+            '<span style="display:inline-block;background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.3);border-radius:4px;padding:1px 6px;margin:1px;font-size:11px;color:#fbbf24">⏪ ' + escHtml(a.alias_name) + '</span>'
+          ).join('');
+          const memberHtml = (itemTags || aliasTags)
+            ? itemTags + (aliasTags ? '<br>' + aliasTags : '')
+            : '<span style="color:var(--text-muted)">（空群組）</span>';
+          return `
+          <tr style="border-bottom:1px solid var(--border,#334155)">
+            <td style="padding:10px;font-weight:600;color:${g.enabled?'var(--text-primary,#f1f5f9)':'var(--text-muted,#64748b)'}">${escHtml(g.group_name)}</td>
+            <td style="padding:10px;color:var(--text-muted,#64748b);font-size:12px">${escHtml(g.description||'—')}</td>
+            <td style="padding:10px;font-size:12px">${memberHtml}</td>
+            <td style="padding:10px;text-align:center">
+              <span style="display:inline-block;padding:2px 8px;border-radius:99px;font-size:11px;background:${g.enabled?'#10b98120':'#ef444420'};color:${g.enabled?'#10b981':'#ef4444'}">${g.enabled?'啟用':'停用'}</span>
+            </td>
+            <td style="padding:10px;text-align:center;color:var(--text-muted)">${g.sort_order||0}</td>
+            <td style="padding:10px;text-align:right;white-space:nowrap">
+              <button onclick="openAnalysisGroupModal(${g.id})" style="padding:4px 10px;border-radius:6px;border:1px solid var(--border,#334155);background:transparent;color:var(--text-secondary);cursor:pointer;font-size:12px;margin-left:4px">✏️ 編輯</button>
+              <button onclick="toggleAnalysisGroup(${g.id})" style="padding:4px 10px;border-radius:6px;border:1px solid var(--border,#334155);background:transparent;color:var(--text-secondary);cursor:pointer;font-size:12px;margin-left:4px">${g.enabled?'停用':'啟用'}</button>
+              <button onclick="deleteAnalysisGroup(${g.id},'${escHtml(g.group_name)}')" style="padding:4px 10px;border-radius:6px;border:1px solid #ef4444;background:transparent;color:#ef4444;cursor:pointer;font-size:12px;margin-left:4px">🗑️ 刪除</button>
+            </td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>`;
+}
+
+
+// ── 商品分析群組 Modal 開啟 / 關閉 ─────────────────────────
+async function openAnalysisGroupModal(id) {
+  // ── 立即重設表單 ─────────────────────────────────────────
+  const setVal = (elId, v) => { const el = document.getElementById(elId); if (el) el.value = v; };
+  const setChk = (elId, v) => { const el = document.getElementById(elId); if (el) el.checked = !!v; };
+  setVal('editAnalysisGroupId', id || '');
+  setVal('editAnalysisGroupName', '');
+  setVal('editAnalysisGroupDesc', '');
+  setVal('editAnalysisGroupSort', '0');
+  setChk('editAnalysisGroupEnabled', true);
+
+  const titleEl = document.getElementById('analysisGroupModalTitle');
+  if (titleEl) titleEl.textContent = id ? '編輯商品分析群組' : '新增商品分析群組';
+
+  // ── 先開啟 Modal ─────────────────────────────────────────
+  const modal = document.getElementById('analysisGroupModal');
+  if (modal) {
+    modal.classList.add('open');
+    modal.style.setProperty('display',         'flex',             'important');
+    modal.style.setProperty('visibility',      'visible',          'important');
+    modal.style.setProperty('opacity',         '1',                'important');
+    modal.style.setProperty('pointer-events',  'auto',             'important');
+    modal.style.setProperty('position',        'fixed',            'important');
+    modal.style.setProperty('inset',           '0',                'important');
+    modal.style.setProperty('z-index',         '99999',            'important');
+    modal.style.setProperty('background',      'rgba(0,0,0,0.75)', 'important');
+    modal.style.setProperty('align-items',     'center',           'important');
+    modal.style.setProperty('justify-content', 'center',           'important');
+  }
+
+  // ── 顯示載入中 ──────────────────────────────────────────
+  const listEl = document.getElementById('analysisGroupProductList');
+  if (listEl) listEl.innerHTML = '<div style="color:var(--text-muted,#64748b);font-size:13px;padding:12px">載入商品中...</div>';
+
+  // ── 清空別名列表 ─────────────────────────────────────────
+  _renderAliasList([]);
+
+  let selectedNames = [];
+
+  // ── 編輯模式：載入群組資料（含 aliases）────────────────
+  if (id) {
+    try {
+      const res  = await apiFetch('/api/product-analysis-groups/' + id);
+      const json = await res.json();
+      if (json.success && json.data) {
+        const g = json.data;
+        setVal('editAnalysisGroupName', g.group_name || '');
+        setVal('editAnalysisGroupDesc', g.description || '');
+        setVal('editAnalysisGroupSort', g.sort_order || 0);
+        setChk('editAnalysisGroupEnabled', g.enabled);
+        selectedNames = (g.items || []).map(i => i.product_name);
+        // 渲染別名列表
+        _renderAliasList((g.aliases || []).map(a => a.alias_name));
+      }
+    } catch(e) { console.warn('[AG] fetch group:', e.message); }
+  }
+
+  // ── 渲染商品勾選清單 ────────────────────────────────────
+  await _renderAnalysisGroupProductCheckboxes(selectedNames);
+}
+
+function closeAnalysisGroupModal() {
+  const modal = document.getElementById('analysisGroupModal');
+  if (!modal) return;
+  modal.classList.remove('open');
+  // 清除 hotfix2 setProperty 強制值
+  ['display','visibility','opacity','pointer-events','position','inset','z-index','background','align-items','justify-content'].forEach(prop => {
+    modal.style.removeProperty(prop);
+  });
+}
+
+async function _renderAnalysisGroupProductCheckboxes(selectedNames) {
+  const listEl = document.getElementById('analysisGroupProductList');
+  if (!listEl) return;
+  // 使用全域 allProducts，若沒有就從 API 取
+  let products = allProducts || [];
+  if (!products.length) {
+    try {
+      const res  = await apiFetch('/api/products');
+      const json = await res.json();
+      products = json.success ? (json.data || []) : [];
+    } catch {}
+  }
+  if (!products.length) {
+    listEl.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:8px">無商品資料</div>';
+    return;
+  }
+
+  // 依分類排序
+  const sorted = [...products].sort((a, b) => (a.category || '').localeCompare(b.category || '') || a.name.localeCompare(b.name));
+  listEl.innerHTML = sorted.map(p => {
+    const checked = selectedNames.includes(p.name);
+    return `<label style="display:flex;align-items:center;gap:8px;padding:5px 6px;border-radius:6px;cursor:pointer;transition:background .15s" onmouseover="this.style.background='var(--bg-card,#1a1d27)'" onmouseout="this.style.background=''"
+      data-pname="${escHtml(p.name)}" class="ag-product-item">
+      <input type="checkbox" value="${escHtml(p.name)}" ${checked ? 'checked' : ''} style="width:14px;height:14px;cursor:pointer" class="ag-product-cb">
+      <span style="font-size:13px;flex:1">${escHtml(p.name)}</span>
+      <span style="font-size:11px;color:var(--text-muted)">${escHtml(p.category||'')}</span>
+    </label>`;
+  }).join('');
+}
+
+function filterAnalysisGroupProducts() {
+  const q = (document.getElementById('analysisGroupSearch')?.value || '').toLowerCase();
+  document.querySelectorAll('#analysisGroupProductList .ag-product-item').forEach(el => {
+    const name = (el.dataset.pname || '').toLowerCase();
+    el.style.display = name.includes(q) ? '' : 'none';
+  });
+}
+
+function selectAllAnalysisGroupProducts(checked) {
+  document.querySelectorAll('#analysisGroupProductList .ag-product-cb').forEach(cb => {
+    const item = cb.closest('.ag-product-item');
+    if (!item || item.style.display === 'none') return;
+    cb.checked = checked;
+  });
+}
+
+async function saveAnalysisGroup() {
+  const id   = document.getElementById('editAnalysisGroupId').value;
+  const name = (document.getElementById('editAnalysisGroupName').value || '').trim();
+  if (!name) { showToast('請輸入群組名稱', 'error'); return; }
+
+  // 現有商品成員（勾選框）
+  const checkedBoxes = document.querySelectorAll('#analysisGroupProductList .ag-product-cb:checked');
+  const items = Array.from(checkedBoxes).map(cb => ({ product_name: cb.value }));
+
+  // 歷史品名別名（alias 列表）
+  const aliases = _getAliasListValues();
+
+  const body = {
+    group_name:  name,
+    description: document.getElementById('editAnalysisGroupDesc').value || '',
+    sort_order:  Number(document.getElementById('editAnalysisGroupSort').value) || 0,
+    enabled:     document.getElementById('editAnalysisGroupEnabled').checked ? 1 : 0,
+    items,
+    aliases
+  };
+
+  try {
+    const url    = id ? `/api/product-analysis-groups/${id}` : '/api/product-analysis-groups';
+    const method = id ? 'PUT' : 'POST';
+    const res    = await apiFetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const json   = await res.json();
+    if (!json.success) { showToast('❌ ' + (json.message || '儲存失敗'), 'error'); return; }
+    showToast(id ? '✅ 群組已更新' : '✅ 群組已建立', 'success');
+    closeAnalysisGroupModal();
+    await loadProductAnalysisGroups();
+    renderAnalysisGroupList();
+  } catch(e) { showToast('❌ ' + e.message, 'error'); }
+}
+
+async function toggleAnalysisGroup(id) {
+  try {
+    const res  = await apiFetch(`/api/product-analysis-groups/${id}/toggle`, { method: 'PATCH' });
+    const json = await res.json();
+    if (!json.success) { showToast('❌ ' + (json.message || '操作失敗'), 'error'); return; }
+    showToast('✅ 狀態已更新', 'success');
+    await loadProductAnalysisGroups();
+    renderAnalysisGroupList();
+  } catch(e) { showToast('❌ ' + e.message, 'error'); }
+}
+
+async function deleteAnalysisGroup(id, name) {
+  if (!confirm(`確定要刪除群組「${name}」？此操作不可還原。`)) return;
+  try {
+    const res  = await apiFetch(`/api/product-analysis-groups/${id}`, { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) { showToast('❌ ' + (json.message || '刪除失敗'), 'error'); return; }
+    showToast('✅ 群組已刪除', 'success');
+    await loadProductAnalysisGroups();
+    renderAnalysisGroupList();
+  } catch(e) { showToast('❌ ' + e.message, 'error'); }
+}
+
+// ── fix18-09F-hotfix1：確保所有群組函式掛載到 window ─────────
+// (function declarations 已 hoist，但顯式掛載更保險)
+(function exportAnalysisGroupGlobals() {
+  window.openAnalysisGroupModal       = openAnalysisGroupModal;
+  window.closeAnalysisGroupModal      = closeAnalysisGroupModal;
+  window.saveAnalysisGroup            = saveAnalysisGroup;
+  window.toggleAnalysisGroup          = toggleAnalysisGroup;
+  window.deleteAnalysisGroup          = deleteAnalysisGroup;
+  window.filterAnalysisGroupProducts  = filterAnalysisGroupProducts;
+  window.selectAllAnalysisGroupProducts = selectAllAnalysisGroupProducts;
+  window.loadProductAnalysisGroupsTab = loadProductAnalysisGroupsTab;
+  window.setProductStatMode           = setProductStatMode;
+  window.openDiscTop10WithGroups      = openDiscTop10WithGroups;
+})();
+
+// ── fix18-09F-hotfix3：Modal 診斷工具 ───────────────────────
+window.debugAnalysisGroupModal = function () {
+  const m = document.getElementById('analysisGroupModal');
+  console.log('Modal=', m);
+  if (!m) { console.error('analysisGroupModal NOT FOUND'); return; }
+  const cs = getComputedStyle(m);
+  console.log('display=',       cs.display);
+  console.log('visibility=',    cs.visibility);
+  console.log('opacity=',       cs.opacity);
+  console.log('zIndex=',        cs.zIndex);
+  console.log('offsetWidth=',   m.offsetWidth);
+  console.log('offsetHeight=',  m.offsetHeight);
+  console.log('rect=',          m.getBoundingClientRect());
+  console.log('modal-content=', m.querySelector('.modal-content'));
+  console.log('modal-box=',     m.querySelector('.modal-box'));
+  console.log('modal=',         m.querySelector('.modal'));
+  const parent = m.parentElement;
+  console.log('parentElement=', parent ? parent.tagName + (parent.id ? '#'+parent.id : '') + (parent.className ? '.'+parent.className.split(' ').join('.') : '') : null);
+  if (parent) {
+    const pcs = getComputedStyle(parent);
+    console.log('parent display=',    pcs.display);
+    console.log('parent visibility=', pcs.visibility);
+  }
+  console.log('html=', m.innerHTML.substring(0, 1000));
+};
+
+// ── fix18-09F-hotfix4：歷史品名別名 UI helpers ─────────────
+
+// 渲染別名列表到 #analysisGroupAliasList
+function _renderAliasList(aliases) {
+  const el = document.getElementById('analysisGroupAliasList');
+  if (!el) return;
+  if (!aliases || !aliases.length) {
+    el.innerHTML = '<div style="color:var(--text-muted,#64748b);font-size:12px;padding:4px 0">尚無別名</div>';
+    return;
+  }
+  el.innerHTML = aliases.map((a, i) =>
+    `<div style="display:flex;align-items:center;gap:6px;padding:3px 0" data-alias-idx="${i}">
+      <span style="font-size:12px;flex:1;color:#fbbf24">⏪ ${escHtml(a)}</span>
+      <button onclick="_removeAlias(${i})" style="background:transparent;border:1px solid #ef4444;color:#ef4444;border-radius:4px;padding:1px 6px;font-size:11px;cursor:pointer">✕</button>
+    </div>`
+  ).join('');
+}
+
+// 取得目前別名列表（讀 DOM）
+function _getAliasListValues() {
+  const el = document.getElementById('analysisGroupAliasList');
+  if (!el) return [];
+  const spans = el.querySelectorAll('[data-alias-idx] span');
+  return Array.from(spans).map(s => s.textContent.replace(/^⏪\s*/, '').trim()).filter(Boolean);
+}
+
+// 新增別名
+function addAnalysisGroupAlias() {
+  const inp = document.getElementById('analysisGroupAliasInput');
+  if (!inp) return;
+  const val = (inp.value || '').trim();
+  if (!val) { showToast('請輸入別名', 'error'); return; }
+  const current = _getAliasListValues();
+  if (current.includes(val)) { showToast('此別名已存在', 'error'); return; }
+  _renderAliasList([...current, val]);
+  inp.value = '';
+  inp.focus();
+}
+
+// 移除別名（by index）
+function _removeAlias(idx) {
+  const current = _getAliasListValues();
+  current.splice(idx, 1);
+  _renderAliasList(current);
+}
+
+// 更新 window exports
+window.addAnalysisGroupAlias = addAnalysisGroupAlias;
+window._removeAlias           = _removeAlias;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// fix18-10 — 快速搬家檔 + 訂單/LINE預購 匯出匯入
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── 共用：強制顯示 modal ─────────────────────────────────────────────────
+function showModal18(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.style.setProperty('display',         'flex',             'important');
+  el.style.setProperty('visibility',      'visible',          'important');
+  el.style.setProperty('opacity',         '1',                'important');
+  el.style.setProperty('pointer-events',  'auto',             'important');
+  el.style.setProperty('position',        'fixed',            'important');
+  el.style.setProperty('inset',           '0',                'important');
+  el.style.setProperty('z-index',         '99999',            'important');
+  el.style.setProperty('background',      'rgba(0,0,0,0.75)', 'important');
+  el.style.setProperty('align-items',     'center',           'important');
+  el.style.setProperty('justify-content', 'center',           'important');
+}
+function hideModal18(id) {
+  const el = document.getElementById(id);
+  if (el) el.style.setProperty('display', 'none', 'important');
+}
+
+// ── 共用：讀取 JSON 檔案 ─────────────────────────────────────────────────
+function readJsonFile(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload  = e => { try { resolve(JSON.parse(e.target.result)); } catch(err) { reject(new Error('JSON 解析失敗：' + err.message)); } };
+    r.onerror = () => reject(new Error('檔案讀取失敗'));
+    r.readAsText(file, 'utf-8');
+  });
+}
+
+// ── 共用：下載 blob ──────────────────────────────────────────────────────
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a   = document.createElement('a');
+  a.href    = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  A. 訂單匯出
+// ═══════════════════════════════════════════════════════════════════════════
+let _orderExportParsedDates = {};
+
+function openOrderExportModal() {
+  // 讀取目前查詢的日期範圍（若有）
+  const df = document.getElementById('dateFrom');
+  const dt = document.getElementById('dateTo');
+  _orderExportParsedDates = { from: df ? df.value : '', to: dt ? dt.value : '' };
+  showModal18('orderExportModal');
+}
+function closeOrderExportModal() { hideModal18('orderExportModal'); }
+
+async function doOrderExport() {
+  const format = document.getElementById('orderExportFormat').value;
+  const scope  = document.getElementById('orderExportScope').value;
+  let url = `/api/export/orders?format=${format}&scope=${scope}`;
+  if (scope === 'filtered' && _orderExportParsedDates.from && _orderExportParsedDates.to) {
+    url += `&date_from=${_orderExportParsedDates.from}&date_to=${_orderExportParsedDates.to}`;
+  }
+  try {
+    const res = await apiFetch(url);
+    if (!res.ok) { showToast('匯出失敗', 'error'); return; }
+    const blob = await res.blob();
+    const cd   = res.headers.get('content-disposition') || '';
+    const m    = cd.match(/filename="([^"]+)"/);
+    const name = m ? m[1] : `orders_export.${format}`;
+    downloadBlob(blob, name);
+    closeOrderExportModal();
+    showToast('訂單匯出成功', 'success');
+  } catch(e) { showToast('匯出失敗：' + e.message, 'error'); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  B. 訂單匯入
+// ═══════════════════════════════════════════════════════════════════════════
+let _orderImportData = null;
+
+function openOrderImportModal() {
+  _orderImportData = null;
+  const fi = document.getElementById('orderImportFile');
+  if (fi) fi.value = '';
+  document.getElementById('orderImportPreview').style.display  = 'none';
+  document.getElementById('orderImportResult').style.display   = 'none';
+  document.getElementById('orderImportSubmitBtn').style.display = 'none';
+  showModal18('orderImportModal');
+}
+function closeOrderImportModal() { hideModal18('orderImportModal'); }
+
+async function onOrderImportFileSelected(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const preview = document.getElementById('orderImportPreview');
+  const submit  = document.getElementById('orderImportSubmitBtn');
+  preview.style.display = 'none';
+  submit.style.display  = 'none';
+  _orderImportData = null;
+
+  try {
+    const json = await readJsonFile(file);
+    // 支援兩種格式：直接 orders 陣列 或 { data: { orders, order_items, order_logs } }
+    let orders = [], orderItems = [], orderLogs = [];
+    if (Array.isArray(json)) {
+      orders = json;
+    } else if (json.data && Array.isArray(json.data.orders)) {
+      orders     = json.data.orders;
+      orderItems = json.data.order_items || [];
+      orderLogs  = json.data.order_logs  || [];
+    } else if (json.orders) {
+      orders     = json.orders;
+      orderItems = json.order_items || [];
+      orderLogs  = json.order_logs  || [];
+    } else {
+      preview.style.display = 'block';
+      preview.innerHTML = '<span style="color:#f87171">❌ 無法識別的 JSON 格式</span>';
+      return;
+    }
+    _orderImportData = { orders, order_items: orderItems, order_logs: orderLogs };
+    preview.style.display = 'block';
+    preview.innerHTML = `<div style="color:var(--accent,#3b82f6);font-weight:700;margin-bottom:6px">📋 檔案預覽</div>
+      <div>訂單：<strong>${orders.length}</strong> 筆</div>
+      <div>訂單明細：<strong>${orderItems.length}</strong> 筆</div>
+      <div>訂單紀錄：<strong>${orderLogs.length}</strong> 筆</div>`;
+    submit.style.display = '';
+  } catch(e) {
+    preview.style.display = 'block';
+    preview.innerHTML = `<span style="color:#f87171">❌ ${escHtml(e.message)}</span>`;
+  }
+}
+
+async function doOrderImport() {
+  if (!_orderImportData) return;
+  const mode   = document.getElementById('orderImportMode').value;
+  const btn    = document.getElementById('orderImportSubmitBtn');
+  const result = document.getElementById('orderImportResult');
+  btn.disabled = true; btn.textContent = '匯入中…';
+  result.style.display = 'none';
+
+  try {
+    const res  = await apiFetch('/api/import/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...(_orderImportData), mode })
+    });
+    const json = await res.json();
+    result.style.display = 'block';
+    if (json.success) {
+      const parts = [];
+      if (json.added)   parts.push(`新增 ${json.added} 筆`);
+      if (json.updated) parts.push(`更新 ${json.updated} 筆`);
+      if (json.skipped) parts.push(`跳過 ${json.skipped} 筆`);
+      if (json.failed)  parts.push(`失敗 ${json.failed} 筆`);
+      // RC-1 修正：顯示日期範圍提示，備份訂單 created_at 為舊日期，預設 today 查不到
+      let dateHint = '';
+      if (json.date_range && json.date_range.min && json.added > 0) {
+        const dr = json.date_range;
+        dateHint = `<div style="margin-top:8px;padding:8px;background:rgba(59,130,246,.1);border:1px solid rgba(59,130,246,.3);border-radius:6px;font-size:12px;color:#93c5fd">
+          ℹ️ 匯入的訂單日期範圍：${escHtml(dr.min)} ～ ${escHtml(dr.max)}<br>
+          訂單紀錄頁預設只顯示今日，請切換至「自訂」日期範圍查看匯入的訂單。
+        </div>`;
+      }
+      result.style.background = json.failed > 0 ? 'rgba(251,191,36,.1)' : 'rgba(34,197,94,.1)';
+      result.style.color      = json.failed > 0 ? '#fbbf24' : '#4ade80';
+      result.innerHTML = `✅ 匯入完成：${parts.join('、')}` + dateHint +
+        (json.errors && json.errors.length ? `<br><small style="color:#f87171">${json.errors.slice(0,3).map(e=>escHtml(e)).join('<br>')}</small>` : '');
+      showToast('訂單匯入完成', 'success');
+    } else {
+      result.style.background = 'rgba(239,68,68,.1)';
+      result.style.color      = '#f87171';
+      result.innerHTML = `❌ 匯入失敗：${escHtml(json.message || '')}`;
+      showToast('匯入失敗', 'error');
+    }
+  } catch(e) {
+    result.style.display = 'block';
+    result.style.background = 'rgba(239,68,68,.1)';
+    result.style.color      = '#f87171';
+    result.innerHTML = `❌ ${escHtml(e.message)}`;
+    showToast('匯入失敗', 'error');
+  }
+  btn.disabled = false; btn.textContent = '✅ 確認匯入';
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  C. LINE預購匯出
+// ═══════════════════════════════════════════════════════════════════════════
+function openPreorderExportModal() {
+  showModal18('preorderExportModal');
+}
+function closePreorderExportModal() { hideModal18('preorderExportModal'); }
+
+async function doPreorderExport() {
+  const format = document.getElementById('preorderExportFormat').value;
+  const dFrom  = document.getElementById('preorderExportFrom').value;
+  const dTo    = document.getElementById('preorderExportTo').value;
+  let url      = `/api/export/preorders?format=${format}`;
+  if (dFrom && dTo) url += `&date_from=${dFrom}&date_to=${dTo}`;
+
+  try {
+    const res = await apiFetch(url);
+    if (!res.ok) { showToast('匯出失敗', 'error'); return; }
+    const blob = await res.blob();
+    const cd   = res.headers.get('content-disposition') || '';
+    const m    = cd.match(/filename="([^"]+)"/);
+    const name = m ? m[1] : `preorders_export.${format}`;
+    downloadBlob(blob, name);
+    closePreorderExportModal();
+    showToast('預購匯出成功', 'success');
+  } catch(e) { showToast('匯出失敗：' + e.message, 'error'); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  D. LINE預購匯入
+// ═══════════════════════════════════════════════════════════════════════════
+let _preorderImportData = null;
+
+function openPreorderImportModal() {
+  _preorderImportData = null;
+  const fi = document.getElementById('preorderImportFile');
+  if (fi) fi.value = '';
+  document.getElementById('preorderImportPreview').style.display  = 'none';
+  document.getElementById('preorderImportResult').style.display   = 'none';
+  document.getElementById('preorderImportSubmitBtn').style.display = 'none';
+  showModal18('preorderImportModal');
+}
+function closePreorderImportModal() { hideModal18('preorderImportModal'); }
+
+async function onPreorderImportFileSelected(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const preview = document.getElementById('preorderImportPreview');
+  const submit  = document.getElementById('preorderImportSubmitBtn');
+  preview.style.display = 'none';
+  submit.style.display  = 'none';
+  _preorderImportData = null;
+
+  try {
+    const json = await readJsonFile(file);
+    let preorders = [];
+    if (Array.isArray(json)) {
+      preorders = json;
+    } else if (json.data && Array.isArray(json.data.preorders)) {
+      preorders = json.data.preorders;
+    } else if (Array.isArray(json.preorders)) {
+      preorders = json.preorders;
+    } else {
+      preview.style.display = 'block';
+      preview.innerHTML = '<span style="color:#f87171">❌ 無法識別的 JSON 格式</span>';
+      return;
+    }
+    _preorderImportData = { preorders };
+    preview.style.display = 'block';
+    preview.innerHTML = `<div style="color:var(--accent,#3b82f6);font-weight:700;margin-bottom:6px">📋 檔案預覽</div>
+      <div>LINE 預購：<strong>${preorders.length}</strong> 筆</div>`;
+    submit.style.display = '';
+  } catch(e) {
+    preview.style.display = 'block';
+    preview.innerHTML = `<span style="color:#f87171">❌ ${escHtml(e.message)}</span>`;
+  }
+}
+
+async function doPreorderImport() {
+  if (!_preorderImportData) return;
+  const mode   = document.getElementById('preorderImportMode').value;
+  const btn    = document.getElementById('preorderImportSubmitBtn');
+  const result = document.getElementById('preorderImportResult');
+  btn.disabled = true; btn.textContent = '匯入中…';
+  result.style.display = 'none';
+
+  try {
+    const res  = await apiFetch('/api/import/preorders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...(_preorderImportData), mode })
+    });
+    const json = await res.json();
+    result.style.display = 'block';
+    if (json.success) {
+      const parts = [];
+      if (json.added)   parts.push(`新增 ${json.added} 筆`);
+      if (json.updated) parts.push(`更新 ${json.updated} 筆`);
+      if (json.skipped) parts.push(`跳過 ${json.skipped} 筆`);
+      if (json.failed)  parts.push(`失敗 ${json.failed} 筆`);
+      result.style.background = 'rgba(34,197,94,.1)';
+      result.style.color      = '#4ade80';
+      result.innerHTML = `✅ 匯入完成：${parts.join('、')}`;
+      showToast('預購匯入完成', 'success');
+    } else {
+      result.style.background = 'rgba(239,68,68,.1)';
+      result.style.color      = '#f87171';
+      result.innerHTML = `❌ 匯入失敗：${escHtml(json.message || '')}`;
+      showToast('匯入失敗', 'error');
+    }
+  } catch(e) {
+    result.style.display = 'block';
+    result.style.background = 'rgba(239,68,68,.1)';
+    result.style.color      = '#f87171';
+    result.innerHTML = `❌ ${escHtml(e.message)}`;
+    showToast('匯入失敗', 'error');
+  }
+  btn.disabled = false; btn.textContent = '✅ 確認匯入';
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  E. 快速搬家檔 — 系統設定頁
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── E-1. 匯出搬家檔 ──────────────────────────────────────────────────────
+async function exportMigrationFile() {
+  const statusEl = document.getElementById('migrationExportStatus');
+  if (statusEl) { statusEl.style.color = 'var(--text-secondary,#94a3b8)'; statusEl.textContent = '準備匯出…'; }
+  try {
+    const res = await apiFetch('/api/migration/export');
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      throw new Error(j.message || `HTTP ${res.status}`);
+    }
+    const blob = await res.blob();
+    const cd   = res.headers.get('content-disposition') || '';
+    const m    = cd.match(/filename="([^"]+)"/);
+    const name = m ? m[1] : 'pos_migration.json';
+    downloadBlob(blob, name);
+    if (statusEl) { statusEl.style.color = '#4ade80'; statusEl.textContent = `✅ 已下載：${name}`; }
+    showToast('搬家檔匯出成功', 'success');
+  } catch(e) {
+    if (statusEl) { statusEl.style.color = '#f87171'; statusEl.textContent = `❌ 匯出失敗：${e.message}`; }
+    showToast('匯出失敗：' + e.message, 'error');
+  }
+}
+
+// ── E-2. 選擇搬家檔（fix18-10-hotfix1：修正跨店保護邏輯）─────────────────
+let _migrationPayload      = null;
+let _migrationPreviewData  = null;
+let _migrationCrossAllowed = false;   // 使用者明確勾選跨店才變 true
+
+async function onMigrationFileSelected(input) {
+  const file = input.files[0];
+  if (!file) return;
+  _migrationPayload      = null;
+  _migrationPreviewData  = null;
+  _migrationCrossAllowed = false;
+
+  const previewBox  = document.getElementById('migrationPreviewBox');
+  const previewSum  = document.getElementById('migrationPreviewSummary');
+  const crossWarn   = document.getElementById('migrationCrossStoreWarn');
+  const modeBox     = document.getElementById('migrationModeBox');
+  const previewBtn  = document.getElementById('migrationPreviewBtn');
+  const importBtn   = document.getElementById('migrationImportBtn');
+  const statusEl    = document.getElementById('migrationImportStatus');
+
+  previewBox.style.display = 'none';
+  modeBox.style.display    = 'none';
+  if (previewBtn)  previewBtn.style.display  = 'none';
+  if (importBtn)   importBtn.style.display   = 'none';
+  if (statusEl)    statusEl.textContent      = '';
+
+  try {
+    const json = await readJsonFile(file);
+    if (!json || json.type !== 'pos_migration_backup') {
+      previewBox.style.display = 'block';
+      previewSum.innerHTML     = '<span style="color:#f87171">❌ 不是有效的搬家檔（type 欄位不符）</span>';
+      crossWarn.style.display  = 'none';
+      return;
+    }
+    _migrationPayload = json;
+
+    // 呼叫 preview API 取得筆數統計
+    const res  = await apiFetch('/api/migration/import/preview', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(json)
+    });
+    const prev = await res.json();
+    if (!prev.success) throw new Error(prev.message || 'preview 失敗');
+    _migrationPreviewData = prev;
+
+    const s = prev.summary;
+    previewSum.innerHTML = `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:13px">
+        <div>商品：<strong>${s.products}</strong> 筆</div>
+        <div>分類：<strong>${s.categories}</strong> 筆</div>
+        <div>訂單：<strong>${s.orders}</strong> 筆</div>
+        <div>LINE預購：<strong>${s.preorders}</strong> 筆</div>
+        <div>食材：<strong>${s.ingredients||0}</strong> 筆</div>
+        <div>商品扣料公式：<strong>${s.product_ingredient_formulas||0}</strong> 筆</div>
+        <div>食材異動紀錄：<strong>${s.ingredient_logs||0}</strong> 筆</div>
+        <div>庫存變動紀錄：<strong>${s.inventory_logs||0}</strong> 筆</div>
+        <div>折扣分類：<strong>${s.discount_categories}</strong> 筆</div>
+        <div>折扣活動：<strong>${s.discount_campaigns}</strong> 筆</div>
+        <div>分析群組：<strong>${s.product_analysis_groups}</strong> 筆</div>
+        <div>群組成員：<strong>${s.product_analysis_group_items}</strong> 筆</div>
+        <div>歷史別名：<strong>${s.product_analysis_group_aliases}</strong> 筆</div>
+        <div>設定：<strong>${s.settings}</strong> 筆</div>
+      </div>
+      <div style="margin-top:8px;font-size:12px;color:var(--text-muted,#64748b)">
+        備份店家：${escHtml(prev.store_name || prev.file_store_id || '—')} ／
+        版本：${escHtml(prev.version||'—')} ／
+        匯出時間：${escHtml((prev.exported_at||'').slice(0,19).replace('T',' '))}
+      </div>`;
+
+    // 跨店警告：顯示勾選框，預設不允許
+    if (prev.cross_store) {
+      crossWarn.style.display = 'block';
+      crossWarn.innerHTML = `
+        <div style="margin-bottom:8px">⚠️ 備份檔屬於店家 <strong>${escHtml(prev.file_store_id)}</strong>，
+        目前店家是 <strong>${escHtml(prev.current_store_id)}</strong>。</div>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:#fca5a5">
+          <input type="checkbox" id="migrationCrossStoreCheck" onchange="onCrossStoreCheckChanged(this)">
+          我確認要跨店匯入（備份資料將寫入目前店家）
+        </label>`;
+      _migrationCrossAllowed = false;   // 重置，等使用者勾選
+      if (importBtn) importBtn.style.display = 'none';  // 跨店時先隱藏匯入鈕
+    } else {
+      crossWarn.style.display = 'none';
+      _migrationCrossAllowed = false;   // 同店，不需要特別旗標
+    }
+
+    previewBox.style.display = 'block';
+    modeBox.style.display    = 'block';
+    if (previewBtn) previewBtn.style.display = '';
+
+    // 同店才直接顯示匯入鈕；跨店需等勾選
+    if (!prev.cross_store) {
+      if (importBtn) importBtn.style.display = '';
+    }
+
+  } catch(e) {
+    previewBox.style.display = 'block';
+    previewSum.innerHTML     = `<span style="color:#f87171">❌ ${escHtml(e.message)}</span>`;
+    crossWarn.style.display  = 'none';
+  }
+}
+
+// 跨店勾選變更
+function onCrossStoreCheckChanged(checkbox) {
+  _migrationCrossAllowed = checkbox.checked;
+  const importBtn = document.getElementById('migrationImportBtn');
+  if (importBtn) {
+    importBtn.style.display = checkbox.checked ? '' : 'none';
+  }
+}
+
+// ── E-3. 預覽（scroll to）─────────────────────────────────────────────
+async function previewMigrationFile() {
+  const el = document.getElementById('migrationPreviewBox');
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// ── E-4. 確認匯入入口 ─────────────────────────────────────────────────
+function confirmMigrationImport() {
+  if (!_migrationPayload) { showToast('請先選擇備份檔', 'error'); return; }
+
+  // 跨店：必須勾選才能繼續
+  if (_migrationPreviewData && _migrationPreviewData.cross_store && !_migrationCrossAllowed) {
+    showToast('跨店匯入：請先勾選確認跨店', 'error');
+    return;
+  }
+
+  const mode = document.querySelector('input[name="migrationMode"]:checked')?.value || 'skip';
+  if (mode === 'purge') {
+    const inp = document.getElementById('migrationPurgeConfirmInput');
+    if (inp) inp.value = '';
+    showModal18('migrationPurgeConfirmModal');
+  } else {
+    executeMigrationImport();
+  }
+}
+
+// ── E-5. 關閉二次確認 Modal ───────────────────────────────────────────
+function closeMigrationPurgeConfirm() { hideModal18('migrationPurgeConfirmModal'); }
+
+// ── E-6. 實際執行匯入（fix18-10-hotfix1：正確傳 allowCrossStoreImport）──
+async function executeMigrationImport() {
+  const mode = document.querySelector('input[name="migrationMode"]:checked')?.value || 'skip';
+
+  // 清空模式二次確認
+  if (mode === 'purge') {
+    const val = (document.getElementById('migrationPurgeConfirmInput')?.value || '').trim();
+    if (val !== '確認還原') {
+      showToast('請輸入「確認還原」才能繼續', 'error');
+      return;
+    }
+    closeMigrationPurgeConfirm();
+  }
+
+  const statusEl  = document.getElementById('migrationImportStatus');
+  const importBtn = document.getElementById('migrationImportBtn');
+  if (statusEl)  { statusEl.style.color = 'var(--text-secondary,#94a3b8)'; statusEl.textContent = '匯入中，請勿關閉頁面…'; }
+  if (importBtn) { importBtn.disabled = true; importBtn.textContent = '匯入中…'; }
+
+  // 跨店：只有使用者明確勾選後 _migrationCrossAllowed 才是 true
+  // cross_store=true ≠ allowCrossStoreImport=true，不再混用
+  const isCrossStore    = _migrationPreviewData ? _migrationPreviewData.cross_store : false;
+  const allowCrossStore = isCrossStore ? _migrationCrossAllowed : false;
+
+  try {
+    const res = await apiFetch('/api/migration/import', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        payload:               _migrationPayload,
+        mode:                  mode === 'purge' ? 'replace' : mode,
+        allowCrossStoreImport: allowCrossStore
+      })
+    });
+    const json = await res.json();
+
+    if (json.success) {
+      const r = json.results || {};
+      const lines = [
+        `商品：${r.products?.added||0}`,
+        `分類：${r.categories?.added||0}`,
+        `訂單：${r.orders?.added||0}`,
+        `食材：${r.ingredients?.added||0}`,
+        `扣料公式：${r.product_ingredient_formulas?.added||0}`,
+        `折扣分類：${r.discount_categories?.added||0}`,
+        `折扣活動：${r.discount_campaigns?.added||0}`,
+        `分析群組：${r.analysis_groups?.added||0}`,
+        `群組成員：${r.analysis_items?.added||0}`,
+        `歷史別名：${r.analysis_aliases?.added||0}`,
+        `設定：${r.settings?.added||0}`
+      ].join('、') + ' 筆';
+      const skipFail = r.failed > 0 ? `｜失敗 ${r.failed} 筆` : '';
+      if (statusEl) {
+        statusEl.style.color = r.failed > 0 ? '#fbbf24' : '#4ade80';
+        statusEl.innerHTML =
+          `✅ 匯入完成（模式：${mode}）${skipFail}<br>` +
+          `<small style="color:var(--text-muted,#64748b)">${lines}</small>` +
+          (r.errors && r.errors.length
+            ? `<br><small style="color:#f87171">錯誤：${r.errors.slice(0,3).map(e=>escHtml(e)).join(' / ')}</small>`
+            : '');
+      }
+      showToast('搬家檔匯入完成', 'success');
+
+    } else if (json.cross_store) {
+      // 後端拒絕跨店
+      if (statusEl) {
+        statusEl.style.color = '#f87171';
+        statusEl.textContent = `❌ 跨店匯入被拒：${json.message}`;
+      }
+      showToast('跨店匯入被拒，請勾選確認跨店', 'error');
+
+    } else {
+      if (statusEl) {
+        statusEl.style.color = '#f87171';
+        statusEl.textContent = `❌ 匯入失敗：${json.message}`;
+      }
+      showToast('匯入失敗：' + json.message, 'error');
+    }
+
+  } catch(e) {
+    if (statusEl) { statusEl.style.color = '#f87171'; statusEl.textContent = `❌ ${e.message}`; }
+    showToast('匯入失敗：' + e.message, 'error');
+  }
+
+  if (importBtn) { importBtn.disabled = false; importBtn.textContent = '✅ 確認匯入'; }
+}
+
+// ── 全域匯出（fix18-10-hotfix1）──────────────────────────────────────
+(function exportMigration18Globals() {
+  const fns = {
+    openOrderExportModal, closeOrderExportModal, doOrderExport,
+    openOrderImportModal, closeOrderImportModal, onOrderImportFileSelected, doOrderImport,
+    openPreorderExportModal, closePreorderExportModal, doPreorderExport,
+    openPreorderImportModal, closePreorderImportModal, onPreorderImportFileSelected, doPreorderImport,
+    exportMigrationFile, onMigrationFileSelected, previewMigrationFile,
+    confirmMigrationImport, closeMigrationPurgeConfirm, executeMigrationImport,
+    onCrossStoreCheckChanged
+  };
+  Object.assign(window, fns);
+})();
+
+// fix18-10-hotfix1 end
