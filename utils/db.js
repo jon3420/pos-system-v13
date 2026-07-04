@@ -572,6 +572,10 @@ function initTables(w) {
     'ALTER TABLE orders ADD COLUMN customer_line_id TEXT DEFAULT ""',
     'ALTER TABLE orders ADD COLUMN payment_method TEXT DEFAULT "cash"',
     'ALTER TABLE orders ADD COLUMN payment_category TEXT DEFAULT "cash"',
+    // hotfix13-BUG6：LinePay 已付款訂單取消時的待退款流程
+    'ALTER TABLE orders ADD COLUMN refund_status TEXT DEFAULT ""',
+    'ALTER TABLE orders ADD COLUMN refund_note TEXT DEFAULT ""',
+    'ALTER TABLE orders ADD COLUMN refunded_at TEXT DEFAULT ""',
   ];
   orderMigrations.forEach(sql => { try { w._db.run(sql); w._save(); } catch {} });
 
@@ -1051,6 +1055,9 @@ function initTables(w) {
   sd(sid,'auto_print','0'); sd(sid,'auto_drawer','0');
   sd(sid,'shop_logo',''); sd(sid,'shop_cover',''); sd(sid,'shop_address','');
   sd(sid,'shop_google_map',''); sd(sid,'shop_hours',''); sd(sid,'shop_announcement','');
+  // Phase 3：AI 行銷中心 Brand Context 用（新增，全部 INSERT OR IGNORE，不影響既有 key）
+  sd(sid,'shop_slogan',''); sd(sid,'shop_line_url',''); sd(sid,'shop_facebook_url','');
+  sd(sid,'shop_instagram_url',''); sd(sid,'brand_tone',''); sd(sid,'brand_cta_template','');
   sd(sid,'line_order_enabled','1'); sd(sid,'line_order_min_amount','0');
   sd(sid,'n8n_new_order_webhook',''); sd(sid,'n8n_status_change_webhook','');
   sd(sid,'line_ordering_enabled','1');
@@ -1273,6 +1280,33 @@ function initTables(w) {
     w._db.run('CREATE INDEX IF NOT EXISTS idx_paga_store ON product_analysis_group_aliases(store_id)');
     w._save();
   } catch(e) { console.warn('[DB] product_analysis_aliases index:', e.message); }
+
+  // ── Business Calendar V2：營業行事曆（特殊營業日 / 休假日期覆蓋層）──
+  // safe migration：只用 CREATE TABLE IF NOT EXISTS，絕不 DROP / 重建 / 清空既有資料
+  // 專案沒有 tenant_id 概念，沿用既有慣例，僅用 store_id 隔離
+  w._db.run(`CREATE TABLE IF NOT EXISTS store_business_calendar (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_id             TEXT NOT NULL,
+    start_date           TEXT NOT NULL,
+    end_date             TEXT NOT NULL,
+    mode                 TEXT NOT NULL DEFAULT 'closed',
+    reason               TEXT DEFAULT '',
+    show_reason          INTEGER DEFAULT 1,
+    takeout_enabled      INTEGER DEFAULT 1,
+    delivery_enabled     INTEGER DEFAULT 1,
+    takeout_start_time   TEXT DEFAULT '',
+    takeout_end_time     TEXT DEFAULT '',
+    delivery_start_time  TEXT DEFAULT '',
+    delivery_end_time    TEXT DEFAULT '',
+    created_at           TEXT DEFAULT (datetime('now','localtime')),
+    updated_at           TEXT DEFAULT (datetime('now','localtime'))
+  )`);
+  w._save();
+
+  try {
+    w._db.run('CREATE INDEX IF NOT EXISTS idx_store_business_calendar_range ON store_business_calendar(store_id, start_date, end_date)');
+    w._save();
+  } catch(e) { console.warn('[DB] store_business_calendar index:', e.message); }
 }
 
 module.exports = { getDb, initDb };

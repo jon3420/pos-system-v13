@@ -9,6 +9,7 @@ const { initDb, getDb } = require('./utils/db');
 const { getAllInventoryStatuses } = require('./utils/inventoryHelper');
 const { requireStore } = require('./middleware/storeGuard');
 const { requireFeature, invalidateFeatureCache } = require('./middleware/featureGate');
+const fetch = require('node-fetch'); // AI Marketing Center reverse proxy 用（沿用既有依賴，不新增套件）
 
 const app  = express();
 const PORT = process.env.PORT || 5000;
@@ -175,6 +176,39 @@ function autoResetTodayClosed() {
   } catch(e) { console.error('[AUTO] 重置失敗:', e.message); }
 }
 
+// ── hotfix13-BUG2：今日完售商品每日自動恢復販售（每天 00:05 台灣時間）──
+// 商品被設為「今日完售」（sale_status='sold_out_today'）且 auto_restore_next_day=1 時，
+// 隔天應自動恢復為 available，不需要店家手動操作。
+// 舊版本只有手動觸發的 POST /api/products/reset-sold-out-today，從未被排程呼叫過，
+// 導致「今日完售」商品永遠不會自動恢復——這裡補上自動排程。
+function autoResetSoldOutToday() {
+  try {
+    const db = getDb();
+    // 只在「日期真的變了」才重置，避免伺服器中途重啟時把當天才剛設定的完售商品誤重置
+    const twNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
+    const todayStr = `${twNow.getFullYear()}-${String(twNow.getMonth()+1).padStart(2,'0')}-${String(twNow.getDate()).padStart(2,'0')}`;
+    const stores = db.all('SELECT store_id FROM stores WHERE active=1');
+    let total = 0;
+    stores.forEach(({ store_id }) => {
+      const lastRow = db.get("SELECT value FROM settings WHERE store_id=? AND key='sold_out_today_reset_date'", [store_id]);
+      const lastDate = lastRow ? lastRow.value : '';
+      if (lastDate === todayStr) return; // 今天已經重置過，跳過
+      const r = db.run(
+        `UPDATE products SET sale_status='available', sold_out_until='', updated_at=datetime('now','localtime')
+         WHERE store_id=? AND sale_status='sold_out_today' AND auto_restore_next_day=1`,
+        [store_id]
+      );
+      total += (r && r.changes) || 0;
+      if (lastRow) {
+        db.run("UPDATE settings SET value=? WHERE store_id=? AND key='sold_out_today_reset_date'", [todayStr, store_id]);
+      } else {
+        db.run("INSERT INTO settings (store_id,key,value) VALUES (?,?,?)", [store_id, 'sold_out_today_reset_date', todayStr]);
+      }
+    });
+    if (total > 0) console.log('[AUTO] 今日完售商品已自動恢復販售，共', total, '項（', stores.length, '家店）');
+  } catch(e) { console.error('[AUTO] 今日完售自動恢復失敗:', e.message); }
+}
+
 // ── LINE 今日可售份數每日重置（每天 00:05 台灣時間）──────
 function autoResetLineQuota() {
   try {
@@ -191,8 +225,11 @@ function autoResetLineQuota() {
   } catch(e) { console.error('[AUTO] LINE quota 重置失敗:', e.message); }
 }
 
-// 每小時執行（臨時店休重置）
-setInterval(autoResetTodayClosed, 60 * 60 * 1000);
+// 每小時執行（臨時店休重置 + hotfix13-BUG2 今日完售恢復的保險機制，避免剛好錯過午夜排程）
+setInterval(() => {
+  autoResetTodayClosed();
+  autoResetSoldOutToday();
+}, 60 * 60 * 1000);
 
 // 每天 00:05 台灣時間重置 LINE 份數
 function scheduleDailyQuotaReset() {
@@ -203,13 +240,18 @@ function scheduleDailyQuotaReset() {
   const msUntil = nextMidnight - twNow;
   setTimeout(() => {
     autoResetLineQuota();
-    setInterval(autoResetLineQuota, 24 * 60 * 60 * 1000);
+    autoResetSoldOutToday(); // hotfix13-BUG2
+    setInterval(() => {
+      autoResetLineQuota();
+      autoResetSoldOutToday(); // hotfix13-BUG2
+    }, 24 * 60 * 60 * 1000);
   }, msUntil);
   console.log(`[AUTO] LINE 份數重置排程已設定，下次重置：${nextMidnight.toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })}`);
 }
 
 initDb().then((db) => {
   autoResetTodayClosed();
+  autoResetSoldOutToday(); // hotfix13-BUG2：啟動時先跑一次，避免伺服器重啟後錯過午夜排程
   scheduleDailyQuotaReset();
 
   // ── Super Admin 總控台（獨立，不需 storeGuard）────────
@@ -300,6 +342,8 @@ initDb().then((db) => {
   app.use('/api/orders',           requireStore, require('./routes/orders'));
   app.use('/api/customers',        requireStore, require('./routes/customers'));
   app.use('/api/settings',         requireStore, require('./routes/settings'));
+  // Business Calendar V2：營業行事曆（特殊營業日 / 休假日期），屬 LINE 營業功能
+  app.use('/api/settings/business-calendar', requireStore, requireFeature('line_order'), require('./routes/business-calendar'));
   app.use('/api/categories',       requireStore, require('./routes/categories'));
   app.use('/api/platforms',        requireStore, requireFeature('delivery'), require('./routes/platforms'));
   app.use('/api/payment-methods',  requireStore, requireFeature('payment_methods'), require('./routes/payment-methods'));
@@ -366,6 +410,84 @@ initDb().then((db) => {
   // (full route handled inside importExport.js with inline checks)
   app.use('/api', requireStore, require('./routes/importExport'));
   app.use('/api', requireStore, require('./routes/migration')); // fix18-10
+
+  // ── AI Marketing Center（新增，獨立服務，反向代理）──────────
+  // AIMC 是完全獨立的 Node.js 服務 + 獨立 PostgreSQL，這裡只做：
+  //   1. 沿用既有 requireStore 解析/驗證 store_id
+  //   2. 沿用既有 requireFeature('ai_marketing') 做功能開關（預設 false，不影響現有店家）
+  //   3. 轉送請求給 AIMC_SERVICE_URL，帶上 x-store-id + 內部信任密鑰
+  //   4.（Phase 3 新增）帶上 x-store-context：從 POS 自己的 stores/settings 表
+  //      組出品牌資料（店名/電話/地址/社群連結/語氣/CTA），base64 編碼後放進 header，
+  //      讓 AIMC 服務能把「brand.name」換成真正的品牌名稱，而不是 store_id 裸字串。
+  //      這一步失敗（例如 DB 讀取異常）不可讓整個 proxy 掛掉，退回不帶這個 header 即可，
+  //      AIMC 端本來就有 fallback。
+  // AIMC 服務離線時只影響 /api/ai-marketing/* ，不影響任何既有 POS API。
+  const AIMC_SERVICE_URL = process.env.AIMC_SERVICE_URL || 'http://localhost:4100';
+  const INTERNAL_PROXY_SECRET = process.env.INTERNAL_PROXY_SECRET || 'change-me-to-a-random-secret';
+
+  function buildStoreContextHeader(storeId) {
+    try {
+      const { getDb } = require('./utils/db');
+      const db = getDb();
+      const store = db.get('SELECT store_name, phone FROM stores WHERE store_id=?', [storeId]);
+      const rows = db.all(
+        `SELECT key, value FROM settings WHERE store_id=? AND key IN (
+           'shop_name','shop_address','shop_hours','shop_announcement',
+           'shop_slogan','shop_line_url','shop_facebook_url','shop_instagram_url',
+           'brand_tone','brand_cta_template'
+         )`,
+        [storeId]
+      );
+      const s = {};
+      rows.forEach(r => { s[r.key] = r.value; });
+
+      const ctx = {
+        store_name: s.shop_name || store?.store_name || null,
+        phone: store?.phone || null,
+        address: s.shop_address || null,
+        business_hours: s.shop_hours || null,
+        description: s.shop_announcement || null,
+        slogan: s.shop_slogan || null,
+        line_url: s.shop_line_url || null,
+        facebook_url: s.shop_facebook_url || null,
+        instagram_url: s.shop_instagram_url || null,
+        brand_tone: s.brand_tone || null,
+        cta_template: s.brand_cta_template || null,
+      };
+      return Buffer.from(JSON.stringify(ctx), 'utf8').toString('base64');
+    } catch (e) {
+      console.warn('[aimcProxy] buildStoreContextHeader 失敗，略過（不影響請求）:', e.message);
+      return null;
+    }
+  }
+
+  async function aimcProxy(req, res) {
+    try {
+      const targetPath = req.originalUrl.replace(/^\/api\/ai-marketing/, '') || '/';
+      const targetUrl  = AIMC_SERVICE_URL + targetPath;
+      const headers = {
+        'Content-Type':      'application/json',
+        'x-internal-secret': INTERNAL_PROXY_SECRET,
+        'x-store-id':        req.storeId,
+      };
+      const storeContext = buildStoreContextHeader(req.storeId);
+      if (storeContext) headers['x-store-context'] = storeContext;
+      const init = { method: req.method, headers };
+      if (!['GET', 'HEAD'].includes(req.method)) {
+        init.body = JSON.stringify(req.body || {});
+      }
+      const upstream = await fetch(targetUrl, init);
+      const text = await upstream.text();
+      let data;
+      try { data = text ? JSON.parse(text) : {}; } catch { data = { success:false, message:'AIMC 回傳格式錯誤' }; }
+      res.status(upstream.status).json(data);
+    } catch (e) {
+      console.error('[aimcProxy] 連線 AIMC 服務失敗:', e.message);
+      res.status(502).json({ success:false, error:'AIMC_UNAVAILABLE', message:'AI 行銷中心服務暫時無法連線，請稍後再試' });
+    }
+  }
+
+  app.use('/api/ai-marketing', requireStore, requireFeature('ai_marketing'), aimcProxy);
 
   // ── Super Admin 前端入口（/system-admin 獨立路由）────
   app.get('/system-admin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'system-admin.html')));

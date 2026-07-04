@@ -1,0 +1,26 @@
+<div class="section-note">Product Health Center：每張卡片代表一個商品的 AI 知識健康狀態，點卡片可在右側 Drawer 直接編輯；也可以用「🤖 AI 建立商品知識」快速產生草稿。</div>
+
+<div class="card init-card">
+  <div class="flex-between">
+    <div>
+      <h3><span class="icon">🚀</span>AI 一鍵初始化</h3>
+      <p class="muted" style="margin:2px 0 0">自動匯入所有 POS 商品、建立 Knowledge 草稿 / 基礎 Topic / 基準 Prompt。已存在的資料一律跳過，不會重複建立。</p>
+    </div>
+    <button class="btn ai" id="kInitBtn">🚀 初始化 AI 行銷中心</button>
+  </div>
+  <div id="kInitResult"></div>
+</div>
+
+<div class="stat-grid" id="kStatGrid"></div>
+
+<div class="card">
+  <div class="flex-between">
+    <h3><span class="icon">🩺</span>商品健康度</h3>
+    <div class="row-actions" style="margin-top:0">
+      <button class="btn ai sm" id="kAiNewBtn">🤖 AI 建立商品知識</button>
+      <button class="btn sm" id="kNewBtn">➕ 新增商品知識</button>
+      <button class="link-btn" id="kRefreshBtn">🔄 重新整理</button>
+    </div>
+  </div>
+  <div class="health-grid" id="kHealthGrid"><div class="empty">載入中...</div></div>
+</div>

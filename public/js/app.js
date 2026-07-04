@@ -567,6 +567,10 @@ function applyFeatureGateUI() {
   const couponNavBtn = document.getElementById('nav-btn-coupons');
   if (couponNavBtn) couponNavBtn.style.display = f.coupon ? '' : 'none';
 
+  // AI Marketing Center（Phase 1 MVP，feature gate，預設關閉）
+  const aiMarketingNavBtn = document.getElementById('nav-btn-ai-marketing');
+  if (aiMarketingNavBtn) aiMarketingNavBtn.style.display = f.ai_marketing ? '' : 'none';
+
   // 外送平台
   const platformBtn = document.querySelector('button[data-stab="platform"]');
   if (platformBtn) platformBtn.style.display = f.delivery ? '' : 'none';
@@ -776,6 +780,14 @@ function openLineOrderUrl() {
   const store = window.currentStore;
   if (!store) return;
   const url = window.location.origin + '/line-order.html?store_id=' + encodeURIComponent(store.store_id);
+  window.open(url, '_blank');
+}
+
+/** 開啟 AI Marketing Center（新分頁，V2 Workspace 架構） */
+function openAIMarketingCenter() {
+  const store = window.currentStore;
+  if (!store) return;
+  const url = window.location.origin + '/ai-marketing/?store_id=' + encodeURIComponent(store.store_id);
   window.open(url, '_blank');
 }
 
@@ -1005,6 +1017,8 @@ function showPage(name) {
   if (name === 'categories') loadCategoriesPage();
   if (name === 'inventory')  loadInventoryPage();
   if (name === 'reports')    loadReportsPage();
+  // 舊版內嵌 AI 行銷中心（#page-ai_marketing）已於 V3 移除，
+  // 入口統一改為 openAIMarketingCenter() 開啟獨立 Workspace（/ai-marketing/）。
 }
 
 /**
@@ -2901,12 +2915,21 @@ function renderOrdersTable(orders) {
         pickupTag = `<br><span style="font-size:11px;color:#06C755">⏰${pt}</span>`;
       }
     }
+    // hotfix13-BUG1：LINE 外送訂單顯示外送地址／備註／距離／外送費／導航連結
+    let addressTag = '';
+    if (o.order_mode === 'delivery' && o.delivery_address) {
+      const distTxt = Number(o.delivery_distance_km) > 0 ? ` · ${o.delivery_distance_km}km` : '';
+      const feeTxt  = Number(o.delivery_fee) > 0 ? ` · 運費NT$${o.delivery_fee}` : '';
+      const navLink = o.delivery_maps_url ? ` <a href="${escHtml(o.delivery_maps_url)}" target="_blank" rel="noopener" style="color:#60a5fa">🧭導航</a>` : '';
+      addressTag = `<br><span style="font-size:11px;color:#94a3b8">📍${escHtml(o.delivery_address)}${distTxt}${feeTxt}${navLink}</span>`
+        + (o.delivery_address_note ? `<br><span style="font-size:11px;color:#94a3b8">備註：${escHtml(o.delivery_address_note)}</span>` : '');
+    }
     return `
       <tr style="${isVoid?'opacity:0.5':''}">
         <td><span class="order-num">${escHtml(o.order_number)}</span></td>
         <td><span class="mode-badge mode-${modeKey}">${modeLabel[modeKey]||modeKey}</span></td>
         <td style="font-size:12px;color:#999">${twTime(o.created_at,'time')}</td>
-        <td style="font-size:13px">${escHtml(ident)}${pickupTag}</td>
+        <td style="font-size:13px">${escHtml(ident)}${pickupTag}${addressTag}</td>
         <td style="font-size:12px">${o.items.map(i => {
           const groupName = isGroupLabelEnabled() ? getAnalysisGroupName(i.name) : null;
           return `${i.name}×${i.qty}` + (groupName ? `<br><span style="font-size:10px;color:#818cf8;background:rgba(99,102,241,0.12);border-radius:3px;padding:0 4px">📊 ${escHtml(groupName)}</span>` : '');
@@ -2942,6 +2965,8 @@ function renderOrdersTable(orders) {
         <td>
           <span class="order-status ${sCls}">${sLabel}</span>
           ${o.order_status&&o.order_status!=='completed'?`<br><span class="ostatus-badge ${ostatusCls[o.order_status]||''}">${ostatusLabel[o.order_status]||o.order_status}</span>`:''}
+          ${o.refund_status==='pending_refund'?'<br><span class="ostatus-badge" style="background:#f97316;color:#fff">💸 待退款</span>':''}
+          ${o.refund_status==='refunded'?'<br><span class="ostatus-badge" style="background:#64748b;color:#fff">已退款</span>':''}
         </td>
         <td>
           <div class="order-actions">
@@ -2951,15 +2976,35 @@ function renderOrdersTable(orders) {
             <button class="btn-icon print-btn" onclick="reprintOrder('${o.id}')">🖨️</button>
             ${o.payment_method==='cash'?`<button class="btn-icon" style="background:var(--success);color:#fff" title="開錢櫃" onclick="openDrawerFromOrder('${o.id}')">💰</button>`:''}
             ${o.payment_method==='linepay'&&o.payment_status!=='paid'&&!isVoid?`<button class="btn-icon" style="background:#06C755;color:#fff;font-size:11px" title="確認收款" onclick="confirmLinePayPayment('${o.uuid||o.id}','${escHtml(o.order_number)}')">💚 確認收款</button>`:''}
+            ${o.refund_status==='pending_refund'?`<button class="btn-icon" style="background:#f97316;color:#fff;font-size:11px" title="標記已退款" onclick="markOrderRefunded('${o.id}','${escHtml(o.order_number)}')">💸 標記已退款</button>`:''}
           </div>
         </td>
       </tr>`;
   }).join('');
 }
 
+// hotfix13-BUG6：LinePay 已付款訂單取消後的待退款清單，標記店家已完成退款
+async function markOrderRefunded(orderId, orderNumber) {
+  if (!confirm(`確認訂單 ${orderNumber} 已完成退款給顧客？`)) return;
+  try {
+    const res  = await apiFetch(`/api/orders/${orderId}/refund-complete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    const json = await res.json();
+    if (json.success) {
+      showToast('已標記為已退款', 'success');
+      refreshCurrentOrderView();
+    } else {
+      showToast(json.message || '操作失敗', 'error');
+    }
+  } catch { showToast('網路錯誤', 'error'); }
+}
+
 function renderDeliveryTable(orders) {
   const tbody = document.getElementById('deliveryOrdersBody');
-  if (!orders || !orders.length) { tbody.innerHTML = '<tr><td colspan="12" class="table-empty">無外送訂單</td></tr>'; return; }
+  if (!orders || !orders.length) { tbody.innerHTML = '<tr><td colspan="13" class="table-empty">無外送訂單</td></tr>'; return; }
   const payLabel = { cash:'現金', card:'刷卡', linepay:'LINE', jkopay:'街口', transfer:'轉帳', platform:'平台' };
   const statusMap = { completed:['status-completed','正常'], modified:['status-modified','已修改'], void:['status-void','已作廢'] };
   // 外送狀態設定
@@ -2990,6 +3035,14 @@ function renderDeliveryTable(orders) {
         <td style="font-weight:600;color:#ce93d8">${escHtml(o.delivery_platform||'—')}</td>
         <td style="font-size:12px;color:var(--text-muted);font-family:monospace">${escHtml(o.platform_order_no||'—')}</td>
         <td style="font-size:13px">${escHtml(o.customer_name||o.pickup_name||'—')}</td>
+        <td style="font-size:12px;max-width:160px" title="${escHtml(o.delivery_address||'')}">
+          ${o.delivery_address
+            ? (o.delivery_maps_url
+                ? `<a href="${escHtml(o.delivery_maps_url)}" target="_blank" rel="noopener" style="color:#60a5fa">📍 ${escHtml(o.delivery_address)}</a>`
+                : `📍 ${escHtml(o.delivery_address)}`)
+            : '<span style="color:var(--text-muted)">—</span>'}
+          ${o.delivery_address_note ? `<div style="font-size:11px;color:var(--text-muted)">備註：${escHtml(o.delivery_address_note)}</div>` : ''}
+        </td>
         <td style="font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${itemsText}">${itemsText||'—'}</td>
         <td style="font-family:monospace;white-space:nowrap;${isCancelled?'opacity:0.5':''}">
           ${(function(){
@@ -3121,6 +3174,15 @@ async function showOrderDetail(orderId) {
         </div>
         <p style="font-size:12px;color:#999;margin-bottom:16px">${twTime(o.created_at,'datetime')}</p>
         ${isVoid ? `<div style="background:#2a0a0a;border:1px solid var(--danger);border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:13px;color:var(--danger)">🚫 作廢原因：${escHtml(o.void_reason||'—')}</div>` : ''}
+        ${o.refund_status==='pending_refund' ? `<div style="background:#3a1f0a;border:1px solid #f97316;border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:13px;color:#f97316">💸 該筆為 LINE Pay 已付款訂單，取消後請至待退款清單完成退款</div>` : ''}
+        ${o.refund_status==='refunded' ? `<div style="background:#1a1a2a;border:1px solid #64748b;border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:13px;color:#94a3b8">✅ 已完成退款${o.refunded_at?'（'+twTime(o.refunded_at,'datetime')+'）':''}</div>` : ''}
+        ${o.order_mode==='delivery' && o.delivery_address ? `
+        <div style="background:#0f1f2f;border:1px solid #334155;border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:13px">
+          <div>📍 外送地址：${escHtml(o.delivery_address)}</div>
+          ${o.delivery_address_note ? `<div style="color:#94a3b8;font-size:12px">備註：${escHtml(o.delivery_address_note)}</div>` : ''}
+          ${Number(o.delivery_distance_km)>0 ? `<div style="color:#94a3b8;font-size:12px">距離：${o.delivery_distance_km} km ｜ 外送費：NT$${o.delivery_fee||0}</div>` : ''}
+          ${o.delivery_maps_url ? `<div><a href="${escHtml(o.delivery_maps_url)}" target="_blank" rel="noopener" style="color:#60a5fa">🧭 開啟導航</a></div>` : ''}
+        </div>` : ''}
         <div class="receipt-body" style="margin:0;padding:0;border-bottom:1px dashed #333;padding-bottom:12px;margin-bottom:12px">
           ${o.items.map(i=>`
             <div class="receipt-item">
@@ -3943,6 +4005,11 @@ async function saveEditOrder() {
       if (diff?.type === 'surcharge') showToast(`已儲存，需補收 NT$${diff.amount}`, 'success');
       else if (diff?.type === 'refund') showToast(`已儲存，需退款 NT$${diff.amount}`, 'success');
       else showToast('訂單已修改', 'success');
+      // hotfix13-BUG3：LinePay 改現金付款時，後端會自動開錢櫃，這裡提示結果
+      if (json.drawerResult) {
+        showToast(json.drawerResult.success ? '💰 已自動開啟錢櫃' : ('開錢櫃失敗：' + json.drawerResult.message),
+          json.drawerResult.success ? 'success' : 'error');
+      }
       _editOriginalTotal = 0;
       closeEditOrder();
       refreshCurrentOrderView(); // fix18-07：維持目前分頁
@@ -5120,6 +5187,9 @@ async function loadLineBizStatus() {
     const cdText = document.getElementById('set-line_closed_dates_text');
     if (cdText) cdText.value = cdates.join('\n');
   } catch {}
+  // 📅 營業行事曆 Business Calendar V2：今日狀態 + 列表
+  refreshTodayBusinessStatus();
+  loadBusinessCalendar();
 }
 
 async function saveAdvancedLineSettings() {
@@ -5152,6 +5222,247 @@ async function setLineOrdering(enable) {
     showToast(enable ? '✅ LINE 點餐已開啟' : '🔴 LINE 點餐已關閉', 'success');
     loadLineBizStatus();
   } catch(e) { showToast('操作失敗', 'error'); }
+}
+
+// ═══════════════════════════════════════════════════════════
+// 📅 營業行事曆 Business Calendar V2（特殊營業日 / 休假日期覆蓋層）
+// ═══════════════════════════════════════════════════════════
+let _businessCalendarCache = [];
+
+// ── 今日狀態：🟢 正常營業 / 🟡 特殊營業 / 🔴 特殊休息 / 🔴 臨時休息（今日臨時休息優先）──
+async function refreshTodayBusinessStatus() {
+  const el = document.getElementById('businessCalendarTodayStatus');
+  if (!el) return;
+  el.textContent = '載入中…';
+  try {
+    const [settingsRes, todayRes] = await Promise.all([
+      apiFetch('/api/settings').then(r => r.json()),
+      apiFetch('/api/settings/business-calendar/today').then(r => r.json()),
+    ]);
+    const s = settingsRes.data || {};
+    const todayStr = new Date().toISOString().slice(0,10);
+    const isTodayTempClosed = s.line_today_closed === '1' && s.line_today_closed_date === todayStr;
+    const cal = todayRes.data || { matched: false };
+
+    if (isTodayTempClosed) {
+      // 今日臨時休息優先於營業行事曆
+      el.innerHTML = '<span style="color:#e53935">🔴 今日臨時休息</span>';
+      return;
+    }
+    if (!cal.matched) {
+      el.innerHTML = '<span style="color:#06C755">🟢 今日正常營業</span>';
+      return;
+    }
+    if (cal.mode === 'closed') {
+      const reasonTxt = (cal.show_reason && cal.reason) ? `：${escapeHtml(cal.reason)}` : '';
+      el.innerHTML = `<span style="color:#e53935">🔴 今日特殊休息${reasonTxt}</span>`;
+    } else if (cal.mode === 'custom_hours') {
+      const parts = [];
+      if (cal.takeout_enabled && cal.takeout_start_time)  parts.push(`外帶 ${cal.takeout_start_time}~${cal.takeout_end_time}`);
+      if (cal.delivery_enabled && cal.delivery_start_time) parts.push(`外送 ${cal.delivery_start_time}~${cal.delivery_end_time}`);
+      el.innerHTML = `<span style="color:#f9a825">🟡 今日特殊營業${parts.length ? '：' + parts.join('　') : ''}</span>`;
+    } else if (cal.mode === 'open_all_day') {
+      el.innerHTML = '<span style="color:#06C755">🟢 今日全天營業</span>';
+    } else {
+      el.innerHTML = '<span style="color:#06C755">🟢 今日正常營業</span>';
+    }
+  } catch(e) {
+    el.innerHTML = '<span style="color:#e53935">狀態載入失敗</span>';
+  }
+}
+
+// ── 小工具：YYYY-MM-DD → YYYY/MM/DD ──────────────────────
+function _bcFmtDate(d) { return (d || '').replaceAll('-', '/'); }
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+
+// ── 列表載入 ──────────────────────────────────────────────
+async function loadBusinessCalendar() {
+  const listEl = document.getElementById('businessCalendarList');
+  if (!listEl) return;
+  listEl.textContent = '載入中…';
+  try {
+    const res  = await apiFetch('/api/settings/business-calendar');
+    const json = await res.json();
+    _businessCalendarCache = json.data || [];
+    renderBusinessCalendar(_businessCalendarCache);
+  } catch(e) {
+    listEl.innerHTML = '<div style="color:#e53935;font-size:13px">載入失敗</div>';
+  }
+}
+
+// ── 列表渲染 ──────────────────────────────────────────────
+function renderBusinessCalendar(list) {
+  const listEl = document.getElementById('businessCalendarList');
+  if (!listEl) return;
+  if (!list || !list.length) {
+    listEl.innerHTML = '<div style="color:var(--text-muted);font-size:13px">尚未設定任何特殊營業日</div>';
+    return;
+  }
+  listEl.innerHTML = list.map(item => {
+    const icon = item.mode === 'closed' ? '🔴' : (item.mode === 'custom_hours' ? '🟡' : '🟢');
+    const dateRange = item.start_date === item.end_date
+      ? _bcFmtDate(item.start_date)
+      : `${_bcFmtDate(item.start_date)}～${_bcFmtDate(item.end_date)}`;
+
+    let modeDetail = '';
+    if (item.mode === 'closed') {
+      modeDetail = '全天休息';
+    } else if (item.mode === 'open_all_day') {
+      modeDetail = '全天營業';
+    } else {
+      const lines = [];
+      lines.push(item.takeout_enabled
+        ? `外帶 ${escapeHtml(item.takeout_start_time)}～${escapeHtml(item.takeout_end_time)}`
+        : '外帶：不開放');
+      lines.push(item.delivery_enabled
+        ? `外送 ${escapeHtml(item.delivery_start_time)}～${escapeHtml(item.delivery_end_time)}`
+        : '外送：不開放');
+      modeDetail = `特殊營業<br>${lines.join('<br>')}`;
+    }
+
+    const reasonLine = item.reason
+      ? `<div style="font-size:13px;color:var(--text-secondary);margin:4px 0">${escapeHtml(item.reason)}</div>`
+      : '';
+    const showReasonLine = item.reason
+      ? `<div style="font-size:12px;color:var(--text-muted)">顯示給客人：${item.show_reason ? '是' : '否'}</div>`
+      : '';
+
+    return `
+      <div style="background:var(--bg-base,#0f172a);border:1px solid var(--border,#334155);border-radius:8px;padding:12px 14px;display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+        <div style="flex:1;min-width:200px">
+          <div style="font-size:14px;font-weight:700">${icon} ${dateRange}</div>
+          ${reasonLine}
+          <div style="font-size:13px;color:var(--text-secondary);margin-top:4px">${modeDetail}</div>
+          ${showReasonLine}
+        </div>
+        <div style="display:flex;gap:6px;flex-shrink:0">
+          <button class="btn-secondary" style="padding:6px 12px;font-size:12px" onclick="editBusinessCalendar(${item.id})">編輯</button>
+          <button class="btn-secondary" style="padding:6px 12px;font-size:12px;color:#e53935;border-color:#e53935" onclick="deleteBusinessCalendar(${item.id})">刪除</button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+// ── 新增/編輯視窗：開啟 ───────────────────────────────────
+function openBusinessCalendarForm(id) {
+  const modal = document.getElementById('businessCalendarModal');
+  const title = document.getElementById('businessCalendarModalTitle');
+  const errEl = document.getElementById('bc-form-error');
+  if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+
+  const item = id ? _businessCalendarCache.find(x => x.id === id) : null;
+
+  document.getElementById('bc-id').value = item ? item.id : '';
+  document.getElementById('bc-start_date').value = item ? item.start_date : '';
+  document.getElementById('bc-end_date').value   = item ? item.end_date   : '';
+  document.querySelectorAll('input[name="bc-mode"]').forEach(r => { r.checked = (r.value === (item ? item.mode : 'closed')); });
+  document.getElementById('bc-reason').value = item ? item.reason : '';
+  document.getElementById('bc-show_reason').checked = item ? !!item.show_reason : true;
+  document.getElementById('bc-takeout_enabled').checked  = item ? !!item.takeout_enabled  : true;
+  document.getElementById('bc-delivery_enabled').checked = item ? !!item.delivery_enabled : true;
+  document.getElementById('bc-takeout_start_time').value  = item ? item.takeout_start_time  : '';
+  document.getElementById('bc-takeout_end_time').value    = item ? item.takeout_end_time    : '';
+  document.getElementById('bc-delivery_start_time').value = item ? item.delivery_start_time : '';
+  document.getElementById('bc-delivery_end_time').value   = item ? item.delivery_end_time   : '';
+
+  if (title) title.textContent = item ? '編輯行事曆' : '＋新增行事曆';
+  onBusinessCalendarModeChange();
+  if (modal) modal.classList.add('open');
+}
+
+function editBusinessCalendar(id) { openBusinessCalendarForm(id); }
+
+function closeBusinessCalendarForm() {
+  const modal = document.getElementById('businessCalendarModal');
+  if (modal) modal.classList.remove('open');
+}
+
+// ── 模式切換：closed 隱藏時間欄位／custom_hours 顯示／open_all_day 停用 ──
+function onBusinessCalendarModeChange() {
+  const mode = document.querySelector('input[name="bc-mode"]:checked')?.value || 'closed';
+  const hoursSection = document.getElementById('bc-hours-section');
+  const takeoutRow = document.getElementById('bc-takeout-time-row');
+  const deliveryRow = document.getElementById('bc-delivery-time-row');
+  const takeoutEnabled  = document.getElementById('bc-takeout_enabled')?.checked;
+  const deliveryEnabled = document.getElementById('bc-delivery_enabled')?.checked;
+
+  if (mode === 'closed') {
+    if (hoursSection) hoursSection.style.display = 'none';
+    return;
+  }
+  // custom_hours / open_all_day 都需要顯示外帶/外送開放開關
+  if (hoursSection) hoursSection.style.display = 'block';
+
+  const isCustom = mode === 'custom_hours';
+  if (takeoutRow) takeoutRow.style.display = (isCustom && takeoutEnabled) ? 'flex' : 'none';
+  if (deliveryRow) deliveryRow.style.display = (isCustom && deliveryEnabled) ? 'flex' : 'none';
+  // open_all_day：時間輸入停用（不需要輸入，全天視為開放）
+  ['bc-takeout_start_time','bc-takeout_end_time','bc-delivery_start_time','bc-delivery_end_time'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !isCustom;
+  });
+}
+
+// ── 儲存（新增/編輯共用）──────────────────────────────────
+async function saveBusinessCalendar() {
+  const errEl = document.getElementById('bc-form-error');
+  const showErr = (msg) => { if (errEl) { errEl.textContent = msg; errEl.style.display = 'block'; } };
+  if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+
+  const id = document.getElementById('bc-id').value;
+  const mode = document.querySelector('input[name="bc-mode"]:checked')?.value || 'closed';
+  const startDate = document.getElementById('bc-start_date').value;
+  const endDate   = document.getElementById('bc-end_date').value;
+
+  if (!startDate || !endDate) return showErr('請填寫開始日期與結束日期');
+  if (endDate < startDate) return showErr('結束日期不可早於開始日期');
+
+  const payload = {
+    start_date: startDate,
+    end_date: endDate,
+    mode,
+    reason: document.getElementById('bc-reason').value.trim(),
+    show_reason: document.getElementById('bc-show_reason').checked,
+    takeout_enabled:  document.getElementById('bc-takeout_enabled').checked,
+    delivery_enabled: document.getElementById('bc-delivery_enabled').checked,
+    takeout_start_time: document.getElementById('bc-takeout_start_time').value,
+    takeout_end_time:   document.getElementById('bc-takeout_end_time').value,
+    delivery_start_time: document.getElementById('bc-delivery_start_time').value,
+    delivery_end_time:   document.getElementById('bc-delivery_end_time').value,
+  };
+
+  try {
+    const url = id ? `/api/settings/business-calendar/${id}` : '/api/settings/business-calendar';
+    const res = await apiFetch(url, {
+      method: id ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const json = await res.json();
+    if (!json.success) return showErr(json.message || '儲存失敗');
+
+    showToast(id ? '✅ 行事曆已更新' : '✅ 行事曆已新增', 'success');
+    closeBusinessCalendarForm();
+    loadBusinessCalendar();
+    refreshTodayBusinessStatus();
+  } catch(e) {
+    showErr('儲存失敗：' + e.message);
+  }
+}
+
+// ── 刪除 ──────────────────────────────────────────────────
+async function deleteBusinessCalendar(id) {
+  if (!confirm('確定要刪除這筆行事曆設定嗎？')) return;
+  try {
+    const res  = await apiFetch(`/api/settings/business-calendar/${id}`, { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) return showToast(json.message || '刪除失敗', 'error');
+    showToast('🗑️ 已刪除', 'success');
+    loadBusinessCalendar();
+    refreshTodayBusinessStatus();
+  } catch(e) { showToast('刪除失敗', 'error'); }
 }
 
 async function setTodayClosed(closed) {
