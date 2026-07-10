@@ -43,6 +43,7 @@ function enrichProduct(p) {
     show_on_line: showOnLine, line_name: p.line_name || '',
     line_price: linePrice, line_description: p.line_description || '',
     line_image_url: p.line_image_url || '', line_category: p.line_category || '',
+    line_spec: p.line_spec || '', // fix18-10-hotfix19：LINE 通路獨立規格
     line_category_id: Number(p.line_category_id) || 0,
     effective_line_cat_id: Number(p.line_category_id) || Number(p.category_id) || 0,
     product_barcode: p.product_barcode || '',
@@ -74,6 +75,17 @@ function enrichProduct(p) {
     line_preorder_remaining: Number(p.line_preorder_enabled)
       ? Math.max(0, Number(p.line_preorder_daily||0) - Number(p.line_preorder_sold||0))
       : null,
+    // fix18-10-hotfix18：LINE 冷藏宅配中心 V1
+    shipping_enabled:          Number(p.shipping_enabled)          || 0,
+    shipping_name:             p.shipping_name || '',
+    shipping_spec:             p.shipping_spec || '',
+    shipping_sort_order:       Number(p.shipping_sort_order)       || 0,
+    shipping_upsell:           Number(p.shipping_upsell)           || 0,
+    shipping_share_line_stock: p.shipping_share_line_stock != null ? Number(p.shipping_share_line_stock) : 1,
+    // fix18-10-hotfix19：宅配通路獨立售價/描述/圖片（不與 LINE 通路互相影響）
+    shipping_price:            Number(p.shipping_price) || 0,
+    shipping_description:      p.shipping_description || '',
+    shipping_image_url:        p.shipping_image_url || '',
   };
 }
 
@@ -298,6 +310,7 @@ router.patch('/:id/line-settings', requireFeature('line_order'), (req, res) => {
       show_on_line, line_name, line_price, line_description,
       line_image_url, line_category, line_category_id, line_hot, line_promo,
       line_sold_out, sale_status, sold_out_until, auto_restore_next_day, product_barcode,
+      line_spec, // fix18-10-hotfix19：LINE 通路獨立規格
       // LINE 接單與可售管理中心 v1 新增欄位
       line_quota_enabled, line_quota_daily, line_quota_sold,
       line_quota_low_threshold, line_quota_high_threshold,
@@ -310,6 +323,7 @@ router.patch('/:id/line-settings', requireFeature('line_order'), (req, res) => {
     add('line_price',            line_price             != null ? Number(line_price)            : undefined);
     add('line_description',      line_description);
     add('line_image_url',        line_image_url);
+    add('line_spec',             line_spec);
     add('line_hot',              line_hot               != null ? Number(line_hot)              : undefined);
     add('line_promo',            line_promo             != null ? Number(line_promo)            : undefined);
     add('line_sold_out',         line_sold_out          != null ? Number(line_sold_out)         : undefined);
@@ -379,6 +393,38 @@ router.patch('/:id/line-status', requireFeature('line_order'), (req, res) => {
     if (!sets.length) return res.status(400).json({ success: false, message: '沒有要更新的欄位' });
     sets.push("updated_at=datetime('now','localtime')");
     vals.push(id); vals.push(storeId);
+    db.run(`UPDATE products SET ${sets.join(',')} WHERE id=? AND store_id=?`, vals);
+    res.json({ success: true, data: enrichProduct(db.get('SELECT * FROM products WHERE id=?', [id])) });
+  } catch(e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+/* PATCH /api/products/:id/shipping-settings — fix18-10-hotfix18：LINE 冷藏宅配商品設定 */
+router.patch('/:id/shipping-settings', requireFeature('line_order'), (req, res) => {
+  try {
+    const db = getDb();
+    const storeId = req.storeId;
+    const id = req.params.id;
+    const ex = db.get('SELECT id FROM products WHERE id=? AND store_id=?', [id, storeId]);
+    if (!ex) return res.status(404).json({ success: false, message: '商品不存在' });
+    const {
+      shipping_enabled, shipping_name, shipping_spec,
+      shipping_sort_order, shipping_upsell, shipping_share_line_stock,
+      shipping_price, shipping_description, shipping_image_url, // fix18-10-hotfix19
+    } = req.body;
+    const sets = []; const vals = [];
+    const add = (col, val) => { if (val !== undefined) { sets.push(`${col}=?`); vals.push(val); } };
+    add('shipping_enabled',           shipping_enabled           != null ? Number(shipping_enabled)           : undefined);
+    add('shipping_name',              shipping_name);
+    add('shipping_spec',              shipping_spec);
+    add('shipping_sort_order',        shipping_sort_order        != null ? Number(shipping_sort_order)        : undefined);
+    add('shipping_upsell',            shipping_upsell            != null ? Number(shipping_upsell)            : undefined);
+    add('shipping_share_line_stock',  shipping_share_line_stock  != null ? Number(shipping_share_line_stock)  : undefined);
+    add('shipping_price',             shipping_price             != null ? Number(shipping_price)             : undefined);
+    add('shipping_description',       shipping_description);
+    add('shipping_image_url',         shipping_image_url);
+    if (!sets.length) return res.status(400).json({ success: false, message: '沒有要更新的欄位' });
+    sets.push("updated_at=datetime('now','localtime')");
+    vals.push(id, storeId);
     db.run(`UPDATE products SET ${sets.join(',')} WHERE id=? AND store_id=?`, vals);
     res.json({ success: true, data: enrichProduct(db.get('SELECT * FROM products WHERE id=?', [id])) });
   } catch(e) { res.status(500).json({ success: false, message: e.message }); }

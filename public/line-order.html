@@ -22,6 +22,23 @@ img{max-width:100%;display:block}
 .shop-info h2{font-size:17px;font-weight:700}
 .shop-info p{font-size:12px;color:var(--sub);margin-top:3px}
 .announce{background:#fff9e6;border-left:3px solid #f5a623;padding:8px 12px;font-size:13px;color:#7a5c00;border-radius:4px;margin:10px 12px 0;white-space:pre-line;display:none}
+/* Hotfix17：商家公告中心（modal / banner 兩種顯示方式）*/
+.announce-overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:90;display:none;align-items:center;justify-content:center}
+.announce-overlay.show{display:flex}
+.announce-modal{background:#fff;border-radius:16px;width:80%;max-width:360px;max-height:80vh;overflow-y:auto;position:relative;box-shadow:0 8px 30px rgba(0,0,0,.25)}
+.announce-modal-close{position:absolute;top:8px;right:8px;width:30px;height:30px;border-radius:50%;background:rgba(0,0,0,.06);color:#666;font-size:16px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:1}
+.announce-modal-body{padding:24px 20px 20px;text-align:center}
+.announce-modal-body img{border-radius:10px;margin-bottom:12px;max-height:160px;object-fit:cover;width:100%}
+.announce-modal-icon{font-size:34px;margin-bottom:8px}
+.announce-modal-title{font-size:17px;font-weight:700;margin-bottom:10px;color:#222}
+.announce-modal-msg{font-size:14px;color:#555;line-height:1.7;white-space:pre-line;margin-bottom:18px;text-align:left}
+.announce-modal-btn{width:100%;padding:12px;background:var(--g);color:#fff;border-radius:10px;font-size:15px;font-weight:700;cursor:pointer}
+.announce-banner{margin:10px 12px 0;border-radius:12px;overflow:hidden;position:relative;display:none}
+.announce-banner-close{position:absolute;top:8px;right:10px;width:24px;height:24px;border-radius:50%;background:rgba(0,0,0,.08);color:#666;font-size:13px;display:flex;align-items:center;justify-content:center;cursor:pointer}
+.announce-banner-body{padding:14px 16px}
+.announce-banner-title{font-size:15px;font-weight:700;margin-bottom:4px}
+.announce-banner-msg{font-size:13px;line-height:1.6;white-space:pre-line;margin-top:4px}
+.announce-banner-btn{margin-top:10px;width:100%;padding:9px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;border:none}
 /* 模式標籤列 */
 .mode-tabs{display:flex;gap:8px;padding:12px 12px 0;margin-bottom:4px}
 .mode-tab{flex:1;padding:10px 4px;border-radius:var(--r);border:2px solid var(--bd);background:#fff;font-size:14px;font-weight:600;color:var(--sub);text-align:center;cursor:pointer;transition:.15s;position:relative}
@@ -44,7 +61,11 @@ img{max-width:100%;display:block}
 .badges{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:5px}
 .badge{font-size:10px;font-weight:700;padding:2px 6px;border-radius:10px;color:#fff}
 .badge-hot{background:#e53935}.badge-promo{background:#9c27b0}.badge-sold{background:#9e9e9e}.badge-cutoff{background:#757575}.badge-amber{background:#e65100}
+/* Hotfix16 BUG-006：商品卡狀態顏色，避免全部灰色造成誤解 */
+.badge-holiday{background:#c62828}.badge-soldout-today{background:#c62828}.badge-green{background:#2e7d32}.badge-orange{background:#e65100}.badge-blue{background:#1565c0}
+.sold-mask.mask-green span:first-child{color:#2e7d32}.sold-mask.mask-orange span:first-child{color:#e65100}.sold-mask.mask-red span:first-child{color:#c62828}
 .prod-name{font-size:14px;font-weight:700;line-height:1.3;margin-bottom:3px}
+.prod-spec{font-size:11px;color:var(--g);font-weight:600;margin-bottom:2px} /* fix18-10-hotfix19 */
 .prod-desc{font-size:11px;color:var(--sub);margin-bottom:6px;line-height:1.4;flex:1}
 .prod-price{font-size:16px;font-weight:700;color:var(--g)}
 .prod-footer{display:flex;align-items:center;justify-content:space-between;margin-top:8px}
@@ -57,6 +78,9 @@ img{max-width:100%;display:block}
 .qty-ctrl .qnum{font-size:14px;font-weight:700;min-width:20px;text-align:center}
 .sold-mask{position:absolute;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;border-radius:var(--r);z-index:2}
 .sold-mask span{background:#fff;color:#555;font-size:12px;font-weight:700;padding:4px 12px;border-radius:20px}
+/* fix18-10-hotfix19：商品卡狀態徽章固定兩排，避免三排堆疊跑版 */
+.badge-row-main{display:flex;gap:6px;flex-wrap:wrap;align-items:center;justify-content:center;max-width:100%}
+.badge-row-action{display:flex;justify-content:center;width:100%}
 .prod-stock-badge{font-size:10px;font-weight:600;padding:2px 7px;border-radius:10px;display:inline-block;margin-bottom:4px}
 .stock-zero{background:#fce8e8;color:#c62828}.stock-low{background:#fff3e0;color:#e65100}.stock-ok{background:#e8f5e9;color:#2e7d32}
 .cart-bar{position:fixed;bottom:0;left:0;right:0;background:var(--g);color:#fff;padding:12px 16px;display:flex;align-items:center;gap:12px;z-index:100;cursor:pointer;box-shadow:0 -2px 12px rgba(0,0,0,.18);-webkit-tap-highlight-color:transparent}
@@ -173,6 +197,10 @@ img{max-width:100%;display:block}
     <div class="shop-info"><h2 id="shopName2"></h2><p id="shopAddr"></p></div>
   </div>
   <div class="announce" id="announce"></div>
+  <!-- Hotfix17：商家公告中心（modal / banner，取代自動休假公告時的舊 Banner 顯示）-->
+  <div class="announce-banner" id="announceBanner"></div>
+  <!-- Hotfix16 BUG-004：休假公告改為頁面內固定 Banner，不使用 Modal / 遮罩，不阻擋瀏覽/加入購物車 -->
+  <div id="holidayBanner" style="display:none;margin:10px 12px 0;border-radius:10px;overflow:hidden;border:1px solid #ffccbc;background:#fff3e0"></div>
   <div class="announce" id="bizCalBanner" style="display:none"></div>
   <div id="lastOrderCard" style="display:none"></div>
   <!-- 外帶/外送模式分頁 -->
@@ -193,12 +221,11 @@ img{max-width:100%;display:block}
 
 <div class="overlay" id="overlay" onclick="closeTopSheet()"></div>
 
-<!-- 🌙 休假公告 Sheet（V3：不整頁擋住，顧客關閉後仍可瀏覽菜單與購物車）-->
-<div class="sheet" id="holidaySheet">
-  <div class="sheet-hd"><h3 id="holidaySheetTitle">🌙 休假公告</h3><button class="close-btn" onclick="closeHolidayAnnouncement()">✕</button></div>
-  <div id="holidaySheetBody" style="padding:16px;font-size:14px;line-height:1.8;color:#444"></div>
-  <div style="padding:0 16px 20px">
-    <button class="btn-preorder" style="background:#06C755;color:#fff;border-color:#06C755;padding:12px" onclick="closeHolidayAnnouncement()">我知道了</button>
+<!-- Hotfix17：商家公告 Modal（獨立於購物車/查詢等 sheet 系統，僅供 line_announcement_display_mode=modal 使用）-->
+<div class="announce-overlay" id="announceOverlay" onclick="onAnnounceOverlayClick(event)">
+  <div class="announce-modal" id="announceModalBox">
+    <div class="announce-modal-close" id="announceModalCloseBtn" onclick="dismissAnnouncement()">✕</div>
+    <div class="announce-modal-body" id="announceModalBody"></div>
   </div>
 </div>
 
@@ -369,6 +396,14 @@ function fmtMD(s){ if(!s) return ''; const p=s.split('-'); return `${Number(p[1]
 function findBizCalEntry(ds){
   return bizCalendarList.find(e=>e.start_date<=ds && ds<=e.end_date) || null;
 }
+// 判斷 ds 是否為「恢復營業日」：某段 Business Calendar 店休（mode=closed）結束隔天，且 ds 本身未被其他行事曆命中
+function isResumeDate(ds){
+  return bizCalendarList.some(e=>{
+    if(e.mode!=='closed') return false;
+    const d=parseLocalDate(e.end_date); d.setDate(d.getDate()+1);
+    return fmtD(d)===ds;
+  });
+}
 // 產生日期選單的「狀態後綴」文字（含顏色 emoji），並回傳是否應停用該日期
 // isWeeklyClosed：命中 line_closed_weekdays（固定公休）；isSpecificClosed：命中舊版 line_closed_dates（指定店休日）
 function bizCalOptionSuffix(ds, isWeeklyClosed, isSpecificClosed, notBizDayWeekly){
@@ -376,15 +411,16 @@ function bizCalOptionSuffix(ds, isWeeklyClosed, isSpecificClosed, notBizDayWeekl
   if(e){
     if(e.mode==='closed'){
       const reasonTxt=(e.show_reason && e.reason) ? `（${e.reason}）` : '';
-      return { suffix:` 🔴 店休${reasonTxt}`, disabled:true };
+      return { suffix:` 🔴休假${reasonTxt}`, disabled:true };
     }
-    if(e.mode==='custom_hours') return { suffix:' 🟡 特殊營業', disabled:false };
-    if(e.mode==='open_all_day') return { suffix:' 🟢 全天營業', disabled:false };
+    if(e.mode==='custom_hours') return { suffix:' 🟡特殊營業', disabled:false };
+    if(e.mode==='open_all_day') return { suffix:' 🟢全天營業', disabled:false };
   }
   // 沒有命中行事曆 → 完全走舊的每週公休/指定店休日/非營業日判斷
-  if(isWeeklyClosed)   return { suffix:' 🔴 固定公休', disabled:true };
-  if(isSpecificClosed) return { suffix:' 🔴 店休',     disabled:true };
+  if(isWeeklyClosed)   return { suffix:' 🔴固定公休', disabled:true };
+  if(isSpecificClosed) return { suffix:' 🔴店休',     disabled:true };
   if(notBizDayWeekly)  return { suffix:' — 非營業',    disabled:true };
+  if(isResumeDate(ds)) return { suffix:' 🟢恢復營業', disabled:false };
   return { suffix:'', disabled:false };
 }
 // 掃描一段可見日期範圍，若有連續休假（mode=closed）區間與此範圍重疊，回傳提醒文字
@@ -448,31 +484,20 @@ async function init(){
         showClosed('🔴 LINE 點餐暫停','目前 LINE 點餐暫停營業，請稍後再試。');return;
       }
 
-      // 今日休息判斷（優先序：今日臨時休息 ＞ 營業行事曆 ＞ 每週公休/指定店休日，皆由後端算好）
-      // Hotfix15 V3：不再整頁擋住（不 return、不覆蓋 body）。改為「休假公告 Modal」，
-      // 顧客關閉後仍可正常瀏覽菜單、加入購物車；休假日期本身不可送單，由 /validate-cart 與送單 API 後端把關。
+      // Hotfix16 BUG-003/004：今日休假狀態單一資料來源 = shopData.holiday_banner
+      // （後端已依優先序 Business Calendar ＞ 今日臨時休息 ＞ 固定公休算好，前台不再重複判斷）
+      // 不整頁擋住、不用 Modal / 遮罩 → 改為頁面內固定 Banner，客人可直接看商品/加購物車/選日期。
       const now=twNow(), todayStr=fmtD(now);
-      const isTodayClosed=d.line_today_closed==='1'&&d.line_today_closed_date===todayStr;
-      const closedInfo=d.today_closed_info||{};
       const calToday=d.business_calendar_today||{matched:false};
+      const holidayBanner=d.holiday_banner||{active:false};
 
-      if(isTodayClosed){
-        // 今日臨時休息：一律優先蓋過營業行事曆
-        todayClosed=true;
-        openHolidayAnnouncement({type:'today_closed'});
-      } else if(closedInfo.closed){
-        todayClosed=true;
-        if(closedInfo.calendar && closedInfo.calendar.mode==='closed'){
-          // 營業行事曆：特殊休假日（單日或區間），顯示原因（依 show_reason）與恢復日期
-          openHolidayAnnouncement({type:'calendar_closed', cal:closedInfo.calendar});
-        } else if(closedInfo.isWeekly){
-          // 固定公休（每週幾）
-          openHolidayAnnouncement({type:'weekly_closed', wdName:WD_NAMES[now.getDay()]});
-        } else {
-          // 舊版指定店休日（line_closed_dates，無原因欄位）
-          openHolidayAnnouncement({type:'specific_closed'});
-        }
-      }
+      todayClosed = !!holidayBanner.active;
+      // Hotfix17：商家公告中心（manual > auto_holiday > none）。
+      // 若自動休假公告已產生（涵蓋 Business Calendar 休假訊息），舊版 holidayBanner 不再重複顯示。
+      const announcement=d.announcement||{enabled:false,active:false,source:'none'};
+      renderAnnouncement(announcement);
+      if(shouldSkipHolidayBannerForAnnouncement(announcement)) hideHolidayBanner();
+      else renderHolidayBanner(holidayBanner);
 
       // 營業行事曆：特殊營業／全天營業（不阻擋下單，僅顯示提示 banner）
       const bizBanner=document.getElementById('bizCalBanner');
@@ -506,6 +531,10 @@ async function init(){
       if(takeoutEnabled && !takeoutCutoffPassed) currentMode='takeout';
       else if(deliveryEnabled && !deliveryCutoffPassed) currentMode='delivery';
       else currentMode=takeoutEnabled?'takeout':'delivery';
+      // hotfix22-B：currentMode 決定後立即同步 oType（購物車表單的 select），
+      // 避免任何尚未更新的程式碼路徑誤讀到 <select> 的 HTML 預設值。
+      const _oTypeInit=document.getElementById('oType');
+      if(_oTypeInit) _oTypeInit.value=currentMode;
 
       buildModeTabsUI();
       buildPaymentButtons(d);
@@ -527,54 +556,207 @@ async function init(){
 }
 
 // ── 店休頁面（僅用於「總開關關閉」「兩模式皆關閉」等真正需要整頁擋住的情境；
-//    Hotfix15 V3 起，休假類情境改用 openHolidayAnnouncement，不再整頁擋住）──
+//    Hotfix16 起，休假類情境一律改用頁面內 Banner（renderHolidayBanner），不再整頁擋住）──
 function showClosed(title,msg){
   document.getElementById('loading').style.display='none';
   const el=document.getElementById('content');el.style.display='block';
   el.innerHTML=`<div class="closed-screen"><div class="ei">${title.split(' ')[0]}</div><h2>${title.split(' ').slice(1).join(' ')}</h2><p>${msg.replace(/\n/g,'<br>')}</p></div>`;
 }
 
-// ── 🌙 休假公告 Modal（Hotfix15 V3）──────────────────────
-// 不整頁擋住：載入菜單 → 顯示公告 → 關閉後可正常瀏覽/加購物車；休假日期本身不可送單（後端二次驗證把關）
-function openHolidayAnnouncement(info){
-  const titleEl=document.getElementById('holidaySheetTitle');
-  const bodyEl=document.getElementById('holidaySheetBody');
-  if(!titleEl||!bodyEl||!info) return;
-  let title='🌙 休假公告', bodyHtml='';
-  if(info.type==='calendar_closed'){
-    const cal=info.cal||{};
-    title='🌙 今日休息';
-    const rangeTxt = cal.start_date===cal.end_date
-      ? fmtMD(cal.start_date)
-      : `${fmtMD(cal.start_date)}～${fmtMD(cal.end_date)}`;
-    const lines=[];
-    if(cal.show_reason && cal.reason) lines.push(`原因：${esc(cal.reason)}`);
-    lines.push(`休假期間：${rangeTxt}`);
-    lines.push(`預計 ${fmtMD(cal.resume_date)} 恢復營業`);
-    bodyHtml=lines.join('<br>');
-  } else if(info.type==='weekly_closed'){
-    title='🌙 今日固定公休';
-    bodyHtml=`每週${esc(info.wdName||'')}固定店休<br>您仍可預訂其他營業日期`;
-  } else if(info.type==='today_closed'){
-    title='🌙 今日臨時休息';
-    bodyHtml='您仍可預訂其他營業日期';
-  } else if(info.type==='specific_closed'){
-    title='🌙 今日店休';
-    bodyHtml='您仍可預訂其他營業日期';
+// ── 🏖️ 休假公告 Banner（Hotfix16）──────────────────────
+// Hotfix16 BUG-004：不整頁擋住、不用 Modal / 遮罩 → 改為頁面內固定公告 Banner。
+// 客人可直接看商品、加入購物車、選日期，完全不受阻擋；休假日期本身不可送單，由後端二次驗證把關。
+// 資料來源單一：shopData.holiday_banner（/api/line-shop 已依 Business Calendar > 今日臨時休息 > 固定公休 算好）
+function renderHolidayBanner(banner){
+  const el=document.getElementById('holidayBanner');
+  if(!el) return;
+  if(!banner || !banner.active){ hideHolidayBanner(); return; }
+
+  let bodyHtml='';
+  if(banner.type==='calendar'){
+    const rangeTxt = banner.start_date===banner.end_date
+      ? fmtMD(banner.start_date)
+      : `${fmtMD(banner.start_date)}～${fmtMD(banner.end_date)}`;
+    const reasonLine = (banner.show_reason && banner.reason) ? `<div style="margin-top:2px">${esc(banner.reason)}</div>` : '';
+    const resumeLine = banner.resume_within_limit
+      ? `<div style="margin-top:10px;color:#2e7d32;font-weight:700">🟢 ${fmtMD(banner.resume_date)} 恢復營業</div>`
+      : `<div style="margin-top:10px;color:#c62828;font-weight:700">恢復營業日超出目前可預訂範圍</div>`;
+    const actionBtn = banner.resume_within_limit
+      ? `<button type="button" style="margin-top:10px;width:100%;padding:10px;background:#e65100;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer" onclick="selectResumeDate('${banner.resume_date}')">立即預訂</button>`
+      : '';
+    bodyHtml = `
+      <div style="padding:12px 14px">
+        <div style="font-size:15px;font-weight:700;color:#7a3b00">🏖️ 目前休假中</div>
+        <div style="margin-top:4px;color:#7a5c00">${esc(rangeTxt)}</div>
+        ${reasonLine}
+        <div style="margin-top:8px;font-size:13px;color:#2e7d32">✅ 可以預訂</div>
+        ${resumeLine}
+        ${actionBtn}
+      </div>`;
+  } else if(banner.type==='today_closed'){
+    bodyHtml = `<div style="padding:12px 14px">
+      <div style="font-size:15px;font-weight:700;color:#7a3b00">🌙 今日臨時休息</div>
+      <div style="margin-top:4px;color:#7a5c00">可預訂其他營業日期</div>
+    </div>`;
+  } else if(banner.type==='weekly'){
+    bodyHtml = `<div style="padding:12px 14px">
+      <div style="font-size:15px;font-weight:700;color:#7a3b00">🌙 今日固定公休</div>
+      <div style="margin-top:4px;color:#7a5c00">可預訂其他營業日期</div>
+    </div>`;
   } else {
-    return;
+    hideHolidayBanner(); return;
   }
-  titleEl.textContent=title;
-  bodyEl.innerHTML=bodyHtml;
-  openSheet('holidaySheet');
+  el.innerHTML = bodyHtml;
+  el.style.display = 'block';
 }
-function closeHolidayAnnouncement(){ closeSheet('holidaySheet'); }
-// Esc 鍵關閉休假公告 Modal（與其他 sheet 共用同一個 Esc 監聽，避免重複註冊）
+function hideHolidayBanner(){
+  const el=document.getElementById('holidayBanner');
+  if(el){ el.style.display='none'; el.innerHTML=''; }
+}
+// 捲動到商品區
+function scrollToProducts(){
+  document.getElementById('menuArea')?.scrollIntoView({behavior:'smooth', block:'start'});
+}
+// 「立即預訂」：捲動到商品區 → 開啟購物車 → 日期預設選到 resume_date → 載入該日可用時段
+async function selectResumeDate(dateStr){
+  if(!dateStr) return;
+  const limit=getPreorderDaysLimit();
+  const todayStr=fmtD(twNow());
+  const daysAhead=Math.round((parseLocalDate(dateStr)-parseLocalDate(todayStr))/86400000);
+  if(daysAhead>limit){ toast('恢復營業日超出可預約天數'); return; }
+
+  scrollToProducts();
+  openSheet('cartSheet');
+  buildDateSelector(daysAhead>0); // 若 resume_date 不是今天，走 forceNextDay 範圍（明天起）
+  const pDate=document.getElementById('pDate');
+  if(pDate){
+    const targetOpt=Array.from(pDate.options).find(o=>o.value===dateStr&&!o.disabled);
+    if(targetOpt) pDate.value=dateStr;
+  }
+  await buildTimeSelector();
+}
+
+// ══════════════════════════════════════════════════════════
+// Hotfix17：商家公告中心（manual > auto_holiday > none，資料來源 = shopData.announcement）
+// modal：80% 彈窗，可背景/Esc/X 關閉（依 closable）；banner：頁面內公告，不遮罩不阻擋
+// 公告本身只負責顯示提醒，能不能送單仍由 Business Calendar / 後端驗證把關
+// ══════════════════════════════════════════════════════════
+let currentAnnouncement=null;
+let _announceDismissedThisSession=false; // 避免 frequency=always 的公告在同一頁面 session 內被定時刷新重新彈出
+const ANNOUNCE_ICON_MAP={general:'📢',holiday:'🏖️',promo:'🎉',new_product:'🆕',delivery:'📦',member:'🎁',custom:'✨'};
+const ANNOUNCE_BG_MAP={general:'#fff9e6',holiday:'#fff3e0',promo:'#fce4ec',new_product:'#e3f2fd',delivery:'#e8f5e9',member:'#f3e5f5',custom:'#fffde7'};
+
+function renderAnnouncement(a){
+  currentAnnouncement=a||null;
+  hideAnnouncementUI();
+  if(!a || !a.active) return;
+  if(_announceDismissedThisSession) return;
+  if(isAnnouncementDismissed(a)) return;
+  if(a.display_mode==='modal') showAnnouncementModal(a);
+  else showAnnouncementBanner(a);
+}
+function hideAnnouncementUI(){
+  document.getElementById('announceOverlay')?.classList.remove('show');
+  const bn=document.getElementById('announceBanner');
+  if(bn){ bn.style.display='none'; bn.innerHTML=''; }
+}
+function showAnnouncementModal(a){
+  const body=document.getElementById('announceModalBody');
+  const closeBtn=document.getElementById('announceModalCloseBtn');
+  if(!body) return;
+  const icon=a.icon||ANNOUNCE_ICON_MAP[a.type]||'📢';
+  const img=a.image_url?`<img src="${esc(a.image_url)}" alt="">`:'';
+  const showBtn=a.button_action!=='none' && a.button_text;
+  const btn=showBtn?`<button class="announce-modal-btn" onclick="announceButtonClick()">${esc(a.button_text)}</button>`:'';
+  body.innerHTML=`${img}<div class="announce-modal-icon">${icon}</div><div class="announce-modal-title">${esc(a.title||'')}</div><div class="announce-modal-msg">${esc(a.body||'')}</div>${btn}`;
+  if(closeBtn) closeBtn.style.display=(a.closable===false)?'none':'flex';
+  document.getElementById('announceOverlay')?.classList.add('show');
+}
+function showAnnouncementBanner(a){
+  const el=document.getElementById('announceBanner');
+  if(!el) return;
+  const icon=a.icon||ANNOUNCE_ICON_MAP[a.type]||'📢';
+  const bg=ANNOUNCE_BG_MAP[a.type]||'#fff9e6';
+  const closeBtn=(a.closable===false)?'':`<div class="announce-banner-close" onclick="dismissAnnouncement()">✕</div>`;
+  const showBtn=a.button_action!=='none' && a.button_text;
+  const btn=showBtn?`<button class="announce-banner-btn" style="background:#06C755;color:#fff" onclick="announceButtonClick()">${esc(a.button_text)}</button>`:'';
+  el.style.background=bg;
+  el.innerHTML=`${closeBtn}<div class="announce-banner-body"><div class="announce-banner-title">${icon} ${esc(a.title||'')}</div><div class="announce-banner-msg">${esc(a.body||'')}</div>${btn}</div>`;
+  el.style.display='block';
+}
+// 背景點擊關閉（僅 closable 時）
+function onAnnounceOverlayClick(ev){
+  if(ev && ev.target && ev.target.id==='announceOverlay' && currentAnnouncement && currentAnnouncement.closable!==false){
+    dismissAnnouncement();
+  }
+}
+// Esc 關閉公告 Modal（僅 closable 時）
 document.addEventListener('keydown', function(ev){
-  if(ev.key==='Escape' && document.getElementById('holidaySheet')?.classList.contains('show')){
-    closeHolidayAnnouncement();
+  if(ev.key==='Escape' && document.getElementById('announceOverlay')?.classList.contains('show')){
+    if(currentAnnouncement && currentAnnouncement.closable!==false) dismissAnnouncement();
   }
 });
+// 關閉公告（X / 背景 / Esc 觸發），依 frequency 規則記錄 localStorage
+function dismissAnnouncement(){
+  const a=currentAnnouncement;
+  hideAnnouncementUI();
+  _announceDismissedThisSession=true;
+  if(a) recordAnnouncementDismiss(a);
+}
+// 按鈕動作
+function announceButtonClick(){
+  const a=currentAnnouncement;
+  if(!a) return;
+  dismissAnnouncement();
+  runAnnouncementAction(a);
+}
+function runAnnouncementAction(a){
+  // 自動休假公告：直接沿用 Hotfix16 已測試過的「立即預訂」流程（含可預訂範圍檢查）
+  if(a.source==='auto_holiday'){
+    if(a.resume_date) selectResumeDate(a.resume_date);
+    else scrollToProducts();
+    return;
+  }
+  switch(a.button_action){
+    case 'scroll_products': scrollToProducts(); break;
+    case 'open_cart': scrollToProducts(); openSheet('cartSheet'); break;
+    case 'open_url': if(a.button_url) window.open(a.button_url,'_blank'); break;
+    case 'category':
+      if(a.category_id!=null && a.category_id!==''){ selectCat(String(a.category_id)); }
+      scrollToProducts();
+      break;
+    case 'product':
+      scrollToProducts();
+      setTimeout(()=>{ document.getElementById('pc-'+a.product_id)?.scrollIntoView({behavior:'smooth',block:'center'}); }, 300);
+      break;
+    case 'close': default: break;
+  }
+}
+// localStorage key：line_announcement_dismissed_${store_id}_${suffix}
+function _announceDismissKey(suffix){ return `line_announcement_dismissed_${LINE_STORE_ID}_${suffix}`; }
+function isAnnouncementDismissed(a){
+  const freq=a.frequency||'version';
+  try{
+    if(freq==='always') return false; // 每次都顯示，不記錄
+    if(freq==='once')  return localStorage.getItem(_announceDismissKey('once'))==='1';
+    if(freq==='daily') return localStorage.getItem(_announceDismissKey('daily'))===fmtD(twNow());
+    return localStorage.getItem(_announceDismissKey(String(a.version||'1')))==='1'; // version（預設）
+  }catch{ return false; }
+}
+function recordAnnouncementDismiss(a){
+  const freq=a.frequency||'version';
+  try{
+    if(freq==='always') return;
+    if(freq==='once'){ localStorage.setItem(_announceDismissKey('once'),'1'); return; }
+    if(freq==='daily'){ localStorage.setItem(_announceDismissKey('daily'),fmtD(twNow())); return; }
+    localStorage.setItem(_announceDismissKey(String(a.version||'1')),'1');
+  }catch{}
+}
+// 自動休假公告（source=auto_holiday）已涵蓋 Business Calendar 休假訊息時，
+// 舊版 holidayBanner 不再重複顯示，避免同一訊息出現兩次（今日臨時休息/固定公休不受影響，仍走舊版 Banner）
+function shouldSkipHolidayBannerForAnnouncement(a){
+  return !!(a && a.active && a.source==='auto_holiday');
+}
 
 // ── 模式切換 UI ────────────────────────────────────────
 function buildModeTabsUI(){
@@ -622,6 +804,8 @@ function switchMode(mode){
   // fix18-08: 統一顯示/隱藏外送地址
   updateDeliveryAddressVisibility();
   updateCartTotals();
+  // fix18-10-hotfix22A：外帶/外送付款方式可能不同，切換模式時重建付款按鈕
+  buildPaymentButtons(shopData);
 }
 function onModeChange(){
   const oType=document.getElementById('oType');
@@ -634,6 +818,8 @@ function onModeChange(){
   // fix18-08: 統一顯示/隱藏外送地址
   updateDeliveryAddressVisibility();
   updateCartTotals();
+  // fix18-10-hotfix22A：外帶/外送付款方式可能不同，切換模式時重建付款按鈕
+  buildPaymentButtons(shopData);
 }
 
 // ── 截止售完橫幅 ──────────────────────────────────────
@@ -654,9 +840,15 @@ function updateCutoffBanner(){
 }
 
 // ── 付款方式 ──────────────────────────────────────────
+// fix18-10-hotfix22A：改為依通路（外帶/外送）獨立開關；若後端未回傳新版陣列（舊店家尚未設定），
+// 自動 fallback 使用原本的全域 line_payment_*_enabled 判斷，行為與舊版完全相同。
 function buildPaymentButtons(settings){
   const c=document.getElementById('payBtns');c.innerHTML='';
-  const en=PAYMENT_OPTIONS.filter(p=>settings[p.key]==='1');
+  const modeKey = currentMode==='delivery' ? 'delivery_payment_methods' : 'takeout_payment_methods';
+  const codes = Array.isArray(settings[modeKey]) ? settings[modeKey] : null;
+  const en = (codes && codes.length)
+    ? PAYMENT_OPTIONS.filter(p=>codes.includes(p.code))
+    : PAYMENT_OPTIONS.filter(p=>settings[p.key]==='1');
   if(!en.length){c.innerHTML='<p style="color:#e53935;font-size:13px">目前未開放付款方式</p>';selectedPay='';return;}
   en.forEach((p,i)=>{const b=document.createElement('button');b.className='pay-btn'+(i===0?' active':'');b.dataset.code=p.code;b.textContent=p.label;b.onclick=function(){selectPay(this);};c.appendChild(b);});
   selectedPay=en[0].code;
@@ -675,7 +867,12 @@ function buildDateSelector(forceNextDay=false){
   const sel=document.getElementById('pDate');if(!sel)return;
   sel.innerHTML='';
   const now=twNow();
-  const mode=document.getElementById('oType')?.value||currentMode;
+  // hotfix22-B ROOT CAUSE FIX：外帶/外送模式必須只有 currentMode 這一個單一來源。
+  // 舊版讀取 oType.value 作為主要依據，但 oType 這個 <select> 只有在使用者手動切換
+  // 或購物車開啟時才會被同步；頁面剛載入、或行事曆/今日截止讓某模式被關閉時，
+  // oType 仍停留在 HTML 預設值（'外帶'），導致用「錯誤的模式」去查時段，
+  // 出現「外送已關閉」「今日截止」等錯誤訊息（即使該模式其實是開啟的）。
+  const mode=currentMode;
   const closedWds=(() => { try { return JSON.parse(shopData.line_closed_weekdays||'[]'); } catch { return []; } })();
   const closedDts=(() => { try { return JSON.parse(shopData.line_closed_dates||'[]'); } catch { return []; } })();
   const bizHoursKey=mode==='takeout'?'takeout_business_hours':'delivery_business_hours';
@@ -720,7 +917,8 @@ async function buildTimeSelector(){
   if(!sel)return;
   sel.innerHTML='<option value="">載入中…</option>';
   const sd=dateSel?.value;if(!sd){sel.innerHTML='<option value="">請先選擇日期</option>';return;}
-  const mode=document.getElementById('oType')?.value||currentMode;
+  // hotfix22-B ROOT CAUSE FIX：同上，改用單一來源 currentMode，避免用到未同步的 oType.value
+  const mode=currentMode;
   const lbl=document.getElementById('timeLabel');
   if(lbl) lbl.childNodes[0].textContent=mode==='delivery'?'外送時間 ':'取餐時間 ';
   try{
@@ -773,37 +971,44 @@ function buildCard(p, mode){
   const price=p.effective_line_price||p.price;
   const img=p.line_image_url||p.image||'';
   const desc=p.line_description||'';
+  const spec=p.line_spec||''; // fix18-10-hotfix19：LINE 通路獨立規格（例：200g）
   const isHot=Number(p.line_hot)===1, isPromo=Number(p.line_promo)===1;
   const ss=p.sale_status||'available';
+  // Hotfix16 BUG-002：尚未開賣但允許預購今天稍後時段（後端已判斷，前台不重複判斷）
+  const preSaleAvailable=!!p.pre_sale_available;
 
   // ══════════════════════════════════════════════════════
-  // LINE 接單規則優先順序（前台顯示層）
+  // LINE 接單規則優先順序（前台顯示層，與後端 /api/line-menu 一致）
+  //   第一位階：今日休假 → calendar_closed / today_closed / weekly_closed（只限今日）
   //   第二位階：今日截止時間 → cutoff_sold_out（只限今日）
   //   第三位階：商品販售時段 → product_time_ended / product_not_started（只限今日）
   //   第四位階：LINE 份數     → real_sold_out（只限今日）
-  //   canNextDay=true 時，任何今日限制都顯示「預約明日」按鈕
+  //   canNextDay=true 時，任何今日限制都顯示「預約明日／預約下個營業日」按鈕
   // ══════════════════════════════════════════════════════
 
   const soldOutReason=mode==='delivery'?p.delivery_sold_out_reason:p.takeout_sold_out_reason;
   const canNextDay=mode==='delivery'?p.delivery_can_next_day:p.takeout_can_next_day;
   const isSoldOut=!!soldOutReason || Number(p.line_sold_out)===1 || ss!=='available';
+  const isDayClosed = soldOutReason==='calendar_closed' || soldOutReason==='today_closed' || soldOutReason==='weekly_closed';
 
   // LINE quota 優先（食材控管不適用 LINE 點餐，ingredient_available 不影響前台顯示）
   const quota=p.line_quota||{hasQuota:false};
-  const quotaHasRemaining = quota.hasQuota && Number(quota.remaining??0) > 0;
 
   // canPreorderNextDay：今日售完（任何位階）且允許預約明日
   const canPreorderNextDay = isSoldOut && !!canNextDay && soldOutReason !== 'mode_closed';
   const quotaRealSoldOut = quota.hasQuota && Number(quota.remaining??0) <= 0;
   const unavailFully = (isSoldOut && !canPreorderNextDay) || (quotaRealSoldOut && !canPreorderNextDay);
 
-  // 今日狀態標籤（只描述今日，不影響明日）
-  let soldLbl='今日售完';
-  if(soldOutReason==='mode_closed')          soldLbl='未開放';
-  else if(soldOutReason==='product_not_started') soldLbl='尚未開賣';
-  else if(soldOutReason==='product_time_ended')  soldLbl='今日售完';
-  else if(ss==='sold_out_today')             soldLbl='今日完售';
-  else if(ss==='paused')                     soldLbl='暫停販售';
+  // Hotfix16 BUG-006：今日狀態文字與顏色重新設計，避免全部顯示灰色造成誤解
+  let soldLbl='今日售完', soldCls='badge-sold';
+  if(soldOutReason==='mode_closed'){          soldLbl='未開放';       soldCls='badge-sold'; }
+  else if(isDayClosed){                       soldLbl='休假中';       soldCls='badge-holiday'; }
+  else if(soldOutReason==='product_not_started'){ soldLbl='尚未開始販售'; soldCls='badge-orange'; }
+  else if(soldOutReason==='product_time_ended'){  soldLbl='今日售完';   soldCls='badge-soldout-today'; }
+  else if(soldOutReason==='real_sold_out'){       soldLbl='今日售完';   soldCls='badge-soldout-today'; }
+  else if(soldOutReason==='cutoff_sold_out'){     soldLbl='今日售完';   soldCls='badge-soldout-today'; }
+  else if(ss==='sold_out_today'){             soldLbl='今日完售';     soldCls='badge-soldout-today'; }
+  else if(ss==='paused'){                     soldLbl='暫停販售';     soldCls='badge-sold'; }
 
   // 份數狀態標籤（第四位階）
   // 今日：用 line_quota；預購（hasNextDayMode=true 或購物車選的是明日）：用 line_preorder
@@ -829,27 +1034,43 @@ function buildCard(p, mode){
     else                          preorderBadge=`<div class="prod-stock-badge stock-ok">可預購（剩${pr}）</div>`;
   }
 
+  // Hotfix16 BUG-002/006：🟢 可預約（尚未開賣但允許預購今天稍後時段）— 不灰掉、可直接加入購物車
+  const preSaleBadge = (!isSoldOut && preSaleAvailable)
+    ? '<span class="badge badge-green">🟢 可預約</span>' : '';
+
   const qty=cart[p.id]?.qty||0;
   let footer='';
   if(!isSoldOut){
+    // pre_sale_available 商品同樣可直接加入購物車（不受尚未開賣影響）
     footer=qty>0
       ?`<div class="qty-ctrl"><button class="minus" onclick="chgQty(${p.id},-1)">−</button><span class="qnum">${qty}</span><button class="plus" onclick="chgQty(${p.id},1)">+</button></div>`
       :`<button class="add-btn" id="ab-${p.id}" onclick="addCart(${p.id},event)">+</button>`;
   }
 
+  // Hotfix16 BUG-006：商品遮罩 — 只有休假／售完／停售才灰掉，pre_sale_available 一律不灰掉
   let mask='';
   if(canPreorderNextDay){
     const preorderFullBlocked = preorderInfo.hasPreorder && Number(preorderInfo.remaining??0)<=0;
-    mask=`<div class="sold-mask" style="flex-direction:column;gap:8px;padding:10px"><span style="background:#fff;color:#555;font-size:12px;font-weight:700;padding:4px 12px;border-radius:20px">${soldLbl}</span>${preorderBadge}${preorderFullBlocked?'<span style="background:#9e9e9e;color:#fff;font-size:11px;padding:2px 10px;border-radius:10px">預購已滿</span>':`<button class="btn-preorder" onclick="preorderNextDay(${p.id},event)">📅 預約明日</button>`}</div>`;
+    const nextBtnLabel = isDayClosed ? '📅 預約下個營業日' : '📅 預約明日';
+    // fix18-10-hotfix19：狀態徽章改為兩排——第一排（休假中/可預購等狀態徽章），第二排（動作按鈕）
+    mask=`<div class="sold-mask" style="flex-direction:column;gap:6px;padding:10px">
+      <div class="badge-row-main">
+        <span style="background:#fff;color:#555;font-size:12px;font-weight:700;padding:4px 12px;border-radius:20px">${soldLbl}</span>
+        ${preorderBadge}
+      </div>
+      <div class="badge-row-action">
+        ${preorderFullBlocked?'<span style="background:#9e9e9e;color:#fff;font-size:11px;padding:2px 10px;border-radius:10px">預購已滿</span>':`<button class="btn-preorder" style="background:#e3f2fd;color:#1565c0;border-color:#1565c0" onclick="preorderNextDay(${p.id},event)">${nextBtnLabel}</button>`}
+      </div>
+    </div>`;
   } else if(unavailFully){
     mask=`<div class="sold-mask"><span>${soldLbl}</span></div>`;
   }
 
   const imgHtml=img?`<img class="prod-img" src="${img}" alt="${esc(name)}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`:'';
-  const soldBadgeTxt=canPreorderNextDay?'可預約明日':soldLbl;
-  const soldBadgeCls=canPreorderNextDay?'badge-amber':(soldOutReason==='cutoff_sold_out'?'badge-cutoff':'badge-sold');
+  const soldBadgeTxt=canPreorderNextDay?(isDayClosed?'預約下個營業日':'可預約明日'):soldLbl;
+  const soldBadgeCls=canPreorderNextDay?'badge-blue':soldCls;
   const badgesSoldOut=isSoldOut?`<span class="badge ${soldBadgeCls}">${soldBadgeTxt}</span>`:'';
-  return `<div class="prod-card" id="pc-${p.id}">${mask}${imgHtml}<div class="prod-ph" ${img?'style="display:none"':''}>🍽️</div><div class="prod-body"><div class="badges">${isHot?'<span class="badge badge-hot">🔥 熱銷</span>':''}${isPromo?'<span class="badge badge-promo">🎁 優惠</span>':''}${badgesSoldOut}</div><div class="prod-name">${esc(name)}</div>${stockBadge}<div class="prod-desc">${esc(desc)}</div><div class="prod-footer"><span class="prod-price">$${price}</span>${footer}</div></div></div>`;
+  return `<div class="prod-card" id="pc-${p.id}">${mask}${imgHtml}<div class="prod-ph" ${img?'style="display:none"':''}>🍽️</div><div class="prod-body"><div class="badges">${isHot?'<span class="badge badge-hot">🔥 熱銷</span>':''}${isPromo?'<span class="badge badge-promo">🎁 優惠</span>':''}${badgesSoldOut}${preSaleBadge}</div><div class="prod-name">${esc(name)}</div>${spec?`<div class="prod-spec">${esc(spec)}</div>`:''}${stockBadge}<div class="prod-desc">${esc(desc)}</div><div class="prod-footer"><span class="prod-price">$${price}</span>${footer}</div></div></div>`;
 }
 
 // ── 購物車操作 ─────────────────────────────────────────
@@ -868,6 +1089,9 @@ function addCart(id,evt){
       real_sold_out:(p.effective_line_name||p.name)+' LINE 今日份數已售完',
       product_time_ended:(p.effective_line_name||p.name)+' 今日販售時段已結束',
       product_not_started:(p.effective_line_name||p.name)+`尚未開始販售（${p.line_sell_start||''} 開賣）`,
+      calendar_closed:'今日休假中，無法加入購物車，請選擇其他營業日期',
+      today_closed:'今日臨時休息，無法加入購物車，請選擇其他營業日期',
+      weekly_closed:'今日固定公休，無法加入購物車，請選擇其他營業日期',
     };
     alert(msgs[soldOutReason]||'此商品目前無法加入購物車');return;
   }
@@ -908,6 +1132,25 @@ function addCart(id,evt){
 
 // ── B: 預約明日 — 完整流程 ────────────────────────────────
 // 1. 找下一個可訂日 2. 加商品進購物車 3. 載入明日時段 4. 打開購物車
+// hotfix22-B：找出某模式（takeout/delivery）下一個可訂日（排除今日、公休日、非營業日）
+// preorderNextDay() 與「今日截止後導向下一可營業日」共用同一套邏輯，避免各自維護不同判斷
+function findNextAvailableDate(mode){
+  const now=twNow();
+  const closedWds=(() => { try { return JSON.parse(shopData.line_closed_weekdays||'[]'); } catch { return []; } })();
+  const closedDts=(() => { try { return JSON.parse(shopData.line_closed_dates||'[]'); } catch { return []; } })();
+  const bizHoursKey=mode==='takeout'?'takeout_business_hours':'delivery_business_hours';
+  const bizHours=(() => { try { return JSON.parse(shopData[bizHoursKey]||'{}'); } catch { return {}; } })();
+  const bizHoursEmpty=Object.keys(bizHours).length===0;
+  const WD_KEYS_LOCAL=['sun','mon','tue','wed','thu','fri','sat'];
+  for(let offset=1;offset<=14;offset++){
+    const d=new Date(now); d.setDate(d.getDate()+offset);
+    const ds=fmtD(d),wk=WD_KEYS_LOCAL[parseLocalDate(ds).getDay()];
+    if(closedWds.includes(wk)||closedDts.includes(ds)) continue;
+    if(!bizHoursEmpty){ const dh=bizHours[wk]; if(dh&&!dh.enabled) continue; }
+    return ds;
+  }
+  return null;
+}
 async function preorderNextDay(id,evt){
   if(evt){evt.stopPropagation();}
   const p=allProducts.find(x=>x.id==id);if(!p)return;
@@ -916,24 +1159,7 @@ async function preorderNextDay(id,evt){
   if(!canNextDay){toast('此商品不支援明日預約');return;}
 
   // 找下一個可訂日（排除今日、公休日、非營業日）
-  const now=twNow(), todayStr=fmtD(now);
-  const closedWds=(() => { try { return JSON.parse(shopData.line_closed_weekdays||'[]'); } catch { return []; } })();
-  const closedDts=(() => { try { return JSON.parse(shopData.line_closed_dates||'[]'); } catch { return []; } })();
-  const bizHoursKey=mode==='takeout'?'takeout_business_hours':'delivery_business_hours';
-  const bizHours=(() => { try { return JSON.parse(shopData[bizHoursKey]||'{}'); } catch { return {}; } })();
-  const bizHoursEmpty=Object.keys(bizHours).length===0;
-  const WD_KEYS_LOCAL=['sun','mon','tue','wed','thu','fri','sat'];
-
-  let nextDate=null;
-  for(let offset=1;offset<=14;offset++){
-    const d=new Date(now); d.setDate(d.getDate()+offset);
-    const ds=fmtD(d),wk=WD_KEYS_LOCAL[parseLocalDate(ds).getDay()];
-    // 跳過公休日 / 指定店休
-    if(closedWds.includes(wk)||closedDts.includes(ds)) continue;
-    // bizHours 未設定時視為全天可訂；有設定時需 enabled=true
-    if(!bizHoursEmpty){ const dh=bizHours[wk]; if(dh&&!dh.enabled) continue; }
-    nextDate=ds; break;
-  }
+  const nextDate=findNextAvailableDate(mode);
   if(!nextDate){ toast('目前找不到可預約的未來時段，請確認外帶/外送營業設定'); return; }
 
   // 加商品進購物車（繞過今日售完，預約訂單不扣今日份數）
@@ -1084,7 +1310,7 @@ function updateBar(){
   // fix18-06: 外送費納入應付金額
   const cartDelivRow=document.getElementById('cartDelivFeeRow');
   const cartDelivEl=document.getElementById('cartDelivFeeDisplay');
-  const isDelivMode=document.getElementById('oType')?.value==='delivery';
+  const isDelivMode=currentMode==='delivery';
   const shownDelivFee=isDelivMode&&deliveryFeeCalculated?calcDeliveryFee:0;
   if(cartDelivRow) cartDelivRow.style.display=shownDelivFee>0?'flex':'none';
   if(cartDelivEl) cartDelivEl.textContent=`$${shownDelivFee}`;
@@ -1154,6 +1380,9 @@ function openCartSheet(){
     oType.value=currentMode;
   }
   renderCartItems();openSheet('cartSheet');
+  // hotfix22-B：開啟購物車時重新查詢日期/時段（即時打 API，避免使用頁面載入當下的快取狀態；
+  // 例如店家在顧客瀏覽期間才設定「今日臨時最後接單時間」，此時應立即反映，而非等下次整頁重整）
+  buildDateSelector();
 }
 function renderCartItems(){
   const el=document.getElementById('cartItems');
@@ -1228,7 +1457,29 @@ async function submitOrder(){
     }).then(r=>r.json());
     if(!orderRes.success){
       toast(orderRes.message||'送出失敗');
-      if(orderRes.reason==='cutoff_sold_out'||orderRes.reason==='real_sold_out') setTimeout(()=>location.reload(),2000);
+      // hotfix22-B：外帶/外送「今日最後接單時間」在送單當下才過期（例如顧客瀏覽期間店家臨時調整截止時間），
+      // 後端已擋下（見 routes/line-orders.js validateOrderConditions）。前台若該模式允許預約明日，
+      // 直接帶去下一個可營業日，而不是單純重整頁面讓顧客自己重新摸索。
+      if(orderRes.reason==='cutoff_sold_out'){
+        const allowNext = currentMode==='takeout'
+          ? (shopData.takeout_status?.allow_next_day)
+          : (shopData.delivery_status?.allow_next_day);
+        if(allowNext){
+          const nextDate=findNextAvailableDate(currentMode);
+          if(nextDate){
+            try{
+              const tsRes=await apiFetch(`/api/line-orders/timeslots?mode=${currentMode}&date=${nextDate}`).then(r=>r.json());
+              const slots=(tsRes.success&&tsRes.slots)?tsRes.slots:[];
+              toast(`⏰ 今日已截止，已為您帶到下一個可營業日（${nextDate}）`);
+              openCartSheetWithDate(nextDate, slots[0]||'', slots, currentMode);
+              btn.disabled=false;btn.textContent='送出訂單';
+              return;
+            }catch(e){ console.warn('cutoff next-day redirect failed',e); }
+          }
+        }
+        setTimeout(()=>location.reload(),2000);
+      }
+      if(orderRes.reason==='real_sold_out') setTimeout(()=>location.reload(),2000);
       if(orderRes.reason==='maps_unavailable'||orderRes.reason==='out_of_range'){
         resetDeliveryFee();
       }
@@ -1303,7 +1554,21 @@ async function refreshShopStatus(){
     const prevToCP=takeoutCutoffPassed, prevDlCP=deliveryCutoffPassed;
     takeoutCutoffPassed=!!ts.cutoff_passed;
     deliveryCutoffPassed=!!ds2.cutoff_passed;
-    if(prevToCP!==takeoutCutoffPassed||prevDlCP!==deliveryCutoffPassed){
+    // Hotfix16 BUG-004：休假 Banner 隨定時刷新自動更新／消失（恢復營業日到達後自動不再顯示）
+    const prevTodayClosed=todayClosed;
+    const holidayBanner=res.data.holiday_banner||{active:false};
+    todayClosed=!!holidayBanner.active;
+    // Hotfix17：商家公告中心跟著定時刷新更新（例如公告有效期間結束、或後台更新了公告內容）
+    const announcement=res.data.announcement||{enabled:false,active:false,source:'none'};
+    renderAnnouncement(announcement);
+    if(shouldSkipHolidayBannerForAnnouncement(announcement)) hideHolidayBanner();
+    else renderHolidayBanner(holidayBanner);
+    if(prevToCP!==takeoutCutoffPassed||prevDlCP!==deliveryCutoffPassed||prevTodayClosed!==todayClosed){
+      // 重新載入菜單（休假狀態改變會影響商品卡的售完原因/預約明日等顯示）
+      try{
+        const mr=await apiFetch('/api/line-menu').then(r=>r.json());
+        if(mr.success){categories=mr.data.categories||[];allProducts=mr.data.products||[];buildCats();}
+      }catch{}
       renderMenu();updateCutoffBanner();
     }
   }catch{}

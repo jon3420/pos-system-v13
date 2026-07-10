@@ -597,6 +597,7 @@ function applyFeatureGateUI() {
 // ── LINE 點餐入口 Tab 渲染 ─────────────────────────────────
 function loadLineEntryPage() {
   renderLineOrderEntry();
+  renderShippingEntry();
 }
 
 function renderLineOrderEntry() {
@@ -831,6 +832,173 @@ function downloadLineOrderQR() {
   if (typeof showToast === 'function') showToast('QR Code 尚未產生，請稍後再試', 'error');
 }
 
+// ══════════════════════════════════════════════════════════════════
+// fix18-10-hotfix19：📦 冷藏宅配入口（獨立於 LINE 點餐入口，僅供後台使用；
+// 完全複製一份獨立函式，不共用/不修改上面 LINE 點餐入口的既有函式與 DOM id，
+// 避免任何交互影響）
+// ══════════════════════════════════════════════════════════════════
+function renderShippingEntry() {
+  const container = document.getElementById('shipEntryContent');
+  if (!container) return;
+  const store = window.currentStore;
+  const hasLine = hasFeature('line_order');
+  if (!store) { container.innerHTML = '<p style="color:var(--text-secondary,#64748b)">載入中...</p>'; return; }
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  if (!hasLine) {
+    container.innerHTML = `
+      <div style="text-align:center;padding:36px 20px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:10px">
+        <div style="font-size:2.5rem;margin-bottom:12px">🔒</div>
+        <div style="font-size:1rem;font-weight:600;color:#ef4444;margin-bottom:8px">冷藏宅配功能尚未啟用</div>
+        <div style="font-size:.875rem;color:var(--text-secondary,#64748b)">請聯絡系統管理員升級方案以使用 LINE 點餐／冷藏宅配功能。</div>
+      </div>`;
+    return;
+  }
+
+  const storeId = store.store_id || '';
+  const shipUrl = window.location.origin + '/line-shipping.html?store_id=' + encodeURIComponent(storeId);
+
+  container.innerHTML = `
+    <p class="settings-hint" style="margin-bottom:14px">此網址為冷藏宅配獨立下單頁，與 LINE 點餐頁分開，不會出現在顧客點餐頁的取餐方式選單中。</p>
+    <div style="margin-bottom:20px">
+      <div style="font-size:.8rem;color:var(--text-secondary,#64748b);margin-bottom:8px;font-weight:600;letter-spacing:.04em;text-transform:uppercase">冷藏宅配網址</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <code id="shipUrlDisplay" style="flex:1;min-width:200px;padding:10px 14px;background:rgba(0,0,0,.25);border-radius:8px;font-size:.8rem;word-break:break-all;border:1px solid rgba(255,255,255,.1)">${esc(shipUrl)}</code>
+        <button class="btn-secondary" onclick="copyShippingUrl()" style="white-space:nowrap">📋 複製網址</button>
+        <button class="btn-secondary" onclick="openShippingUrl()" style="white-space:nowrap">🔗 開啟宅配頁</button>
+        <button class="btn-secondary" onclick="downloadShippingQR()" style="white-space:nowrap">⬇️ 下載 QR Code</button>
+      </div>
+    </div>
+    <div style="text-align:center">
+      <div style="font-size:.8rem;color:var(--text-secondary,#64748b);margin-bottom:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase">QR Code（掃描後開啟冷藏宅配頁）</div>
+      <div id="shipQrContainer" style="display:inline-block;background:#fff;padding:12px;border-radius:12px">
+        <canvas id="shipQrCanvas" width="220" height="220"></canvas>
+      </div>
+    </div>`;
+
+  _loadAndRenderQrShip(shipUrl);
+}
+
+function _loadAndRenderQrShip(url) {
+  if (typeof QRCode !== 'undefined') { _doRenderQrShip(url); return; }
+  const s = document.createElement('script');
+  s.src = 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js';
+  s.onload  = () => _doRenderQrShip(url);
+  s.onerror = () => _doRenderQrFallbackShip(url);
+  document.head.appendChild(s);
+}
+
+function _doRenderQrShip(url) {
+  const container = document.getElementById('shipQrContainer');
+  if (!container) return;
+  try {
+    const size = 220;
+    const tmp  = document.createElement('div');
+    container.innerHTML = '';
+    container.appendChild(tmp);
+    new QRCode(tmp, { text: url, width: size, height: size, correctLevel: QRCode.CorrectLevel.M });
+    setTimeout(() => {
+      const srcCanvas = tmp.querySelector('canvas');
+      const srcImg    = tmp.querySelector('img') || (tmp._qrImg);
+      let dlCanvas = document.getElementById('shipQrCanvas');
+      if (!dlCanvas) {
+        dlCanvas = document.createElement('canvas');
+        dlCanvas.id = 'shipQrCanvas';
+        dlCanvas.style.display = 'none';
+        container.appendChild(dlCanvas);
+      }
+      dlCanvas.width = size; dlCanvas.height = size;
+      const ctx = dlCanvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, size, size);
+      if (srcCanvas) {
+        ctx.drawImage(srcCanvas, 0, 0, size, size);
+      } else if (srcImg && srcImg.complete && srcImg.naturalWidth > 0) {
+        ctx.drawImage(srcImg, 0, 0, size, size);
+      } else if (srcImg) {
+        srcImg.onload = () => ctx.drawImage(srcImg, 0, 0, size, size);
+      }
+    }, 300);
+  } catch(e) {
+    _doRenderQrFallbackShip(url);
+  }
+}
+
+function _doRenderQrFallbackShip(url) {
+  const container = document.getElementById('shipQrContainer');
+  if (!container) return;
+  container.innerHTML =
+    '<div style="text-align:center;padding:20px;background:#fff;border-radius:8px;max-width:260px">' +
+    '<div style="font-size:2rem;margin-bottom:8px">📦</div>' +
+    '<div style="font-size:.75rem;color:#333;word-break:break-all;margin-bottom:10px">' +
+    '<a href="' + url + '" target="_blank" style="color:#1565c0">' + url + '</a></div>' +
+    '<div style="font-size:.7rem;color:#888">QR Code 產生失敗<br>請複製上方網址使用</div>' +
+    '</div>';
+  let dlCanvas = document.getElementById('shipQrCanvas');
+  if (!dlCanvas) {
+    dlCanvas = document.createElement('canvas');
+    dlCanvas.id = 'shipQrCanvas';
+    dlCanvas.width = 220; dlCanvas.height = 220;
+    dlCanvas.style.display = 'none';
+    container.appendChild(dlCanvas);
+  }
+}
+
+function copyShippingUrl() {
+  const store = window.currentStore;
+  if (!store) return;
+  const url = window.location.origin + '/line-shipping.html?store_id=' + encodeURIComponent(store.store_id);
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(url)
+      .then(() => { if (typeof showToast === 'function') showToast('冷藏宅配網址已複製', 'success'); })
+      .catch(() => _fallbackCopy(url));
+  } else { _fallbackCopy(url); }
+}
+
+function openShippingUrl() {
+  const store = window.currentStore;
+  if (!store) return;
+  const url = window.location.origin + '/line-shipping.html?store_id=' + encodeURIComponent(store.store_id);
+  window.open(url, '_blank');
+}
+
+function downloadShippingQR() {
+  const store = window.currentStore;
+  if (!store) return;
+  const filename = 'line-shipping-' + store.store_id + '.png';
+  const canvas = document.getElementById('shipQrCanvas');
+  if (canvas && canvas.width > 0) {
+    try {
+      const link = document.createElement('a');
+      link.download = filename;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+      return;
+    } catch {}
+  }
+  const container = document.getElementById('shipQrContainer');
+  const img = container ? container.querySelector('img') : null;
+  if (img && img.src && img.complete) {
+    try {
+      const c = document.createElement('canvas');
+      c.width = 220; c.height = 220;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 220, 220);
+      ctx.drawImage(img, 0, 0, 220, 220);
+      const link = document.createElement('a');
+      link.download = filename;
+      link.href = c.toDataURL('image/png');
+      link.click();
+      return;
+    } catch {}
+  }
+  if (typeof showToast === 'function') showToast('QR Code 尚未產生，請稍後再試', 'error');
+}
+
 
 // ── 單位換算工具（前端版）────────────────────────────────
 const UNIT_TO_G = { '斤': 600, 'kg': 1000, 'g': 1 };
@@ -978,6 +1146,11 @@ function showPage(name) {
     });
   }
 
+  // fix18-10-hotfix22A：離開頁面時強制關閉「LINE 上架設定」與「冷藏宅配商品設定」兩個 Modal，
+  // 避免在 LINE 商品管理頁切換分頁/離開後，殘留 open 狀態帶到下一次操作（雙 Modal 同時出現的成因之一）
+  if (typeof closeLineSettingsModal === 'function') closeLineSettingsModal();
+  if (typeof closeShippingProductModal === 'function') closeShippingProductModal();
+
   // 3. 清除所有 nav active 狀態
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
 
@@ -1011,7 +1184,7 @@ function showPage(name) {
   if (name === 'orders')        loadCurrentOrderTab();
   if (name === 'products')      loadProductsPage();
   if (name === 'line_products') loadLineProductsPage();
-  if (name === 'line_preorders') loadLinePreorders();
+  if (name === 'line_preorders') { initLinePreordersPage(); }
   if (name === 'coupons')      loadCouponsPage();   // fix18-05
   if (name === 'settings')   { loadSettingsPage(); switchSettingsTab('basic'); }
   if (name === 'categories') loadCategoriesPage();
@@ -1875,6 +2048,15 @@ function setDateRange(range) {
   document.querySelectorAll('.shortcut-btn').forEach(b => b.classList.toggle('active', b.dataset.range === range));
   const customDiv = document.getElementById('customDateRange');
   if (customDiv) customDiv.style.display = range === 'custom' ? 'flex' : 'none';
+  // fix18-10-hotfix21：單日查詢，顯示單一日期選擇器，不可與區間查詢混用
+  const singleDiv = document.getElementById('singleDateRange');
+  if (singleDiv) singleDiv.style.display = range === 'single' ? 'flex' : 'none';
+  if (range === 'single') {
+    const el = document.getElementById('singleDate');
+    if (el && !el.value) el.value = twTodayStr();
+    applySingleDateRange();
+    return;
+  }
   // fix18-04：用台北時間避免 UTC 時差
   const today = new Date(new Date().toLocaleString('en-US', {timeZone:'Asia/Taipei'}));
   const fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
@@ -1894,23 +2076,36 @@ function setDateRange(range) {
   if (range !== 'custom') loadCurrentOrderTab();
 }
 
+// fix18-10-hotfix21：套用單日查詢——直接把 dateFrom/dateTo 設成同一天，
+// 讓既有的 loadOrders / loadDeliveryReport / loadOrderRecShipping 完全不用修改就能支援單日。
+function applySingleDateRange() {
+  const d = document.getElementById('singleDate')?.value || twTodayStr();
+  const fromEl = document.getElementById('dateFrom'); const toEl = document.getElementById('dateTo');
+  if (fromEl) fromEl.value = d;
+  if (toEl)   toEl.value   = d;
+  loadCurrentOrderTab();
+}
+
 // ===== 訂單分頁切換 =====
 function switchOrderTab(tab) {
   currentOrderTab = tab;
   // fix18-07：切換分頁時同步更新 currentOrderView
   if (tab === 'delivery') currentOrderView = 'delivery';
   else if (tab === 'pos') currentOrderView = 'takeout';
+  else if (tab === 'shipping') currentOrderView = 'shipping';
   else currentOrderView = 'all';
   document.querySelectorAll('.order-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
-  document.getElementById('order-tab-all').style.display      = tab === 'delivery' ? 'none' : 'block';
+  document.getElementById('order-tab-all').style.display      = (tab === 'delivery' || tab === 'shipping') ? 'none' : 'block';
   document.getElementById('order-tab-delivery').style.display = tab === 'delivery' ? 'block' : 'none';
+  const shipPanel = document.getElementById('order-tab-shipping');
+  if (shipPanel) shipPanel.style.display = tab === 'shipping' ? 'block' : 'none';
   // fix18-09B：切換分頁時重置折扣篩選
   currentDiscountFilter = 'all';
-  document.querySelectorAll('.disc-filter-btn').forEach(b => b.classList.toggle('active', b.dataset.filter === 'all'));
+  document.querySelectorAll('.disc-filter-btn[data-filter]').forEach(b => b.classList.toggle('active', b.dataset.filter === 'all'));
   refreshCurrentOrderView();
 }
 
-// fix18-07：統一刷新函式，依 currentOrderView 決定呼叫哪個載入函式
+// fix18-10-hotfix19：統一刷新函式，依 currentOrderView 決定呼叫哪個載入函式
 function refreshCurrentOrderView() {
   switch (currentOrderView) {
     case 'delivery':
@@ -1918,6 +2113,10 @@ function refreshCurrentOrderView() {
       break;
     case 'takeout':
       loadOrders('pos');
+      break;
+    case 'shipping':
+      // fix18-10-hotfix20：訂單紀錄頁改用簡潔版宅配列表；完整物流處理請至「LINE 預購管理→冷藏宅配」
+      loadOrderRecShipping();
       break;
     default:
       loadOrders(null);
@@ -2104,10 +2303,18 @@ async function loadOrders(modeFilter) {
 
     // 依分頁過濾
     if (modeFilter === 'pos') {
-      // 內用/外帶：排除外送
-      orders = orders.filter(o => o.order_mode !== 'delivery');
+      // fix18-10-hotfix21：內用/外帶只顯示 dine_in / takeout / pos / line_takeout，
+      // 不得包含外送（delivery / line_delivery）與冷藏宅配（shipping / line_shipping）
+      orders = orders.filter(o => {
+        const isDelivery = o.order_mode === 'delivery';
+        const isShipping = o.order_mode === 'shipping'
+          || o.fulfillment_type === 'shipping'
+          || o.order_source === 'line_shipping'
+          || (o.order_number && String(o.order_number).startsWith('SHIP-'));
+        return !isDelivery && !isShipping;
+      });
     }
-    // 全部訂單：不過濾
+    // 全部訂單：不過濾（POS / LINE 外帶 / LINE 外送 / 冷藏宅配 / Uber / Panda / 其他 全部顯示）
 
     // fix18-09B：儲存全部訂單快取（供折扣篩選 & 明細彈窗使用）
     _allOrdersCache = orders;
@@ -2151,6 +2358,276 @@ async function loadDeliveryReport() {
     const filteredDelivOrders = applyDiscountFilter(delivOrders, currentDiscountFilter);
     renderDeliveryTable(filteredDelivOrders);
   } catch { showToast('外送報表載入失敗', 'error'); }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// fix18-10-hotfix19：📦 冷藏宅配 Web 後台管理（獨立於外帶/外送/一般訂單表格）
+// ══════════════════════════════════════════════════════════════════
+let currentShippingStatusFilter = 'all';
+let _shippingOrdersCache = [];
+
+const SHIP_STATUS_LABEL = {
+  pending: '待確認', accepted: '已接單', packing: '包裝中', shipped: '已出貨',
+  delivered: '已送達', completed: '已完成', cancelled: '已取消',
+};
+const SHIP_STATUS_COLOR = {
+  pending: '#f57f17', accepted: '#1565c0', packing: '#6a1b9a', shipped: '#00838f',
+  delivered: '#2e7d32', completed: '#555', cancelled: '#b71c1c',
+};
+// 每個狀態下一步可執行的動作按鈕
+const SHIP_NEXT_ACTIONS = {
+  pending:   [{ to: 'accepted',  label: '✅ 已接單' }, { to: 'cancelled', label: '❌ 取消' }],
+  accepted:  [{ to: 'packing',   label: '📦 包裝中' }, { to: 'cancelled', label: '❌ 取消' }],
+  packing:   [{ to: 'shipped',   label: '🚚 已出貨' }],
+  shipped:   [{ to: 'delivered', label: '📬 已送達' }],
+  delivered: [{ to: 'completed', label: '🎉 已完成' }],
+  completed: [],
+  cancelled: [],
+};
+
+function setShippingStatusFilter(status) {
+  currentShippingStatusFilter = status;
+  document.querySelectorAll('#shippingStatusFilterBar .disc-filter-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.sstatus === status);
+  });
+  const filtered = status === 'all' ? _shippingOrdersCache : _shippingOrdersCache.filter(o => (o.shipping_status || 'pending') === status);
+  renderShippingOrdersTable(filtered);
+}
+
+async function loadShippingOrders() {
+  const tbody = document.getElementById('shippingOrdersBody');
+  if (tbody) tbody.innerHTML = '<tr><td colspan="17" class="table-empty">載入中...</td></tr>';
+  try {
+    // fix18-10-hotfix21：與「LINE 預購管理」頁的日期篩選（含單日）保持一致
+    const { dateFrom, dateTo } = (typeof getLpDateRange === 'function') ? getLpDateRange() : {};
+    const qs = dateFrom && dateTo ? `&date_from=${dateFrom}&date_to=${dateTo}` : '';
+    const res  = await apiFetch(`/api/line-shipping/admin/orders?limit=500${qs}`);
+    const json = await res.json();
+    if (!json.success) { if (tbody) tbody.innerHTML = '<tr><td colspan="17" class="table-empty">載入失敗</td></tr>'; return; }
+    _shippingOrdersCache = json.data || [];
+    const filtered = currentShippingStatusFilter === 'all'
+      ? _shippingOrdersCache
+      : _shippingOrdersCache.filter(o => (o.shipping_status || 'pending') === currentShippingStatusFilter);
+    renderShippingOrdersTable(filtered);
+    // fix18-10-hotfix21：宅配資料變動後，若統計卡正顯示合併統計（全部/冷藏宅配模式）需同步更新
+    if (typeof renderLinePreordersTable === 'function' && (_lpModeFilter === '' || _lpModeFilter === 'shipping')) {
+      renderLinePreordersTable();
+    }
+  } catch (e) {
+    if (tbody) tbody.innerHTML = '<tr><td colspan="17" class="table-empty">載入失敗</td></tr>';
+    showToast('宅配訂單載入失敗', 'error');
+  }
+}
+
+function renderShippingOrdersTable(orders) {
+  const tbody = document.getElementById('shippingOrdersBody');
+  if (!tbody) return;
+  if (!orders || !orders.length) { tbody.innerHTML = '<tr><td colspan="17" class="table-empty">目前無宅配訂單</td></tr>'; return; }
+
+  const payLabel = { cash: '現金', linepay: 'LINE Pay', transfer: '轉帳', credit_card: '信用卡', platform: '平台付款' };
+
+  tbody.innerHTML = orders.map(o => {
+    let items = [];
+    try { items = typeof o.items === 'string' ? JSON.parse(o.items || '[]') : (o.items || []); } catch {}
+    const itemsTxt = items.map(i => `${escHtml(i.name)}${i.spec ? '('+escHtml(i.spec)+')' : ''}×${i.qty}`).join('<br>');
+    const address = `${o.shipping_city||''}${o.shipping_district||''}${o.shipping_address||''}`;
+    const arrivalTxt = o.shipping_arrival_type === 'date' && o.shipping_arrival_date ? o.shipping_arrival_date : '最快出貨';
+    const status = o.shipping_status || 'pending';
+    const statusColor = SHIP_STATUS_COLOR[status] || '#888';
+    // hotfix22-C：優惠券折扣顯示（若無套用優惠券則顯示 —）
+    const discAmt = Number(o.discount_amount || 0);
+    const discTxt = discAmt > 0
+      ? `<span style="color:#06C755;font-weight:700">-$${discAmt}</span>${o.coupon_code ? `<div style="font-size:10px;color:var(--text-muted,#64748b)">${escHtml(o.coupon_code)}</div>` : ''}`
+      : '—';
+    const actions = (SHIP_NEXT_ACTIONS[status] || []).map(a =>
+      `<button class="btn-secondary" style="font-size:11px;padding:4px 8px;white-space:nowrap" onclick="updateShippingStatus('${o.order_number}','${a.to}')">${a.label}</button>`
+    ).join(' ');
+    const rowId = `ship-track-${o.order_number}`;
+
+    return `<tr>
+      <td>${escHtml(o.order_number)}</td>
+      <td>${escHtml(twTime ? twTime(o.created_at,'datetime') : (o.created_at||''))}</td>
+      <td>${escHtml(o.shipping_recipient_name || o.customer_name || '')}</td>
+      <td>${escHtml(o.shipping_phone || o.customer_phone || '')}</td>
+      <td style="max-width:180px;white-space:normal">${escHtml(address)}</td>
+      <td style="max-width:160px;white-space:normal">${itemsTxt}</td>
+      <td>$${Number(o.subtotal||0)}</td>
+      <td>${discTxt}</td>
+      <td>$${Number(o.shipping_fee||0)}</td>
+      <td><strong>$${Number(o.total||0)}</strong></td>
+      <td>${escHtml(arrivalTxt)}</td>
+      <td>${payLabel[o.payment_method] || escHtml(o.payment_method||'')}</td>
+      <td><span style="color:${statusColor};font-weight:700">${SHIP_STATUS_LABEL[status] || status}</span></td>
+      <td style="min-width:110px">
+        <input type="text" id="${rowId}-carrier" value="${escHtml(o.carrier_name || o.shipping_carrier_name || '')}" placeholder="物流公司" style="width:100%;font-size:12px;padding:3px 5px;border:1px solid var(--border,#334155);border-radius:4px;background:var(--bg-base,#0f172a);color:var(--text-primary,#e2e8f0)">
+      </td>
+      <td style="min-width:110px">
+        <input type="text" id="${rowId}-no" value="${escHtml(o.tracking_number || '')}" placeholder="物流單號" style="width:100%;font-size:12px;padding:3px 5px;border:1px solid var(--border,#334155);border-radius:4px;background:var(--bg-base,#0f172a);color:var(--text-primary,#e2e8f0)">
+      </td>
+      <td style="min-width:110px">
+        <input type="text" id="${rowId}-note" value="${escHtml(o.shipping_note || '')}" placeholder="備註" style="width:100%;font-size:12px;padding:3px 5px;border:1px solid var(--border,#334155);border-radius:4px;background:var(--bg-base,#0f172a);color:var(--text-primary,#e2e8f0)">
+      </td>
+      <td style="min-width:140px">
+        <div style="display:flex;flex-direction:column;gap:4px">
+          ${actions}
+          <button class="btn-secondary" style="font-size:11px;padding:4px 8px" onclick="saveShippingTracking('${o.order_number}')">💾 儲存物流</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+// 更新宅配狀態（pending→accepted→packing→shipped→delivered→completed／cancelled）
+async function updateShippingStatus(orderNo, newStatus) {
+  if (newStatus === 'cancelled' && !confirm(`確定要取消宅配訂單「${orderNo}」嗎？`)) return;
+  try {
+    const res  = await apiFetch(`/api/line-shipping/admin/orders/${encodeURIComponent(orderNo)}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: newStatus }),
+    });
+    const json = await res.json();
+    if (!json.success) { showToast(json.message || '更新失敗', 'error'); return; }
+    showToast(`✅ 已更新為「${SHIP_STATUS_LABEL[newStatus] || newStatus}」`, 'success');
+    loadShippingOrders();
+  } catch (e) { showToast('更新失敗', 'error'); }
+}
+
+// 儲存物流資訊（carrier_name / tracking_number / shipping_note）
+// 優先呼叫 routes/line-shipping.js 專屬的 /tracking 端點（fix18-10-hotfix19 新增）
+async function saveShippingTracking(orderNo) {
+  const rowId = `ship-track-${orderNo}`;
+  const carrier_name    = document.getElementById(`${rowId}-carrier`)?.value.trim() || '';
+  const tracking_number = document.getElementById(`${rowId}-no`)?.value.trim() || '';
+  const shipping_note   = document.getElementById(`${rowId}-note`)?.value.trim() || '';
+  try {
+    const res  = await apiFetch(`/api/line-shipping/admin/orders/${encodeURIComponent(orderNo)}/tracking`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ carrier_name, tracking_number, shipping_note }),
+    });
+    const json = await res.json();
+    if (!json.success) { showToast(json.message || '儲存失敗', 'error'); return; }
+    showToast('✅ 物流資訊已儲存', 'success');
+    loadShippingOrders();
+  } catch (e) { showToast('儲存失敗', 'error'); }
+}
+
+// ═══════════════════════════════════════════════════════════
+// 📦 訂單紀錄頁「冷藏宅配」分頁（簡潔版，fix18-10-hotfix20）
+// 訂單紀錄只做簡潔查詢，不做物流管理中心；完整物流處理（狀態更新、
+// 物流公司/單號/備註）請至「LINE 預購管理 → 📦 冷藏宅配」
+// ═══════════════════════════════════════════════════════════
+let _orderRecShippingCache = [];
+let _orderRecShippingStatusFilter = 'all';
+
+function setOrderRecShippingStatusFilter(status) {
+  _orderRecShippingStatusFilter = status;
+  document.querySelectorAll('#orderRecShippingStatusFilterBar .disc-filter-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.sstatus === status);
+  });
+  const filtered = status === 'all'
+    ? _orderRecShippingCache
+    : _orderRecShippingCache.filter(o => (o.shipping_status || 'pending') === status);
+  renderOrderRecShippingTable(filtered);
+}
+
+async function loadOrderRecShipping() {
+  const tbody = document.getElementById('orderRecShippingBody');
+  if (tbody) tbody.innerHTML = '<tr><td colspan="13" class="table-empty">載入中...</td></tr>';
+  try {
+    // fix18-10-hotfix21：與訂單紀錄頁其他分頁共用同一組日期篩選（今日/昨日/本週/本月/上月/單日/自訂）
+    const from = document.getElementById('dateFrom')?.value;
+    const to   = document.getElementById('dateTo')?.value;
+    const today = twTodayStr();
+    const dateFrom = from || today, dateTo = to || today;
+    const res  = await apiFetch(`/api/line-shipping/admin/orders?limit=500&date_from=${dateFrom}&date_to=${dateTo}`);
+    const json = await res.json();
+    if (!json.success) { if (tbody) tbody.innerHTML = '<tr><td colspan="13" class="table-empty">載入失敗</td></tr>'; return; }
+    _orderRecShippingCache = json.data || [];
+    const filtered = _orderRecShippingStatusFilter === 'all'
+      ? _orderRecShippingCache
+      : _orderRecShippingCache.filter(o => (o.shipping_status || 'pending') === _orderRecShippingStatusFilter);
+    renderOrderRecShippingTable(filtered);
+    // fix18-10-hotfix21：統計卡跟著分頁正確統計（宅配只算宅配）
+    _allOrdersCache = _orderRecShippingCache;
+    renderStatCards(calcStatsFromOrders(_orderRecShippingCache), _orderRecShippingCache);
+  } catch (e) {
+    if (tbody) tbody.innerHTML = '<tr><td colspan="13" class="table-empty">載入失敗</td></tr>';
+    showToast('宅配訂單載入失敗', 'error');
+  }
+}
+
+// 簡潔列表：訂單編號／建立時間／模式／顧客／商品／金額／付款方式／付款狀態／交易編號／物流公司／物流單號／物流狀態／操作
+function renderOrderRecShippingTable(orders) {
+  const tbody = document.getElementById('orderRecShippingBody');
+  if (!tbody) return;
+  if (!orders || !orders.length) { tbody.innerHTML = '<tr><td colspan="13" class="table-empty">目前無冷藏宅配訂單</td></tr>'; return; }
+
+  const payLabel = { cash: '現金', linepay: 'LINE Pay', transfer: '轉帳' };
+  const payStatusLabel = { paid: '已付款', pending: '待付款', failed: '付款失敗', expired: '付款逾時' };
+
+  tbody.innerHTML = orders.map(o => {
+    let items = [];
+    try { items = typeof o.items === 'string' ? JSON.parse(o.items || '[]') : (o.items || []); } catch {}
+    const itemsTxt = items.map(i => `${escHtml(i.name)}×${i.qty}`).join('、');
+    const status = o.shipping_status || 'pending';
+    const statusColor = SHIP_STATUS_COLOR[status] || '#888';
+    const payStatus = o.payment_status || (o.payment_method === 'cash' ? 'paid' : 'pending');
+    const txnId = o.linepay_transaction_id || o.platform_order_no || '—';
+    return `<tr>
+      <td><span class="order-num">${escHtml(o.order_number)}</span></td>
+      <td style="font-size:12px;color:#999">${escHtml(twTime ? twTime(o.created_at,'datetime') : (o.created_at||''))}</td>
+      <td><span class="mode-badge mode-shipping">📦 冷藏宅配</span></td>
+      <td style="font-size:13px">${escHtml(o.shipping_recipient_name || o.customer_name || '')}</td>
+      <td style="font-size:12px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(itemsTxt)}">${escHtml(itemsTxt||'—')}</td>
+      <td style="font-family:monospace;font-weight:700;color:#f5a623">$${Number(o.total||0)}</td>
+      <td style="font-size:12px">${payLabel[o.payment_method] || escHtml(o.payment_method||'')}</td>
+      <td style="font-size:12px">${payStatusLabel[payStatus] || escHtml(payStatus)}</td>
+      <td style="font-size:11px;font-family:monospace">${escHtml(txnId)}</td>
+      <td style="font-size:12px">${escHtml(o.carrier_name || o.shipping_carrier_name || '—')}</td>
+      <td style="font-size:12px;font-family:monospace">${escHtml(o.tracking_number || '—')}</td>
+      <td><span style="color:${statusColor};font-weight:700">${SHIP_STATUS_LABEL[status] || status}</span></td>
+      <td><button class="btn-icon" onclick="openShipOrderDetail('${escHtml(o.order_number)}')">📋 詳細</button></td>
+    </tr>`;
+  }).join('');
+}
+
+// 「詳細」彈窗：顯示完整宅配資訊（收件地址／到貨日／運費／物流公司／物流單號／備註）
+function openShipOrderDetail(orderNo) {
+  const o = _orderRecShippingCache.find(x => x.order_number === orderNo);
+  if (!o) { showToast('找不到訂單資料', 'error'); return; }
+  let items = [];
+  try { items = typeof o.items === 'string' ? JSON.parse(o.items || '[]') : (o.items || []); } catch {}
+  const itemsTxt = items.map(i => `${escHtml(i.name)}${i.spec ? '('+escHtml(i.spec)+')' : ''}×${i.qty}`).join('<br>');
+  const address = `${o.shipping_city||''}${o.shipping_district||''}${o.shipping_address||''}`;
+  const arrivalTxt = o.shipping_arrival_type === 'date' && o.shipping_arrival_date ? o.shipping_arrival_date : '最快出貨';
+  const payLabel = { cash: '現金', linepay: 'LINE Pay', transfer: '轉帳' };
+  const status = o.shipping_status || 'pending';
+
+  document.getElementById('shipDetailOrderNo').textContent = o.order_number;
+  document.getElementById('shipOrderDetailBody').innerHTML = `
+    <div><b>建立時間：</b>${escHtml(twTime ? twTime(o.created_at,'datetime') : (o.created_at||''))}</div>
+    <div><b>顧客：</b>${escHtml(o.shipping_recipient_name || o.customer_name || '')}</div>
+    <div><b>電話：</b>${escHtml(o.shipping_phone || o.customer_phone || '')}</div>
+    <div><b>收件地址：</b>${escHtml(address)}</div>
+    ${o.shipping_address_note ? `<div><b>地址備註：</b>${escHtml(o.shipping_address_note)}</div>` : ''}
+    <div style="margin-top:6px"><b>商品明細：</b><br>${itemsTxt}</div>
+    <div style="margin-top:6px"><b>小計：</b>$${Number(o.subtotal||0)}</div>
+    <div><b>運費：</b>$${Number(o.shipping_fee||0)}</div>
+    <div><b>應付金額：</b>$${Number(o.total||0)}</div>
+    <div><b>希望到貨日：</b>${escHtml(arrivalTxt)}</div>
+    <div><b>付款方式：</b>${payLabel[o.payment_method] || escHtml(o.payment_method||'')}</div>
+    <div><b>宅配狀態：</b>${SHIP_STATUS_LABEL[status] || status}</div>
+    <div style="margin-top:6px"><b>物流公司：</b>${escHtml(o.carrier_name || o.shipping_carrier_name || '—')}</div>
+    <div><b>物流單號：</b>${escHtml(o.tracking_number || '—')}</div>
+    <div><b>備註：</b>${escHtml(o.shipping_note || '—')}</div>
+  `;
+  document.getElementById('shipOrderDetailModal').classList.add('open');
+}
+
+function closeShipOrderDetail() {
+  document.getElementById('shipOrderDetailModal').classList.remove('open');
 }
 
 function renderStatCards(stats, allOrders) {
@@ -2890,7 +3367,7 @@ function renderOrdersTable(orders) {
   if (!orders.length) { tbody.innerHTML = '<tr><td colspan="9" class="table-empty">無訂單</td></tr>'; return; }
   const payLabel = { cash:'現金', card:'刷卡', linepay:'LINE', jkopay:'街口', transfer:'轉帳', platform:'平台' };
   const statusMap = { completed:['status-completed','正常'], modified:['status-modified','已修改'], void:['status-void','已作廢'] };
-  const modeLabel = { dine_in:'🍽️ 內用', takeout:'🛍️ 外帶', delivery:'🛵 外送' };
+  const modeLabel = { dine_in:'🍽️ 內用', takeout:'🛍️ 外帶', delivery:'🛵 外送', shipping:'📦 宅配' };
   const ostatusLabel = { pending:'待接單', accepted:'已接單', preparing:'製作中', ready:'可取餐', delivering:'配送中', completed:'已完成', cancelled:'已取消' };
   const ostatusCls   = { pending:'ostatus-pending', accepted:'ostatus-accepted', preparing:'ostatus-preparing', ready:'ostatus-ready', delivering:'ostatus-delivering', completed:'ostatus-completed', cancelled:'ostatus-cancelled' };
 
@@ -2898,8 +3375,10 @@ function renderOrdersTable(orders) {
     const [sCls, sLabel] = statusMap[o.status] || ['status-completed','正常'];
     const isVoid = o.status === 'void';
     const modeKey = o.order_mode || 'dine_in';
+    const isShipping = o.fulfillment_type === 'shipping' || o.order_mode === 'shipping';
     const ident = o.order_mode === 'dine_in' ? (o.table_number||'—') :
                   o.order_mode === 'takeout'  ? (o.pickup_name||o.customer_name||'—') :
+                  isShipping ? (o.shipping_recipient_name||o.customer_name||'—') :
                   (o.delivery_platform||o.customer_name||'—');
     // pickup_time 顯示（LINE 訂單取餐時間）
     // 預購單：pickup_time 格式 "YYYY-MM-DD HH:MM"
@@ -2924,12 +3403,25 @@ function renderOrdersTable(orders) {
       addressTag = `<br><span style="font-size:11px;color:#94a3b8">📍${escHtml(o.delivery_address)}${distTxt}${feeTxt}${navLink}</span>`
         + (o.delivery_address_note ? `<br><span style="font-size:11px;color:#94a3b8">備註：${escHtml(o.delivery_address_note)}</span>` : '');
     }
+    // fix18-10-hotfix18：LINE 冷藏宅配訂單獨立顯示區塊（不可與外送混用）
+    let shippingTag = '';
+    if (isShipping) {
+      const shipStatusLabel = { pending:'待確認', accepted:'已接單', packing:'備貨中', shipped:'已出貨', delivered:'已送達', completed:'已完成', cancelled:'已取消' };
+      const sStatus = o.shipping_status || 'pending';
+      const fullAddr = `${o.shipping_city||''}${o.shipping_district||''}${o.shipping_address||''}`;
+      const arrivalTxt = o.shipping_arrival_type === 'date' && o.shipping_arrival_date ? `📅 ${o.shipping_arrival_date}` : '🚚 最快出貨';
+      shippingTag = `<br><span style="font-size:11px;color:#4fc3f7">📞${escHtml(o.shipping_phone||'')}</span>`
+        + `<br><span style="font-size:11px;color:#94a3b8">📍${escHtml(fullAddr)}</span>`
+        + (o.shipping_address_note ? `<br><span style="font-size:11px;color:#94a3b8">備註：${escHtml(o.shipping_address_note)}</span>` : '')
+        + `<br><span style="font-size:11px;color:#94a3b8">${arrivalTxt} · 運費NT$${Number(o.shipping_fee||0)}</span>`
+        + `<br><span style="font-size:11px;color:#4fc3f7;font-weight:700">物流狀態：${shipStatusLabel[sStatus]||sStatus}</span>`;
+    }
     return `
       <tr style="${isVoid?'opacity:0.5':''}">
         <td><span class="order-num">${escHtml(o.order_number)}</span></td>
         <td><span class="mode-badge mode-${modeKey}">${modeLabel[modeKey]||modeKey}</span></td>
         <td style="font-size:12px;color:#999">${twTime(o.created_at,'time')}</td>
-        <td style="font-size:13px">${escHtml(ident)}${pickupTag}${addressTag}</td>
+        <td style="font-size:13px">${escHtml(ident)}${pickupTag}${addressTag}${shippingTag}</td>
         <td style="font-size:12px">${o.items.map(i => {
           const groupName = isGroupLabelEnabled() ? getAnalysisGroupName(i.name) : null;
           return `${i.name}×${i.qty}` + (groupName ? `<br><span style="font-size:10px;color:#818cf8;background:rgba(99,102,241,0.12);border-radius:3px;padding:0 4px">📊 ${escHtml(groupName)}</span>` : '');
@@ -3482,13 +3974,22 @@ async function deleteProduct(id) {
 // ===== LINE 商品設定 Modal (v16) =====
 
 async function openLineSettingsModal(id) {
+  // fix18-10-hotfix22A：強制先關閉「冷藏宅配商品設定」Modal，避免殘留 open 狀態造成雙 Modal 同時出現
+  closeShippingProductModal();
+  // fix18-10-hotfix22A補充：立即開啟 Modal，不等待分類/商品資料載入完成，避免點擊後看起來沒反應
+  const modal = document.getElementById('lineSettingsModal');
+  const idEl = document.getElementById('lineSettingsProductId');
+  const nameEl = document.getElementById('lineSettingsProductName');
+  if (idEl) idEl.value = id;
+  if (nameEl) nameEl.textContent = '載入中…';
+  if (modal) modal.classList.add('open');
   try {
     // 載入分類選項（LINE 唯一來源）
     await loadLineCategoryOptions();
 
     const res = await apiFetch('/api/products/' + id);
     const json = await res.json();
-    if (!json.success) { showToast('載入失敗', 'error'); return; }
+    if (!json.success) { showToast('載入失敗：' + (json.message || ''), 'error'); return; }
     const p = json.data;
 
     document.getElementById('lineSettingsProductId').value = id;
@@ -3497,6 +3998,7 @@ async function openLineSettingsModal(id) {
     document.getElementById('lineSaleStatus').value    = p.sale_status  || 'available';
     document.getElementById('lineProductName').value   = p.line_name    || '';
     document.getElementById('lineProductPrice').value  = p.line_price   || '';
+    document.getElementById('lineProductSpec').value   = p.line_spec    || '';
     document.getElementById('lineProductDesc').value   = p.line_description || '';
     document.getElementById('lineImageUrl').value      = p.line_image_url   || '';
     document.getElementById('lineHot').checked         = !!Number(p.line_hot);
@@ -3571,6 +4073,9 @@ async function openLineSettingsModal(id) {
       else { previewWrap.style.display = 'none'; }
     };
 
+    // fix18-10-hotfix20：冷藏宅配商品設定已移至獨立 Modal（openShippingProductModal），
+    // 此 Modal 只保留 LINE 外帶/外送商品資料，不再填入宅配欄位。
+
     document.getElementById('lineSettingsModal').classList.add('open');
   } catch(e) { showToast('載入商品資料失敗：' + e.message, 'error'); }
 }
@@ -3596,6 +4101,9 @@ async function loadLineCategoryOptions() {
 
 function closeLineSettingsModal() {
   document.getElementById('lineSettingsModal').classList.remove('open');
+  // fix18-10-hotfix22A：防止殘留 — 關閉 LINE 上架設定時，一併確保冷藏宅配商品設定沒有殘留開啟
+  const shipModal = document.getElementById('shippingProductModal');
+  if (shipModal) shipModal.classList.remove('open');
 }
 
 async function saveLineSettings() {
@@ -3605,6 +4113,7 @@ async function saveLineSettings() {
   const line_name          = document.getElementById('lineProductName').value.trim();
   const line_price_raw     = document.getElementById('lineProductPrice').value;
   const line_price         = line_price_raw ? parseFloat(line_price_raw) : 0;
+  const line_spec          = document.getElementById('lineProductSpec').value.trim();
   const line_description   = document.getElementById('lineProductDesc').value.trim();
   const line_image_url     = document.getElementById('lineImageUrl').value.trim();
   const line_category_id   = Number(document.getElementById('lineCategoryId').value) || 0;
@@ -3619,7 +4128,7 @@ async function saveLineSettings() {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        show_on_line, sale_status, line_name, line_price,
+        show_on_line, sale_status, line_name, line_price, line_spec,
         line_description, line_image_url, line_category_id,
         line_hot, line_promo, line_sold_out, auto_restore_next_day,
         // LINE 可售份數（v1）
@@ -3632,13 +4141,106 @@ async function saveLineSettings() {
       })
     });
     const json = await res.json();
-    if (json.success) {
-      showToast('LINE 設定已儲存', 'success');
-      closeLineSettingsModal();
-      loadProductsPage();
-    } else {
-      showToast(json.message || '儲存失敗', 'error');
+    if (!json.success) { showToast(json.message || '儲存失敗', 'error'); return; }
+
+    // fix18-10-hotfix20：冷藏宅配商品設定已移至獨立 Modal/API（openShippingProductModal /
+    // saveShippingProductSettings），此處不再一併儲存，兩通路完全分開管理、互不覆蓋。
+
+    showToast('LINE 設定已儲存', 'success');
+    closeLineSettingsModal();
+    loadProductsPage();
+  } catch(e) { showToast('網路錯誤', 'error'); }
+}
+
+// ===== 📦 冷藏宅配商品設定 Modal（fix18-10-hotfix20：從 LINE 上架設定 Modal 移出，獨立管理）=====
+// 供「LINE 商品管理 → 冷藏宅配商品」分頁使用，也可從 POS 商品管理列表快速開啟。
+async function openShippingProductModal(id) {
+  // fix18-10-hotfix22A：強制先關閉「LINE 上架設定」Modal，避免殘留 open 狀態造成雙 Modal 同時出現
+  closeLineSettingsModal();
+  // fix18-10-hotfix22A補充：立即開啟 Modal（不等待 API 回應），避免 fetch 較慢或失敗時
+  // 讓使用者誤以為「點了沒反應」。欄位先顯示載入中，資料到位後再填入。
+  const modal = document.getElementById('shippingProductModal');
+  const idEl = document.getElementById('shipSettingsProductId');
+  const nameEl = document.getElementById('shipSettingsProductName');
+  if (idEl) idEl.value = id;
+  if (nameEl) nameEl.textContent = '載入中…';
+  if (modal) modal.classList.add('open');
+  try {
+    const res = await apiFetch('/api/products/' + id);
+    const json = await res.json();
+    if (!json.success) { showToast('載入失敗：' + (json.message || ''), 'error'); return; }
+    const p = json.data;
+
+    if (idEl) idEl.value = id;
+    if (nameEl) nameEl.textContent = p.name + (p.category ? ` （${p.category}）` : '');
+
+    const setV = (elId, v) => { const el = document.getElementById(elId); if (el) el.value = v; };
+    const shipEnabledEl = document.getElementById('shipEnabled');
+    if (shipEnabledEl) shipEnabledEl.checked = !!Number(p.shipping_enabled);
+    setV('shipName', p.shipping_name || '');
+    setV('shipPrice', p.shipping_price || '');
+    setV('shipSpec', p.shipping_spec || '');
+    setV('shipSortOrder', Number(p.shipping_sort_order || 0));
+    setV('shipDescription', p.shipping_description || '');
+    setV('shipImageUrl', p.shipping_image_url || '');
+    const shipUpsellEl = document.getElementById('shipUpsell');
+    if (shipUpsellEl) shipUpsellEl.checked = !!Number(p.shipping_upsell);
+    const shipShareEl = document.getElementById('shipShareLineStock');
+    if (shipShareEl) shipShareEl.checked = p.shipping_share_line_stock != null ? !!Number(p.shipping_share_line_stock) : true;
+  } catch(e) {
+    showToast('載入商品資料失敗：' + e.message, 'error');
+    if (nameEl) nameEl.textContent = '⚠️ 載入失敗，請關閉後重試';
+  }
+}
+
+function closeShippingProductModal() {
+  const modal = document.getElementById('shippingProductModal');
+  if (!modal) return;
+  modal.classList.remove('open');
+  // fix18-10-hotfix22A：完整清空狀態，避免下次開啟時殘留上一個商品的資料
+  const idEl = document.getElementById('shipSettingsProductId');
+  if (idEl) idEl.value = '';
+  const nameEl = document.getElementById('shipSettingsProductName');
+  if (nameEl) nameEl.textContent = '';
+  ['shipName', 'shipPrice', 'shipSpec', 'shipSortOrder', 'shipDescription', 'shipImageUrl'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  ['shipEnabled', 'shipUpsell'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.checked = false;
+  });
+  const shareEl = document.getElementById('shipShareLineStock');
+  if (shareEl) shareEl.checked = true; // 預設值：共用 LINE 份數
+}
+
+async function saveShippingProductSettings() {
+  const id = document.getElementById('shipSettingsProductId').value;
+  try {
+    const res = await apiFetch(`/api/products/${id}/shipping-settings`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        shipping_enabled:          document.getElementById('shipEnabled')?.checked ? 1 : 0,
+        shipping_name:             document.getElementById('shipName')?.value.trim() || '',
+        shipping_price:            parseFloat(document.getElementById('shipPrice')?.value || 0) || 0,
+        shipping_spec:             document.getElementById('shipSpec')?.value.trim() || '',
+        shipping_sort_order:       Number(document.getElementById('shipSortOrder')?.value || 0),
+        shipping_description:      document.getElementById('shipDescription')?.value.trim() || '',
+        shipping_image_url:        document.getElementById('shipImageUrl')?.value.trim() || '',
+        shipping_upsell:           document.getElementById('shipUpsell')?.checked ? 1 : 0,
+        shipping_share_line_stock: document.getElementById('shipShareLineStock')?.checked ? 1 : 0,
+      })
+    });
+    const json = await res.json();
+    if (!json.success) { showToast(json.message || '儲存失敗', 'error'); return; }
+    showToast('冷藏宅配設定已儲存', 'success');
+    closeShippingProductModal();
+    // 若目前正在 LINE 商品管理頁的冷藏宅配分頁，重新整理該表格；否則不影響其他頁面
+    if (typeof _lpmTab !== 'undefined' && _lpmTab === 'shipping') {
+      loadLineProductsPage();
     }
+    if (typeof loadProductsPage === 'function') loadProductsPage();
   } catch(e) { showToast('網路錯誤', 'error'); }
 }
 
@@ -5145,16 +5747,8 @@ async function loadLineBizStatus() {
           : cutoffPassed ? '<span style="color:#ff6d00">截止售完</span>'
           : '<span style="color:#06C755">接單中</span>';
       }
-      // 填入 LINE 付款方式設定
-      const lpMap = {
-        cash: 'line_payment_cash_enabled', linepay: 'line_payment_linepay_enabled',
-        transfer: 'line_payment_transfer_enabled', platform: 'line_payment_platform_enabled',
-        credit_card: 'line_payment_credit_card_enabled'
-      };
-      Object.entries(lpMap).forEach(([code, key]) => {
-        const el = document.getElementById(`lp-${code}`);
-        if (el) el.checked = d[key] === '1';
-      });
+      // fix18-10-hotfix22A（付款設定架構釐清）：填入「線上付款方式管理」（外帶/外送/冷藏宅配三通路）
+      _fillOnlinePaymentToggles(d);
     }
     // ── 外帶規則填入（v1）──────────────────────────────
     const setV = (id, val) => { const el = document.getElementById(id); if(el) el.value = val||''; };
@@ -5189,10 +5783,262 @@ async function loadLineBizStatus() {
     const cdates = (() => { try { return JSON.parse(d.line_closed_dates || '[]'); } catch { return []; } })();
     const cdText = document.getElementById('set-line_closed_dates_text');
     if (cdText) cdText.value = cdates.join('\n');
+    // Hotfix17：商家公告設定填入
+    _fillAnnouncementForm(d);
+    // fix18-10-hotfix18：冷藏宅配設定填入
+    _fillShippingSettingsForm(d);
+    // fix18-10-hotfix21：物流 API 設定填入（架構預留 V1）
+    _fillShippingApiSettingsForm(d);
   } catch {}
   // 📅 營業行事曆 Business Calendar V2：今日狀態 + 列表
   refreshTodayBusinessStatus();
   loadBusinessCalendar();
+}
+
+// ── fix18-10-hotfix18：LINE 冷藏宅配中心 V1 ─────────────────────────
+function _fillShippingSettingsForm(d) {
+  const setV = (id, val) => { const el = document.getElementById(id); if (el) el.value = val || ''; };
+  const setC = (id, val) => { const el = document.getElementById(id); if (el) el.checked = !!val; };
+  setC('set-shipping_enabled', d.shipping_enabled === '1');
+  setV('set-shipping_title', d.shipping_title || '冷藏宅配');
+  setV('set-shipping_carrier_name', d.shipping_carrier_name || '黑貓冷藏宅配');
+  setV('set-shipping_description', d.shipping_description || '');
+  setV('set-shipping_notice', d.shipping_notice || '');
+  setV('set-shipping_storage_note', d.shipping_storage_note || '收到後請立即冷藏，建議 48 小時內食用完畢');
+  setV('set-shipping_fee', d.shipping_fee != null && d.shipping_fee !== '' ? d.shipping_fee : 200);
+  setV('set-shipping_free_threshold', d.shipping_free_threshold != null && d.shipping_free_threshold !== '' ? d.shipping_free_threshold : 1500);
+  setV('set-shipping_min_order_amount', d.shipping_min_order_amount != null && d.shipping_min_order_amount !== '' ? d.shipping_min_order_amount : 150);
+  setV('set-shipping_arrival_days_limit', d.shipping_arrival_days_limit != null && d.shipping_arrival_days_limit !== '' ? d.shipping_arrival_days_limit : 14);
+  setV('set-shipping_lead_days', d.shipping_lead_days != null && d.shipping_lead_days !== '' ? d.shipping_lead_days : 1);
+  setC('set-shipping_allow_arrival_date', d.shipping_allow_arrival_date !== '0');
+  setC('set-shipping_upsell_enabled', d.shipping_upsell_enabled !== '0');
+  const cwds = (() => { try { return JSON.parse(d.shipping_closed_weekdays || '[]'); } catch { return []; } })();
+  document.querySelectorAll('.ship-cwd-chk').forEach(cb => { cb.checked = cwds.includes(cb.value); });
+  // fix18-10-hotfix22A（付款設定架構釐清）：冷藏宅配付款方式已統一移至「LINE 營業 → 線上付款方式管理」，
+  // 不再於本表單管理，避免兩處同時控制同一個 shipping_payment_methods 設定互相覆蓋。
+}
+
+async function saveShippingSettings() {
+  const getV = (id) => document.getElementById(id)?.value || '';
+  const getC = (id) => document.getElementById(id)?.checked ? '1' : '0';
+  const cwds = Array.from(document.querySelectorAll('.ship-cwd-chk:checked')).map(cb => cb.value);
+  const body = {
+    shipping_enabled:            getC('set-shipping_enabled'),
+    shipping_title:               getV('set-shipping_title') || '冷藏宅配',
+    shipping_carrier_name:        getV('set-shipping_carrier_name') || '黑貓冷藏宅配',
+    shipping_description:         getV('set-shipping_description'),
+    shipping_notice:              getV('set-shipping_notice'),
+    shipping_storage_note:        getV('set-shipping_storage_note'),
+    shipping_fee:                 String(parseInt(getV('set-shipping_fee'), 10) || 0),
+    shipping_free_threshold:      String(parseInt(getV('set-shipping_free_threshold'), 10) || 0),
+    shipping_min_order_amount:    String(parseInt(getV('set-shipping_min_order_amount'), 10) || 0),
+    shipping_arrival_days_limit:  String(Math.max(0, Math.min(60, parseInt(getV('set-shipping_arrival_days_limit'), 10) || 14))),
+    shipping_lead_days:           String(Math.max(0, parseInt(getV('set-shipping_lead_days'), 10) || 1)),
+    shipping_allow_arrival_date:  getC('set-shipping_allow_arrival_date'),
+    shipping_upsell_enabled:      getC('set-shipping_upsell_enabled'),
+    shipping_closed_weekdays:     JSON.stringify(cwds),
+  };
+  try {
+    await apiFetch('/api/settings', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    showToast('✅ 冷藏宅配設定已儲存', 'success');
+    loadLineBizStatus();
+  } catch(e) { showToast('儲存失敗', 'error'); }
+}
+
+// ── fix18-10-hotfix21：物流 API 架構預留 V1（不串接正式物流商，僅設定架構）──
+async function _fillShippingApiSettingsForm(d) {
+  const setV = (id, val) => { const el = document.getElementById(id); if (el) el.value = val || ''; };
+  const setC = (id, val) => { const el = document.getElementById(id); if (el) el.checked = !!val; };
+  await loadShippingProvidersOptions();
+  setC('set-shipping_api_enabled', d.shipping_api_enabled === '1');
+  setV('set-shipping_provider', d.shipping_provider || 'manual');
+  setV('set-shipping_api_key', d.shipping_api_key || '');
+  setV('set-shipping_api_secret', d.shipping_api_secret || '');
+  setV('set-shipping_customer_id', d.shipping_customer_id || '');
+  setV('set-shipping_sender_name', d.shipping_sender_name || '');
+  setV('set-shipping_sender_phone', d.shipping_sender_phone || '');
+  setV('set-shipping_sender_address', d.shipping_sender_address || '');
+  setC('set-shipping_test_mode', d.shipping_test_mode !== '0');
+}
+
+async function loadShippingProvidersOptions() {
+  const sel = document.getElementById('set-shipping_provider');
+  if (!sel) return;
+  try {
+    const res  = await apiFetch('/api/shipping/providers');
+    const json = await res.json();
+    if (!json.success) return;
+    const cur = sel.value;
+    sel.innerHTML = (json.data || []).map(p =>
+      `<option value="${p.id}">${escHtml(p.name)}${p.enabled ? '' : '（尚未開放）'}</option>`
+    ).join('');
+    if (cur) sel.value = cur;
+  } catch {}
+}
+
+async function saveShippingApiSettings() {
+  const getV = (id) => document.getElementById(id)?.value || '';
+  const getC = (id) => document.getElementById(id)?.checked ? '1' : '0';
+  const body = {
+    shipping_api_enabled:    getC('set-shipping_api_enabled'),
+    shipping_provider:       getV('set-shipping_provider') || 'manual',
+    shipping_api_key:        getV('set-shipping_api_key'),
+    shipping_api_secret:     getV('set-shipping_api_secret'),
+    shipping_customer_id:    getV('set-shipping_customer_id'),
+    shipping_sender_name:    getV('set-shipping_sender_name'),
+    shipping_sender_phone:   getV('set-shipping_sender_phone'),
+    shipping_sender_address: getV('set-shipping_sender_address'),
+    shipping_test_mode:      getC('set-shipping_test_mode'),
+  };
+  try {
+    const res  = await apiFetch('/api/shipping/config', {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    const json = await res.json();
+    if (!json.success) { showToast(json.message || '儲存失敗', 'error'); return; }
+    showToast('✅ 物流 API 設定已儲存', 'success');
+  } catch(e) { showToast('儲存失敗', 'error'); }
+}
+
+async function testShippingApiConnection() {
+  try {
+    const res  = await apiFetch('/api/shipping/test', { method: 'POST' });
+    const json = await res.json();
+    showToast(json.message || (json.success ? '測試完成' : '測試失敗'), json.success ? 'success' : 'error');
+  } catch(e) { showToast('測試連線失敗', 'error'); }
+}
+
+// ── Hotfix17：商家公告中心 ──────────────────────────────
+function _fillAnnouncementForm(d) {
+  const setV = (id, val) => { const el = document.getElementById(id); if (el) el.value = val || ''; };
+  const setC = (id, val) => { const el = document.getElementById(id); if (el) el.checked = !!val; };
+  setC('set-line_announcement_enabled', d.line_announcement_enabled === '1');
+  setV('set-line_announcement_type', d.line_announcement_type || 'general');
+  setV('set-line_announcement_title', d.line_announcement_title || '');
+  setV('set-line_announcement_body', d.line_announcement_body || '');
+  setV('set-line_announcement_image_url', d.line_announcement_image_url || '');
+  setV('set-line_announcement_button_text', d.line_announcement_button_text || '我知道了');
+  setV('set-line_announcement_button_action', d.line_announcement_button_action || 'close');
+  setV('set-line_announcement_button_url', d.line_announcement_button_url || '');
+  setV('set-line_announcement_category_id', d.line_announcement_category_id || '');
+  setV('set-line_announcement_product_id', d.line_announcement_product_id || '');
+  setV('set-line_announcement_start_date', d.line_announcement_start_date || '');
+  setV('set-line_announcement_end_date', d.line_announcement_end_date || '');
+  setC('set-line_announcement_closable', d.line_announcement_closable !== '0');
+  setC('set-line_announcement_auto_holiday', d.line_announcement_auto_holiday !== '0');
+  setV('set-line_announcement_version', d.line_announcement_version || '1');
+  const dispMode = d.line_announcement_display_mode || 'modal';
+  const dEl = document.getElementById(`set-line_announcement_display_mode-${dispMode}`);
+  if (dEl) dEl.checked = true; else { const m = document.getElementById('set-line_announcement_display_mode-modal'); if (m) m.checked = true; }
+  const freq = d.line_announcement_frequency || 'version';
+  const fEl = document.getElementById(`set-line_announcement_frequency-${freq}`);
+  if (fEl) fEl.checked = true; else { const v = document.getElementById('set-line_announcement_frequency-version'); if (v) v.checked = true; }
+  onAnnouncementButtonActionChange();
+  renderAnnouncementPreview();
+}
+
+// 依按鈕動作顯示/隱藏對應的輸入欄位
+function onAnnouncementButtonActionChange() {
+  const action = document.getElementById('set-line_announcement_button_action')?.value || 'close';
+  const show = (id, cond) => { const el = document.getElementById(id); if (el) el.style.display = cond ? 'block' : 'none'; };
+  show('announceUrlWrap', action === 'open_url');
+  show('announceCategoryWrap', action === 'category');
+  show('announceProductWrap', action === 'product');
+  renderAnnouncementPreview();
+}
+
+const _ANNOUNCE_ICON_MAP = {
+  general: '📢', holiday: '🏖️', promo: '🎉', new_product: '🆕',
+  delivery: '📦', member: '🎁', custom: '✨',
+};
+
+// 即時預覽（純畫面呈現，不呼叫 API）
+// fix18-10-hotfix19：商家公告圖片上傳（沿用通用 /api/uploads/image API，不新增重複端點）
+function uploadAnnouncementImage(inputEl) {
+  const file = inputEl.files && inputEl.files[0];
+  if (!file) return;
+  const hint = document.getElementById('announceImageUploadHint');
+  if (hint) { hint.style.display = 'block'; hint.textContent = '上傳中…'; hint.style.color = '#888'; }
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      const res = await apiFetch('/api/uploads/image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_base64: reader.result }),
+      });
+      const json = await res.json();
+      if (!json.success) {
+        if (hint) { hint.textContent = '上傳失敗：' + (json.message || ''); hint.style.color = '#e53935'; }
+        showToast(json.message || '上傳失敗', 'error');
+        return;
+      }
+      const urlInput = document.getElementById('set-line_announcement_image_url');
+      if (urlInput) urlInput.value = window.location.origin + json.url;
+      if (typeof renderAnnouncementPreview === 'function') renderAnnouncementPreview();
+      if (hint) { hint.textContent = '✅ 上傳成功'; hint.style.color = '#06C755'; }
+      showToast('圖片上傳成功', 'success');
+    } catch (e) {
+      if (hint) { hint.textContent = '上傳失敗：' + e.message; hint.style.color = '#e53935'; }
+      showToast('上傳失敗', 'error');
+    } finally {
+      inputEl.value = '';
+    }
+  };
+  reader.onerror = () => { if (hint) { hint.textContent = '讀取檔案失敗'; hint.style.color = '#e53935'; } };
+  reader.readAsDataURL(file);
+}
+
+function renderAnnouncementPreview() {
+  const el = document.getElementById('announcementPreview');
+  if (!el) return;
+  const type  = document.getElementById('set-line_announcement_type')?.value || 'general';
+  const title = document.getElementById('set-line_announcement_title')?.value || '';
+  const body  = document.getElementById('set-line_announcement_body')?.value || '';
+  const btnTxt = document.getElementById('set-line_announcement_button_action')?.value === 'none'
+    ? '' : (document.getElementById('set-line_announcement_button_text')?.value || '我知道了');
+  const icon = _ANNOUNCE_ICON_MAP[type] || '📢';
+  const enabled = document.getElementById('set-line_announcement_enabled')?.checked;
+  if (!enabled && !title && !body) {
+    el.innerHTML = '<p style="text-align:center;color:var(--text-muted);font-size:13px;padding:20px 0">尚未啟用公告</p>';
+    return;
+  }
+  el.innerHTML = `
+    <div style="font-size:15px;font-weight:700;margin-bottom:8px">${icon} ${escapeHtml(title || '（尚未填寫標題）')}</div>
+    <div style="font-size:13px;color:var(--text-secondary);white-space:pre-line;line-height:1.7;margin-bottom:12px">${escapeHtml(body || '（尚未填寫內容）')}</div>
+    ${btnTxt ? `<button class="btn-primary" style="background:#06C755;border-color:#06C755;width:100%" disabled>${escapeHtml(btnTxt)}</button>` : ''}
+  `;
+}
+
+async function saveAnnouncementSettings() {
+  const getV = (id) => document.getElementById(id)?.value || '';
+  const getC = (id) => document.getElementById(id)?.checked ? '1' : '0';
+  const getRadio = (name, fallback) => document.querySelector(`input[name="${name}"]:checked`)?.value || fallback;
+  const body = {
+    line_announcement_enabled:     getC('set-line_announcement_enabled'),
+    line_announcement_type:        getV('set-line_announcement_type') || 'general',
+    line_announcement_title:       getV('set-line_announcement_title'),
+    line_announcement_body:        getV('set-line_announcement_body'),
+    line_announcement_image_url:   getV('set-line_announcement_image_url'),
+    line_announcement_button_text: getV('set-line_announcement_button_text') || '我知道了',
+    line_announcement_button_action: getV('set-line_announcement_button_action') || 'close',
+    line_announcement_button_url:  getV('set-line_announcement_button_url'),
+    line_announcement_category_id: getV('set-line_announcement_category_id'),
+    line_announcement_product_id:  getV('set-line_announcement_product_id'),
+    line_announcement_start_date:  getV('set-line_announcement_start_date'),
+    line_announcement_end_date:    getV('set-line_announcement_end_date'),
+    line_announcement_closable:    getC('set-line_announcement_closable'),
+    line_announcement_display_mode:  getRadio('announceDisplayMode', 'modal'),
+    line_announcement_frequency:     getRadio('announceFrequency', 'version'),
+    line_announcement_version:     getV('set-line_announcement_version') || '1',
+    line_announcement_auto_holiday: getC('set-line_announcement_auto_holiday'),
+  };
+  try {
+    await apiFetch('/api/settings', { method:'PUT', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body) });
+    showToast('✅ 公告設定已儲存', 'success');
+    loadLineBizStatus();
+  } catch(e) { showToast('儲存失敗', 'error'); }
 }
 
 async function saveAdvancedLineSettings() {
@@ -5237,39 +6083,32 @@ async function setLineOrdering(enable) {
 // ═══════════════════════════════════════════════════════════
 let _businessCalendarCache = [];
 
-// ── 今日狀態：🟢 正常營業 / 🟡 特殊營業 / 🔴 特殊休息 / 🔴 臨時休息（今日臨時休息優先）──
+// ── 今日狀態：🟢 正常營業 / 🟡 特殊營業 / 🔴 休假中（Hotfix16：改用 /api/line-shop 的 holiday_banner，
+//    優先序 Business Calendar > 今日臨時休息 > 固定公休，與 LINE 前台 Banner 同一份資料來源）──
 async function refreshTodayBusinessStatus() {
   const el = document.getElementById('businessCalendarTodayStatus');
   if (!el) return;
   el.textContent = '載入中…';
   try {
-    const [settingsRes, todayRes] = await Promise.all([
-      apiFetch('/api/settings').then(r => r.json()),
-      apiFetch('/api/settings/business-calendar/today').then(r => r.json()),
-    ]);
-    const s = settingsRes.data || {};
-    const todayStr = new Date().toISOString().slice(0,10);
-    const isTodayTempClosed = s.line_today_closed === '1' && s.line_today_closed_date === todayStr;
-    const cal = todayRes.data || { matched: false };
+    const shopRes = await apiFetch('/api/line-shop').then(r => r.json());
+    if (!shopRes.success) throw new Error(shopRes.message || '載入失敗');
+    const d = shopRes.data;
+    const banner = d.holiday_banner || { active: false };
+    const cal = d.business_calendar_today || { matched: false };
 
-    if (isTodayTempClosed) {
-      // 今日臨時休息優先於營業行事曆
+    if (banner.active && banner.type === 'calendar') {
+      const reasonTxt = banner.reason ? `：${escapeHtml(banner.reason)}` : '';
+      el.innerHTML = `<span style="color:#e53935">🔴 目前休假中${reasonTxt}</span>`;
+    } else if (banner.active && banner.type === 'today_closed') {
       el.innerHTML = '<span style="color:#e53935">🔴 今日臨時休息</span>';
-      return;
-    }
-    if (!cal.matched) {
-      el.innerHTML = '<span style="color:#06C755">🟢 今日正常營業</span>';
-      return;
-    }
-    if (cal.mode === 'closed') {
-      const reasonTxt = (cal.show_reason && cal.reason) ? `：${escapeHtml(cal.reason)}` : '';
-      el.innerHTML = `<span style="color:#e53935">🔴 今日特殊休息${reasonTxt}</span>`;
-    } else if (cal.mode === 'custom_hours') {
+    } else if (banner.active && banner.type === 'weekly') {
+      el.innerHTML = '<span style="color:#e53935">🔴 今日固定公休</span>';
+    } else if (cal.matched && cal.mode === 'custom_hours') {
       const parts = [];
       if (cal.takeout_enabled && cal.takeout_start_time)  parts.push(`外帶 ${cal.takeout_start_time}~${cal.takeout_end_time}`);
       if (cal.delivery_enabled && cal.delivery_start_time) parts.push(`外送 ${cal.delivery_start_time}~${cal.delivery_end_time}`);
       el.innerHTML = `<span style="color:#f9a825">🟡 今日特殊營業${parts.length ? '：' + parts.join('　') : ''}</span>`;
-    } else if (cal.mode === 'open_all_day') {
+    } else if (cal.matched && cal.mode === 'open_all_day') {
       el.innerHTML = '<span style="color:#06C755">🟢 今日全天營業</span>';
     } else {
       el.innerHTML = '<span style="color:#06C755">🟢 今日正常營業</span>';
@@ -5287,9 +6126,9 @@ function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 }
 
-// ── 📋📅🧾 Hotfix15 V3：今日營業摘要 / 下一次休假 / 預購摘要，減少版面留白 ──
-// 純畫面呈現：狀態文字沿用 #businessCalendarTodayStatus；下一次休假沿用 _businessCalendarCache；
-// 今日營業時間 / 預購範圍另外呼叫一次 /api/settings + /today（唯讀，不影響任何既有 API 行為）
+// ── 📋📅🧾 Hotfix16 BUG-007：今日營業摘要 / 下一次休假 / 預購摘要，
+// 全部改用 /api/line-shop 回傳的 holiday_banner / business_calendar_today / takeout_status / delivery_status，
+// 與 LINE 前台 Banner、商品 Badge、日期選單使用同一份後端判斷結果，不再各自重算，避免前後台顯示不一致。
 const _WD_KEYS_ADMIN = ['sun','mon','tue','wed','thu','fri','sat'];
 async function renderTodaySummary() {
   const statusEl   = document.getElementById('todaySummaryStatus');
@@ -5297,10 +6136,6 @@ async function renderTodaySummary() {
   const holidayEl  = document.getElementById('nextHolidaySummary');
   const preorderEl = document.getElementById('preorderSummary');
   if (!statusEl) return; // 尚未渲染此頁籤
-
-  // 1) 今日狀態：沿用既有 #businessCalendarTodayStatus 文字（不重複計算）
-  const srcStatus = document.getElementById('businessCalendarTodayStatus');
-  if (srcStatus) statusEl.innerHTML = srcStatus.innerHTML;
 
   // 2) 下一次休假：沿用 _businessCalendarCache（loadBusinessCalendar 已抓取，不額外呼叫 API）
   const todayStr0 = new Date().toISOString().slice(0,10);
@@ -5323,73 +6158,72 @@ async function renderTodaySummary() {
     }
   }
 
-  // 3) 今日營業時間（外帶/外送）+ 4) 預購摘要：需要 settings + 今日行事曆命中狀態
+  // 1) 今日狀態 + 3) 今日營業時間 + 4) 預購摘要：單一資料來源 = /api/line-shop
+  //    （已依 Business Calendar > 今日臨時休息 > 固定公休 優先序算好 holiday_banner，前後台共用）
   try {
-    const [settingsRes, todayRes] = await Promise.all([
-      apiFetch('/api/settings').then(r => r.json()),
-      apiFetch('/api/settings/business-calendar/today').then(r => r.json()),
-    ]);
-    const s = settingsRes.data || {};
-    const cal = todayRes.data || { matched: false };
-    const now = new Date();
-    const todayStr = now.toISOString().slice(0,10);
-    const wdKey = _WD_KEYS_ADMIN[now.getDay()];
-    const isTodayTempClosed = s.line_today_closed === '1' && s.line_today_closed_date === todayStr;
-    const closedTodayForOrdering = isTodayTempClosed || (cal.matched && cal.mode === 'closed');
+    const shopRes = await apiFetch('/api/line-shop').then(r => r.json());
+    if (!shopRes.success) throw new Error(shopRes.message || '載入失敗');
+    const d    = shopRes.data;
+    const banner = d.holiday_banner || { active: false };
+    const cal    = d.business_calendar_today || { matched: false };
+    const ts     = d.takeout_status  || {};
+    const ds2    = d.delivery_status || {};
+    const closedTodayForOrdering = !!banner.active;
 
-    function modeHoursToday(prefix) {
+    if (banner.active && banner.type === 'calendar') {
+      const range = banner.start_date === banner.end_date
+        ? _bcFmtDate(banner.start_date)
+        : `${_bcFmtDate(banner.start_date)}～${_bcFmtDate(banner.end_date)}`;
+      statusEl.innerHTML = [
+        '🔴 目前休假中',
+        `休假：${range}`,
+        banner.reason ? `原因：${escapeHtml(banner.reason)}` : '',
+        `恢復：${_bcFmtDate(banner.resume_date)}`,
+      ].filter(Boolean).join('<br>');
+    } else if (banner.active && banner.type === 'today_closed') {
+      statusEl.innerHTML = '🔴 今日臨時休息（可預訂其他營業日期）';
+    } else if (banner.active && banner.type === 'weekly') {
+      statusEl.innerHTML = '🔴 今日固定公休（可預訂其他營業日期）';
+    } else if (cal.matched && cal.mode === 'custom_hours') {
+      const parts = ['🟡 今日特殊營業'];
+      if (cal.takeout_enabled && cal.takeout_start_time)  parts.push(`外帶：${cal.takeout_start_time}～${cal.takeout_end_time}`);
+      if (cal.delivery_enabled && cal.delivery_start_time) parts.push(`外送：${cal.delivery_start_time}～${cal.delivery_end_time}`);
+      statusEl.innerHTML = parts.join('<br>');
+    } else if (cal.matched && cal.mode === 'open_all_day') {
+      statusEl.innerHTML = '🟢 今日全天營業';
+    } else {
+      statusEl.innerHTML = '🟢 正常營業';
+    }
+
+    function modeHoursToday(enabledInCal, startT, endT) {
       if (closedTodayForOrdering) return '今日不開放';
       if (cal.matched && cal.mode === 'open_all_day') return '全天營業';
       if (cal.matched && cal.mode === 'custom_hours') {
-        const en = prefix === 'takeout' ? cal.takeout_enabled : cal.delivery_enabled;
-        if (!en) return '今日不開放';
-        const st = prefix === 'takeout' ? cal.takeout_start_time : cal.delivery_start_time;
-        const et = prefix === 'takeout' ? cal.takeout_end_time   : cal.delivery_end_time;
-        return (st && et) ? `${st}～${et}` : '全天營業';
+        if (!enabledInCal) return '今日不開放';
+        return (startT && endT) ? `${startT}～${endT}` : '全天營業';
       }
-      try {
-        const bh = JSON.parse(s[`${prefix}_business_hours`] || '{}');
-        if (!bh || !Object.keys(bh).length) return '未限制（全天可訂）';
-        const dh = bh[wdKey];
-        if (!dh) return '未限制（全天可訂）';
-        if (!dh.enabled) return '今日不營業';
-        return `${dh.open || '--'}～${dh.close || '--'}`;
-      } catch { return '未限制（全天可訂）'; }
+      return '依營業時間設定';
     }
 
     if (hoursEl) {
       const rows = [];
-      rows.push(`外帶：${s.takeout_enabled === '1' ? modeHoursToday('takeout') : '功能未開啟'}`);
-      rows.push(`外送：${s.delivery_enabled === '1' ? modeHoursToday('delivery') : '功能未開啟'}`);
+      rows.push(`外帶：${ts.enabled ? modeHoursToday(cal.takeout_enabled, cal.takeout_start_time, cal.takeout_end_time) : '功能未開啟'}`);
+      rows.push(`外送：${ds2.enabled ? modeHoursToday(cal.delivery_enabled, cal.delivery_start_time, cal.delivery_end_time) : '功能未開啟'}`);
       rows.push(`今日是否可接單：${closedTodayForOrdering ? '否' : '是'}`);
       hoursEl.innerHTML = rows.join('<br>');
     }
 
     if (preorderEl) {
-      let limit = parseInt(s.line_preorder_days_limit, 10);
+      let limit = parseInt(d.line_preorder_days_limit, 10);
       if (isNaN(limit)) limit = 14;
       limit = Math.max(0, Math.min(60, limit));
+      const now = new Date();
       const endDate = new Date(now); endDate.setDate(endDate.getDate() + limit);
-      const fmtShort = (d) => `${d.getMonth()+1}/${d.getDate()}`;
-
-      // 掃描找「下一個可營業日」：跳過 Business Calendar closed、固定公休、指定店休日，最多掃描到 limit 天
-      const closedWds = (() => { try { return JSON.parse(s.line_closed_weekdays || '[]'); } catch { return []; } })();
-      const closedDts = (() => { try { return JSON.parse(s.line_closed_dates || '[]'); } catch { return []; } })();
-      let nextBizDay = null;
-      for (let i = 0; i <= limit; i++) {
-        const d = new Date(now); d.setDate(d.getDate() + i);
-        const ds = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-        if (i === 0 && closedTodayForOrdering) continue;
-        const wk = _WD_KEYS_ADMIN[d.getDay()];
-        const calEntry = (_businessCalendarCache || []).find(e => e.start_date <= ds && ds <= e.end_date);
-        if (calEntry) {
-          if (calEntry.mode === 'closed') continue;
-          nextBizDay = ds; break;
-        }
-        if (closedWds.includes(wk) || closedDts.includes(ds)) continue;
-        nextBizDay = ds; break;
-      }
-
+      const fmtShort = (dt) => `${dt.getMonth()+1}/${dt.getDate()}`;
+      // 下一個可營業日：直接沿用後端 takeout_next_dates / delivery_next_dates（同一份掃描結果，不再重算）
+      const nextDates = (d.takeout_next_dates && d.takeout_next_dates.length) ? d.takeout_next_dates
+        : (d.delivery_next_dates || []);
+      const nextBizDay = nextDates[0] || null;
       const rows = [
         `可提前預訂：${limit} 天`,
         `可預訂範圍：${fmtShort(now)}～${fmtShort(endDate)}`,
@@ -5627,28 +6461,61 @@ async function setDelivery(enable) {
   loadLineBizStatus();
 }
 
-async function saveLinePaymentSettings() {
-  const lpMap = {
-    cash: 'line_payment_cash_enabled', linepay: 'line_payment_linepay_enabled',
-    transfer: 'line_payment_transfer_enabled', platform: 'line_payment_platform_enabled',
-    credit_card: 'line_payment_credit_card_enabled'
-  };
-  const body = {};
-  Object.entries(lpMap).forEach(([code, key]) => {
-    const el = document.getElementById(`lp-${code}`);
-    if (el) body[key] = el.checked ? '1' : '0';
+// fix18-10-hotfix22A（付款設定架構釐清）：「線上付款方式管理」— 統一管理 LINE 線上點餐
+// 三個通路（外帶/外送/冷藏宅配）各自獨立的付款方式開關。
+// 與「系統設定 → 付款方式管理」（實體 POS 現場結帳，payment_methods 資料表）、
+// 「系統設定 → 金流 API」（LINE Pay/綠界/藍新等金流憑證）完全獨立，互不覆蓋、互不讀寫對方的資料。
+const ONLINE_PAY_CODES  = ['cash', 'linepay', 'transfer', 'credit_card', 'platform'];
+const ONLINE_PAY_LABEL  = { cash: '現金', linepay: 'LINE Pay', transfer: '轉帳', credit_card: '信用卡', platform: '平台付款' };
+const ONLINE_PAY_PREFIX = { takeout: 'op-takeout', delivery: 'op-delivery', shipping: 'op-shipping' };
+const ONLINE_PAY_KEY    = { takeout: 'takeout_payment_methods', delivery: 'delivery_payment_methods', shipping: 'shipping_payment_methods' };
+const ONLINE_PAY_CHANNEL_LABEL = { takeout: '外帶', delivery: '外送', shipping: '冷藏宅配' };
+// 外帶/外送舊版全域開關（Hotfix22A 之前唯一的設定來源）；僅作為「尚未設定新版陣列時」的顯示 fallback，
+// 冷藏宅配從一開始就是獨立陣列設定，沒有對應的舊版全域開關可以 fallback。
+const ONLINE_PAY_LEGACY_KEY = {
+  cash: 'line_payment_cash_enabled', linepay: 'line_payment_linepay_enabled',
+  transfer: 'line_payment_transfer_enabled', platform: 'line_payment_platform_enabled',
+  credit_card: 'line_payment_credit_card_enabled',
+};
+
+// 填入「線上付款方式管理」15 個勾選框（3 通路 × 5 方式）
+function _fillOnlinePaymentToggles(d) {
+  ['takeout', 'delivery', 'shipping'].forEach(channel => {
+    const prefix = ONLINE_PAY_PREFIX[channel];
+    const raw = d[ONLINE_PAY_KEY[channel]];
+    let codes = null;
+    try { const arr = JSON.parse(raw || '[]'); if (Array.isArray(arr) && arr.length) codes = arr; } catch {}
+    ONLINE_PAY_CODES.forEach(code => {
+      const el = document.getElementById(`${prefix}-${code}`);
+      if (!el) return;
+      if (codes) el.checked = codes.includes(code);
+      else if (channel !== 'shipping') el.checked = d[ONLINE_PAY_LEGACY_KEY[code]] === '1'; // 外帶/外送 fallback 顯示
+      else el.checked = (code === 'cash' || code === 'transfer'); // 冷藏宅配預設值（與既有預設一致）
+    });
   });
+}
+
+// 統一儲存「線上付款方式管理」— 一次寫入三個通路，逐一驗證至少勾選一種才送出
+async function saveOnlinePaymentMethods() {
+  const result = {};
+  for (const channel of ['takeout', 'delivery', 'shipping']) {
+    const prefix = ONLINE_PAY_PREFIX[channel];
+    const codes = ONLINE_PAY_CODES.filter(code => document.getElementById(`${prefix}-${code}`)?.checked);
+    if (!codes.length) {
+      showToast(`「${ONLINE_PAY_CHANNEL_LABEL[channel]}」至少需要選擇一種付款方式`, 'error');
+      return;
+    }
+    result[channel] = codes;
+  }
+  const body = {
+    takeout_payment_methods:  JSON.stringify(result.takeout),
+    delivery_payment_methods: JSON.stringify(result.delivery),
+    shipping_payment_methods: JSON.stringify(result.shipping),
+  };
   try {
-    await apiFetch('/api/settings', { method:'PUT', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(body) });
-    const enabled = Object.entries(lpMap)
-      .filter(([code]) => document.getElementById(`lp-${code}`)?.checked)
-      .map(([code]) => ({ cash:'現金', linepay:'LINE Pay', transfer:'轉帳', platform:'平台付款', credit_card:'信用卡' }[code]))
-      .join('、');
-    const st = document.getElementById('linePaymentStatus');
-    if (st) st.textContent = enabled ? `✅ 已開啟：${enabled}` : '⚠️ 所有付款方式已關閉';
-    showToast('✅ LINE 付款方式已儲存', 'success');
-  } catch(e) { showToast('儲存失敗', 'error'); }
+    await apiFetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    showToast('✅ 線上付款方式管理已儲存', 'success');
+  } catch (e) { showToast('儲存失敗', 'error'); }
 }
 
 const DAY_NAMES = { mon:'週一', tue:'週二', wed:'週三', thu:'週四', fri:'週五', sat:'週六', sun:'週日' };
@@ -5898,6 +6765,122 @@ async function resetLineQuotaSold() {
 
 let _lpAllOrders = [];  // 全部預購訂單快取
 let _lpFilter = 'all';  // today | tomorrow | week | all | custom
+// fix18-10-hotfix20：LINE 訂單處理中心通路 Tab 狀態（'' = 全部 | 'takeout' | 'delivery' | 'shipping'）
+let _lpModeFilter = '';
+
+// ── hotfix22-C：統一正規化函式 ──────────────────────────────────
+// 目的：外帶/外送（來自 /api/orders）與冷藏宅配（來自 /api/line-shipping/admin/orders）
+// 兩邊欄位名稱、狀態機都不一樣，過去「全部」「共 N 筆」「統計卡」各自用不同資料源計算，
+// 才會出現「全部看不到宅配」「宅配 Tab 顯示共 0 筆」等不一致。
+// 統一轉換成同一份共用格式後，後面所有 filter／summary／render 都只吃這份正規化後的資料，
+// 不再各自為政。不修改 loadLinePreorders() / loadShippingOrders() 既有的資料載入邏輯。
+function normalizePreorder(o, source) {
+  if (source === 'shipping') {
+    let items = [];
+    try { items = typeof o.items === 'string' ? JSON.parse(o.items || '[]') : (o.items || []); } catch {}
+    const arrivalDisplay = (o.shipping_arrival_type === 'date' && o.shipping_arrival_date)
+      ? o.shipping_arrival_date.replace(/-/g, '/')
+      : '最快出貨';
+    return {
+      id: o.id || o.uuid || o.order_number,
+      order_no: o.order_number,
+      created_at: o.created_at || '',
+      fulfillment_type: 'shipping',
+      order_source: o.order_source || 'line_shipping',
+      customer_name: o.shipping_recipient_name || o.customer_name || '',
+      phone: o.shipping_phone || o.customer_phone || '',
+      items,
+      subtotal: Number(o.subtotal || 0),
+      shipping_fee: Number(o.shipping_fee || 0),
+      delivery_fee: 0,
+      coupon_code: o.coupon_code || '',
+      discount_amount: Number(o.discount_amount || 0),
+      total: Number(o.total || 0),
+      payment_method: o.payment_method || '',
+      payment_status: o.payment_status || 'pending',
+      order_status: o.shipping_status || 'pending',
+      logistics_status: o.shipping_status || 'pending',
+      note: o.shipping_note || o.note || '',
+      pickup_display: arrivalDisplay,
+      __raw: o,
+    };
+  }
+  // source === 'line'（外帶/外送；loadLinePreorders() 已先補上 preorderDate/preorderTime）
+  let items = o.items;
+  if (typeof items === 'string') { try { items = JSON.parse(items || '[]'); } catch { items = []; } }
+  return {
+    id: o.id || o.uuid || o.order_number,
+    order_no: o.order_number,
+    created_at: o.created_at || '',
+    fulfillment_type: o.order_mode || 'takeout',
+    order_source: o.source || 'line',
+    customer_name: o.customer_name || '',
+    phone: o.customer_phone || '',
+    items: items || [],
+    subtotal: Number(o.subtotal ?? o.total ?? 0),
+    shipping_fee: 0,
+    delivery_fee: Number(o.delivery_fee || 0),
+    coupon_code: o.coupon_code || '',
+    discount_amount: Number(o.discount_amount || 0),
+    total: Number(o.total || 0),
+    payment_method: o.payment_method || '',
+    payment_status: o.payment_status || '',
+    order_status: o.order_status || o.status || 'pending',
+    logistics_status: '',
+    note: o.note || '',
+    pickup_display: o.preorderDate ? `${o.preorderDate.replace(/-/g, '/')} ${o.preorderTime || ''}` : (o.pickup_time || '盡快'),
+    __raw: o,
+  };
+}
+
+// ── 通路 Tab 切換：全部／外帶／外送／冷藏宅配 ──────────────
+function lpSetModeFilter(mode) {
+  _lpModeFilter = mode;
+  const map = { '':'lpm-mode-all', takeout:'lpm-mode-takeout', delivery:'lpm-mode-delivery', shipping:'lpm-mode-shipping' };
+  Object.values(map).forEach(id => {
+    const btn = document.getElementById(id);
+    if (btn) { btn.style.background = ''; btn.style.color = ''; }
+  });
+  const activeBtn = document.getElementById(map[mode] ?? 'lpm-mode-all');
+  if (activeBtn) { activeBtn.style.background = 'var(--accent,#3b82f6)'; activeBtn.style.color = '#fff'; }
+
+  const preorderPanel = document.getElementById('lp-preorder-panel');
+  const shippingPanel = document.getElementById('lp-shipping-panel');
+  const statusFilterWrap = document.getElementById('lp-status-filter-wrap');
+  const isShipping = mode === 'shipping';
+  if (preorderPanel) preorderPanel.style.display = isShipping ? 'none' : 'block';
+  if (shippingPanel) shippingPanel.style.display = isShipping ? 'block' : 'none';
+  if (statusFilterWrap) statusFilterWrap.style.display = isShipping ? 'none' : 'flex';
+
+  if (isShipping) {
+    loadShippingOrders();
+  } else {
+    renderLinePreordersTable();
+  }
+}
+
+// ── 進入「LINE 預購管理」頁時呼叫：依目前通路 Tab 狀態初始化顯示並載入資料 ──
+function initLinePreordersPage() {
+  const map = { '':'lpm-mode-all', takeout:'lpm-mode-takeout', delivery:'lpm-mode-delivery', shipping:'lpm-mode-shipping' };
+  Object.values(map).forEach(id => {
+    const btn = document.getElementById(id);
+    if (btn) { btn.style.background = ''; btn.style.color = ''; }
+  });
+  const activeBtn = document.getElementById(map[_lpModeFilter] ?? 'lpm-mode-all');
+  if (activeBtn) { activeBtn.style.background = 'var(--accent,#3b82f6)'; activeBtn.style.color = '#fff'; }
+
+  const isShipping = _lpModeFilter === 'shipping';
+  const preorderPanel = document.getElementById('lp-preorder-panel');
+  const shippingPanel = document.getElementById('lp-shipping-panel');
+  const statusFilterWrap = document.getElementById('lp-status-filter-wrap');
+  if (preorderPanel) preorderPanel.style.display = isShipping ? 'none' : 'block';
+  if (shippingPanel) shippingPanel.style.display = isShipping ? 'block' : 'none';
+  if (statusFilterWrap) statusFilterWrap.style.display = isShipping ? 'none' : 'flex';
+
+  if (isShipping) loadShippingOrders();
+  loadLinePreorders(); // 預先載入一般預購資料，切回全部/外帶/外送時可立即顯示
+}
+
 
 // ── 日期工具 ──────────────────────────────────────────────
 function twTodayStr() {
@@ -5909,6 +6892,30 @@ function twDateAdd(base, n) {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
+// fix18-10-hotfix21：計算目前 LINE 預購管理篩選條件對應的日期區間（新增「單日」）
+function getLpDateRange() {
+  const today = twTodayStr();
+  let dateFrom, dateTo;
+  if (_lpFilter === 'today') {
+    dateFrom = dateTo = today;
+  } else if (_lpFilter === 'tomorrow') {
+    dateFrom = dateTo = twDateAdd(today, 1);
+  } else if (_lpFilter === 'week') {
+    dateFrom = today; dateTo = twDateAdd(today, 7);
+  } else if (_lpFilter === 'single') {
+    const d = document.getElementById('lp-date-single')?.value || today;
+    dateFrom = dateTo = d;
+  } else if (_lpFilter === 'custom') {
+    dateFrom = document.getElementById('lp-date-from')?.value || today;
+    dateTo   = document.getElementById('lp-date-to')?.value   || today;
+  } else {
+    // all: 今天起往後 30 天，加上今天以前 7 天（含今日預購）
+    dateFrom = twDateAdd(today, -7);
+    dateTo   = twDateAdd(today, 30);
+  }
+  return { dateFrom, dateTo };
+}
+
 // ── 篩選條件切換 ──────────────────────────────────────────
 function lpSetFilter(type) {
   _lpFilter = type;
@@ -5917,6 +6924,13 @@ function lpSetFilter(type) {
   });
   const activeBtn = document.getElementById('lpf-' + type);
   if (activeBtn) { activeBtn.style.background = 'var(--accent,#3b82f6)'; activeBtn.style.color = '#fff'; }
+  // fix18-10-hotfix21：單日模式顯示日期選擇器，不可與區間查詢混用
+  const singleWrap = document.getElementById('lp-single-date-wrap');
+  if (singleWrap) singleWrap.style.display = type === 'single' ? 'flex' : 'none';
+  if (type === 'single') {
+    const el = document.getElementById('lp-date-single');
+    if (el && !el.value) el.value = twTodayStr();
+  }
   loadLinePreorders();
 }
 
@@ -5926,28 +6940,16 @@ async function loadLinePreorders() {
   if (!tbody) return;
   tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;padding:30px;color:var(--text-muted,#64748b)">載入中…</td></tr>';
 
-  const today = twTodayStr();
-  let dateFrom, dateTo;
-  if (_lpFilter === 'today') {
-    dateFrom = dateTo = today;
-  } else if (_lpFilter === 'tomorrow') {
-    dateFrom = dateTo = twDateAdd(today, 1);
-  } else if (_lpFilter === 'week') {
-    dateFrom = today; dateTo = twDateAdd(today, 7);
-  } else if (_lpFilter === 'custom') {
-    dateFrom = document.getElementById('lp-date-from')?.value || today;
-    dateTo   = document.getElementById('lp-date-to')?.value   || today;
-  } else {
-    // all: 今天起往後 30 天，加上今天以前 7 天（含今日預購）
-    dateFrom = twDateAdd(today, -7);
-    dateTo   = twDateAdd(today, 30);
-  }
+  // fix18-10-hotfix21：日期區間邏輯改用共用函式（新增「單日」）
+  const { dateFrom, dateTo } = getLpDateRange();
 
   try {
     // 用 LINE 訂單 API，依建立日期抓取
     const res  = await apiFetch(`/api/orders?date_from=${dateFrom}&date_to=${dateTo}&source=line`);
     const json = await res.json();
-    let orders = (json.success ? json.data : []).filter(o => o.source === 'line');
+    // fix18-10-hotfix20：冷藏宅配訂單改由獨立面板（lp-shipping-panel／loadShippingOrders）處理，
+    // 一般預購表格（全部／外帶／外送）不再混入 order_mode==='shipping' 的資料列，避免欄位不對應。
+    let orders = (json.success ? json.data : []).filter(o => o.source === 'line' && o.order_mode !== 'shipping');
 
     // 判斷是否為預購單：pickup_time 包含日期（格式 YYYY-MM-DD HH:MM）或日期 > 建立日期
     orders = orders.map(o => {
@@ -5966,98 +6968,163 @@ async function loadLinePreorders() {
     });
 
     _lpAllOrders = orders;
+    // fix18-10-hotfix21：同步載入同一日期區間的冷藏宅配訂單，供「全部」／「冷藏宅配」模式合併統計
+    await loadShippingOrders();
     renderLinePreordersTable();
   } catch(e) {
     if (tbody) tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;padding:30px;color:#ef4444">載入失敗：${escHtml(e.message)}</td></tr>`;
   }
 }
 
+// fix18-10-hotfix21：統一狀態分類（待確認/已接單/處理中/已出貨/已送達/已完成/已取消）
+// hotfix22-C：改吃 normalizePreorder() 正規化後的欄位（fulfillment_type / logistics_status / order_status），
+// 外帶/外送與冷藏宅配用同一支函式判斷，不再各自維護一套邏輯。
+const LP_BUCKET_LABEL = { confirm:'待確認', accepted:'已接單', processing:'處理中', shipped:'已出貨', delivered:'已送達', done:'已完成', cancel:'已取消' };
+function lpBucketOf(n) {
+  if (n.fulfillment_type === 'shipping') {
+    const s = n.logistics_status || 'pending';
+    return ({ pending:'confirm', accepted:'accepted', packing:'processing', shipped:'shipped', delivered:'delivered', completed:'done', cancelled:'cancel' })[s] || 'confirm';
+  }
+  const s = n.order_status || 'pending';
+  return ({
+    pending:'confirm', pending_accept:'confirm', accepted:'accepted',
+    preparing:'processing', ready:'processing', delivering:'processing',
+    completed:'done', picked_up:'done', delivered:'done',
+    cancelled:'cancel', canceled:'cancel', void:'cancel', voided:'cancel',
+    invalid:'cancel', expired:'cancel', failed:'cancel', payment_failed:'cancel',
+  })[s] || 'confirm';
+}
+
 // ── 渲染預購表格 ──────────────────────────────────────────
+// hotfix22-C ROOT CAUSE FIX：過去表格資料（orders，來自 _lpAllOrders，設計上永遠不含
+// shipping）與統計資料（statOrders，另外merge了 _shippingOrdersCache）是兩份不同的陣列，
+// 「共 N 筆」badge 卻誤用了表格用的 orders.length，導致：
+//   1. 切到「冷藏宅配」Tab 時，orders 仍是空的外帶/外送陣列 → 顯示「共 0 筆」
+//   2. 切到「全部」Tab 時，表格（lp-tbody）本來就設計成不放宅配列 → 看不到宅配訂單
+// 修法：改用 normalizePreorder() 統一正規化外帶/外送與冷藏宅配資料，合併成同一份陣列，
+// 之後的 modeFilter／statusFilter／表格列／badge／統計卡全部只讀這同一份資料。
 function renderLinePreordersTable() {
   const tbody = document.getElementById('lp-tbody');
   if (!tbody) return;
 
-  const modeFilter   = document.getElementById('lp-filter-mode')?.value   || '';
+  const modeFilter   = _lpModeFilter || '';
   const statusFilter = document.getElementById('lp-filter-status')?.value || '';
 
-  let orders = _lpAllOrders;
-  if (modeFilter)   orders = orders.filter(o => o.order_mode === modeFilter);
-  if (statusFilter) orders = orders.filter(o => (o.order_status || o.status) === statusFilter);
+  const normTakeoutDelivery = _lpAllOrders.map(o => normalizePreorder(o, 'line'));
+  const normShipping        = (_shippingOrdersCache || []).map(o => normalizePreorder(o, 'shipping'));
 
-  // fix18-03：排除取消 / 作廢 / 失效狀態再計算統計
-  const INVALID_STATUSES = new Set([
-    'cancelled', 'canceled', 'void', 'voided',
-    'invalid', 'expired', 'failed', 'payment_failed'
-  ]);
-  const validOrders = orders.filter(o => !INVALID_STATUSES.has(o.order_status || o.status || ''));
-  const pending = validOrders.filter(o => ['pending','pending_accept','accepted'].includes(o.order_status || o.status)).length;
-  const revenue = validOrders.reduce((s, o) => s + Number(o.total||0), 0);
+  // 依通路 Tab 決定這個畫面應該看到哪些正規化後的訂單
+  // 全部 = 外帶 + 外送 + 冷藏宅配；外帶／外送＝只算該通路；冷藏宅配＝只算冷藏宅配
+  let modeScoped;
+  if (modeFilter === 'takeout' || modeFilter === 'delivery') {
+    modeScoped = normTakeoutDelivery.filter(n => n.fulfillment_type === modeFilter);
+  } else if (modeFilter === 'shipping') {
+    modeScoped = normShipping;
+  } else {
+    modeScoped = [...normTakeoutDelivery, ...normShipping];
+  }
+
+  // 狀態篩選：套用在同一份正規化資料上（外帶/外送/冷藏宅配共用同一套 lpBucketOf 分類）
+  const filteredAll = statusFilter ? modeScoped.filter(n => lpBucketOf(n) === statusFilter) : modeScoped;
+
+  // ── 統計規則 ──────────────────────────────────────────────
+  // 共 N 筆（badge）：目前篩選後的實際筆數，與表格實際顯示的列數一致（含已取消）
+  // 預購筆數／預購金額：目前篩選後、排除已取消訂單
+  // 待處理：pending/confirmed 等尚未完成（排除 done 與 cancel）
+  const nonCancelled = filteredAll.filter(n => lpBucketOf(n) !== 'cancel');
+  const countTotal   = nonCancelled.length;
+  const pendingCount = filteredAll.filter(n => { const b = lpBucketOf(n); return b !== 'done' && b !== 'cancel'; }).length;
+  const revenue      = nonCancelled.reduce((s, n) => s + Number(n.total || 0), 0);
+
   const setStat = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
-  setStat('lp-stat-total',   validOrders.length);
-  setStat('lp-stat-pending', pending);
+  setStat('lp-stat-total',   countTotal);
+  setStat('lp-stat-pending', pendingCount);
   setStat('lp-stat-revenue', 'NT$' + revenue.toLocaleString());
   const badge = document.getElementById('lp-count-badge');
-  if (badge) badge.textContent = `共 ${orders.length} 筆`;
+  if (badge) badge.textContent = `共 ${filteredAll.length} 筆`;
 
-  if (!orders.length) {
+  if (!filteredAll.length) {
     tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;padding:40px;color:var(--text-muted,#64748b)">此條件下無預購訂單</td></tr>';
     return;
   }
 
-  const STATUS_CLS   = {pending:'status-new',accepted:'status-preparing',preparing:'status-preparing',ready:'status-ready',completed:'status-completed',cancelled:'status-void'};
-  const STATUS_LABEL = {pending:'待接單',accepted:'已接單',preparing:'製作中',ready:'可取餐',completed:'已完成',cancelled:'已取消'};
-  const MODE_LABEL   = {takeout:'🛍️ 外帶', delivery:'🛵 外送', dine_in:'🍽️ 內用'};
+  const STATUS_CLS   = {confirm:'status-new',accepted:'status-preparing',processing:'status-preparing',shipped:'status-preparing',delivered:'status-preparing',done:'status-completed',cancel:'status-void'};
+  const MODE_LABEL   = {takeout:'🛍️ 外帶', delivery:'🛵 外送', shipping:'📦 宅配', dine_in:'🍽️ 內用'};
   const PAY_LABEL    = {cash:'現金',linepay:'LINE Pay',transfer:'轉帳',platform:'平台',credit_card:'信用卡'};
   const tdS = 'padding:8px 8px;border-bottom:1px solid var(--border,#334155);vertical-align:middle';
 
-  // 依預購日期排序
-  orders = [...orders].sort((a, b) => {
-    const da = (a.preorderDate || a.created_at || '').slice(0, 10);
-    const db2 = (b.preorderDate || b.created_at || '').slice(0, 10);
-    return da < db2 ? -1 : da > db2 ? 1 : (a.preorderTime||'') < (b.preorderTime||'') ? -1 : 1;
+  // Hotfix16 BUG-001：訂單建立時間與預約取餐時間必須分離顯示，列表一律用 created_at 排序（新到舊）
+  const today = twTodayStr();
+  const rows = [...filteredAll].sort((a, b) => {
+    const ca = a.created_at || '', cb = b.created_at || '';
+    return ca < cb ? 1 : ca > cb ? -1 : 0;
   });
 
-  tbody.innerHTML = orders.map(o => {
-    const st = o.order_status || o.status || 'pending';
-    const stCls   = STATUS_CLS[st]   || 'status-completed';
-    const stLabel = STATUS_LABEL[st] || st;
-    const items   = (typeof o.items==='string') ? JSON.parse(o.items||'[]') : (o.items||[]);
-    const itemStr = items.map(i => `${i.name}×${i.qty}`).join('、');
-    const phone   = String(o.customer_phone||'');
+  tbody.innerHTML = rows.map(n => {
+    const bucket  = lpBucketOf(n);
+    const stCls   = STATUS_CLS[bucket]   || 'status-completed';
+    const stLabel = LP_BUCKET_LABEL[bucket] || bucket;
+    const itemStr = (n.items || []).map(i => `${i.name}×${i.qty}`).join('、');
+    const phone   = String(n.phone || '');
     const phoneMasked = phone.length > 4 ? phone.slice(0,3)+'****'+phone.slice(-3) : phone;
-    const today = twTodayStr();
-    const isToday = o.preorderDate === today;
-    const preorderBadge = isToday
+    const isShip  = n.fulfillment_type === 'shipping';
+    const isToday = !isShip && n.__raw?.preorderDate === today;
+    const preorderBadge = isShip ? '' : (isToday
       ? '<span style="background:#3b82f6;color:#fff;font-size:10px;padding:2px 6px;border-radius:8px;font-weight:700">今日單</span>'
-      : '<span style="background:#7c3aed;color:#fff;font-size:10px;padding:2px 6px;border-radius:8px;font-weight:700">預購單</span>';
-    const dateDisplay = o.preorderDate
-      ? `${o.preorderDate.slice(5)} ${o.preorderTime||''}`
-      : (o.pickup_time||'—');
+      : '<span style="background:#7c3aed;color:#fff;font-size:10px;padding:2px 6px;border-radius:8px;font-weight:700">預購單</span>');
+    // 建立時間：客人實際送出訂單的時間（created_at），與預約取餐時間完全分離顯示
+    const createdDisplay = n.created_at ? n.created_at.slice(0,16).replace('-','/').replace('-','/') : '—';
+
+    // hotfix22-C：冷藏宅配的狀態機（pending→accepted→packing→shipped→delivered→completed／cancelled）
+    // 與外帶/外送不同，因此「接單／取消」按鈕改呼叫既有的 updateShippingStatus()（routes/line-shipping.js
+    // 專屬端點），不會誤用 lpUpdateStatus()（呼叫 /api/line-orders/online，不支援宅配訂單）。
+    // 「詳情」則導去既有的📦冷藏宅配管理分頁查看完整宅配資訊（地址／物流公司／單號等），
+    // 不強行把宅配細節塞進外帶/外送用的詳情彈窗，避免欄位不對應。
+    const acceptBtn = bucket === 'confirm'
+      ? (isShip
+          ? `<button style="padding:4px 8px;font-size:11px;background:#06C755;border:none;border-radius:5px;color:#fff;cursor:pointer" onclick="updateShippingStatus('${n.order_no}','accepted')">✅ 接單</button>`
+          : `<button style="padding:4px 8px;font-size:11px;background:#06C755;border:none;border-radius:5px;color:#fff;cursor:pointer" onclick="lpUpdateStatus('${n.id}','${n.order_no}','accepted')">✅ 接單</button>`)
+      : '';
+    const cancelBtn = (bucket === 'confirm' || bucket === 'accepted' || bucket === 'processing')
+      ? (isShip
+          ? `<button style="padding:4px 8px;font-size:11px;background:#e53935;border:none;border-radius:5px;color:#fff;cursor:pointer" onclick="updateShippingStatus('${n.order_no}','cancelled')">❌ 取消</button>`
+          : `<button style="padding:4px 8px;font-size:11px;background:#e53935;border:none;border-radius:5px;color:#fff;cursor:pointer" onclick="lpUpdateStatus('${n.id}','${n.order_no}','cancelled')">❌ 取消</button>`)
+      : '';
+    const detailBtn = isShip
+      ? `<button style="padding:4px 8px;font-size:11px;background:var(--bg-base,#0f172a);border:1px solid var(--border,#334155);border-radius:5px;color:var(--text-secondary,#94a3b8);cursor:pointer" onclick="lpSetModeFilter('shipping')">📦 前往宅配管理</button>`
+      : `<button style="padding:4px 8px;font-size:11px;background:var(--bg-base,#0f172a);border:1px solid var(--border,#334155);border-radius:5px;color:var(--text-secondary,#94a3b8);cursor:pointer" onclick="showOrderDetail('${n.id}')">📋 詳情</button>`;
 
     return `<tr style="background:var(--bg-card,#1e293b)">
       <td style="${tdS}">
-        <div style="font-size:12px;font-weight:600;color:var(--text-primary,#f1f5f9)">${escHtml(o.order_number)}</div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-primary,#f1f5f9)">${escHtml(n.order_no)}</div>
         <div style="margin-top:3px">${preorderBadge}</div>
-        <div style="font-size:10px;color:var(--text-muted,#64748b);margin-top:2px">建立：${(o.created_at||'').slice(5,16)}</div>
+        <div style="font-size:10px;color:var(--text-muted,#64748b);margin-top:2px">建立時間：${createdDisplay}</div>
       </td>
       <td style="${tdS};text-align:center">
-        <div style="font-size:13px;font-weight:700;color:${isToday?'#3b82f6':'#a78bfa'}">${dateDisplay}</div>
+        <div style="font-size:9px;color:var(--text-muted,#64748b);margin-bottom:2px">${isShip ? '希望到貨' : '預約取餐'}</div>
+        <div style="font-size:13px;font-weight:700;color:${isShip ? '#f59e0b' : (isToday?'#3b82f6':'#a78bfa')}">${escHtml(n.pickup_display)}</div>
       </td>
-      <td style="${tdS}">${escHtml(o.customer_name||'—')}</td>
+      <td style="${tdS}">${escHtml(n.customer_name||'—')}</td>
       <td style="${tdS};text-align:center;font-size:12px">${escHtml(phoneMasked)}</td>
-      <td style="${tdS};text-align:center">${MODE_LABEL[o.order_mode]||o.order_mode||'—'}</td>
+      <td style="${tdS};text-align:center">${MODE_LABEL[n.fulfillment_type]||n.fulfillment_type||'—'}</td>
       <td style="${tdS};max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(itemStr)}">${escHtml(itemStr||'—')}</td>
-      <td style="${tdS};text-align:center;font-weight:700;color:#f5a623">$${o.total||0}</td>
-      <td style="${tdS};text-align:center;font-size:11px">${PAY_LABEL[o.payment_method]||o.payment_method||'—'}</td>
-      <td style="${tdS};font-size:11px;color:var(--text-muted,#64748b)">${escHtml(o.note||'')}</td>
+      <td style="${tdS};text-align:center">
+        <div style="font-weight:700;color:#f5a623">$${n.total||0}</div>
+        ${(isShip || n.discount_amount > 0) ? `<div style="font-size:9px;color:var(--text-muted,#64748b);margin-top:2px">小計$${n.subtotal||0}${n.discount_amount>0?` <span style="color:#06C755">-$${n.discount_amount}</span>`:''}${isShip?` +運費$${n.shipping_fee||0}`:''}</div>` : ''}
+      </td>
+      <td style="${tdS};text-align:center;font-size:11px">
+        ${PAY_LABEL[n.payment_method]||n.payment_method||'—'}
+        ${n.payment_status ? `<div style="font-size:9px;color:${n.payment_status==='paid'?'#06C755':'var(--text-muted,#64748b)'}">${n.payment_status==='paid'?'✅ 已付款':(n.payment_status==='pending'?'待付款':escHtml(n.payment_status))}</div>` : ''}
+      </td>
+      <td style="${tdS};font-size:11px;color:var(--text-muted,#64748b)">${escHtml(n.note||'')}</td>
       <td style="${tdS};text-align:center">
         <span class="order-status ${stCls}" style="font-size:11px">${stLabel}</span>
       </td>
       <td style="${tdS};text-align:center">
         <div style="display:flex;gap:4px;justify-content:center;flex-wrap:wrap">
-          <button style="padding:4px 8px;font-size:11px;background:var(--bg-base,#0f172a);border:1px solid var(--border,#334155);border-radius:5px;color:var(--text-secondary,#94a3b8);cursor:pointer" onclick="showOrderDetail('${o.id}')">📋 詳情</button>
-          ${st==='pending'?`<button style="padding:4px 8px;font-size:11px;background:#06C755;border:none;border-radius:5px;color:#fff;cursor:pointer" onclick="lpUpdateStatus('${o.id||o.uuid}','${o.order_number}','accepted')">✅ 接單</button>`:''}
-          ${['pending','accepted','preparing'].includes(st)?`<button style="padding:4px 8px;font-size:11px;background:#e53935;border:none;border-radius:5px;color:#fff;cursor:pointer" onclick="lpUpdateStatus('${o.id||o.uuid}','${o.order_number}','cancelled')">❌ 取消</button>`:''}
+          ${detailBtn}
+          ${acceptBtn}
+          ${cancelBtn}
         </div>
       </td>
     </tr>`;
@@ -6118,25 +7185,38 @@ async function loadLineProductsPage() {
   }
 }
 
-// ── Tab 切換：今日販售 / 預購管理 ──────────────────────────
-let _lpmTab = 'today'; // 'today' | 'preorder'
+// ── Tab 切換：今日販售 / 預購管理 / 冷藏宅配商品（fix18-10-hotfix20 新增第三頁籤）──
+let _lpmTab = 'today'; // 'today' | 'preorder' | 'shipping'
 function lpmSwitchTab(tab) {
+  // fix18-10-hotfix22A：切換分頁前先強制關閉兩個商品設定 Modal，避免殘留 open 狀態帶到下一個分頁
+  closeLineSettingsModal();
+  closeShippingProductModal();
   _lpmTab = tab;
   const todayBtn       = document.getElementById('lpm-tab-today');
   const preorderBtn    = document.getElementById('lpm-tab-preorder');
+  const shippingBtn    = document.getElementById('lpm-tab-shipping');
   const todayControls  = document.getElementById('lpm-today-controls');
   const preorderCtrls  = document.getElementById('lpm-preorder-controls');
-
-  const activeStyle = 'color:var(--accent,#3b82f6);border-bottom-color:var(--accent,#3b82f6)';
-  const inactiveStyle = 'color:var(--text-muted,#64748b);border-bottom-color:transparent';
+  const shippingCtrls  = document.getElementById('lpm-shipping-controls');
+  const tableWrap      = document.getElementById('lpm-table-wrap');
+  const shipTableWrap  = document.getElementById('lpm-shipping-table-wrap');
 
   if (todayBtn)    { todayBtn.style.color    = tab==='today'    ? 'var(--accent,#3b82f6)' : 'var(--text-muted,#64748b)'; todayBtn.style.borderBottomColor    = tab==='today'    ? 'var(--accent,#3b82f6)' : 'transparent'; }
   if (preorderBtn) { preorderBtn.style.color = tab==='preorder' ? '#a78bfa'                : 'var(--text-muted,#64748b)'; preorderBtn.style.borderBottomColor = tab==='preorder' ? '#7c3aed' : 'transparent'; }
+  if (shippingBtn) { shippingBtn.style.color = tab==='shipping' ? '#1565c0'                : 'var(--text-muted,#64748b)'; shippingBtn.style.borderBottomColor = tab==='shipping' ? '#1565c0' : 'transparent'; }
 
   if (todayControls)  todayControls.style.display  = tab==='today'    ? 'block' : 'none';
   if (preorderCtrls)  preorderCtrls.style.display  = tab==='preorder' ? 'block' : 'none';
+  if (shippingCtrls)  shippingCtrls.style.display  = tab==='shipping' ? 'block' : 'none';
 
-  renderLpmTable(_lpmProducts);
+  if (tableWrap)     tableWrap.style.display     = tab==='shipping' ? 'none'  : 'block';
+  if (shipTableWrap) shipTableWrap.style.display  = tab==='shipping' ? 'block' : 'none';
+
+  if (tab === 'shipping') {
+    renderLpmShippingTable(_lpmProducts);
+  } else {
+    renderLpmTable(_lpmProducts);
+  }
 }
 
 // ── LINE 商品狀態計算 ──────────────────────────────────────
@@ -6264,13 +7344,30 @@ function renderLpmTable(products) {
   }).join('');
 }
 
-// ── 全選 / 取消全選 ──────────────────────────────────────
+// ── 全選 / 取消全選（fix18-10-hotfix20：改為依目前 Tab 切換操作對象）──
 function lpmToggleAll(checked) {
+  if (_lpmTab === 'shipping') {
+    document.querySelectorAll('.lpm-ship-chk').forEach(cb => { cb.checked = checked; });
+    lpmUpdateShippingSelectedCount();
+    return;
+  }
   document.querySelectorAll('.lpm-chk').forEach(cb => { cb.checked = checked; });
   lpmUpdateCount();
 }
-function lpmSelectAll()   { document.getElementById('lpm-check-all').checked = true;  lpmToggleAll(true);  }
-function lpmDeselectAll() { document.getElementById('lpm-check-all').checked = false; lpmToggleAll(false); }
+function lpmSelectAll() {
+  if (_lpmTab === 'shipping') {
+    const el = document.getElementById('lpm-ship-check-all'); if (el) el.checked = true;
+    lpmToggleAll(true); return;
+  }
+  document.getElementById('lpm-check-all').checked = true;  lpmToggleAll(true);
+}
+function lpmDeselectAll() {
+  if (_lpmTab === 'shipping') {
+    const el = document.getElementById('lpm-ship-check-all'); if (el) el.checked = false;
+    lpmToggleAll(false); return;
+  }
+  document.getElementById('lpm-check-all').checked = false; lpmToggleAll(false);
+}
 
 function lpmUpdateCount() {
   const sel = document.querySelectorAll('.lpm-chk:checked').length;
@@ -6660,6 +7757,207 @@ async function lpmBatch(type) {
     ? `✅ ${successCount} 個成功，⚠️ ${failCount} 個失敗`
     : `✅ ${successCount} 個商品批量更新完成`;
   showToast(msg, failCount ? 'error' : 'success');
+}
+
+// ═══════════════════════════════════════════════════════════
+// 📦 冷藏宅配商品 Tab（fix18-10-hotfix20 新增）
+// LINE 商品管理第三分頁：直接列表管理宅配商品，不再全部塞在 LINE 上架設定 Modal 內
+// ═══════════════════════════════════════════════════════════
+
+// ── 渲染冷藏宅配商品總表 ────────────────────────────────────
+function renderLpmShippingTable(products) {
+  const tbody = document.getElementById('lpm-shipping-tbody');
+  if (!tbody) return;
+  const checkAll = document.getElementById('lpm-ship-check-all');
+  if (checkAll) checkAll.checked = false;
+  lpmUpdateShippingSelectedCount();
+  if (!products.length) {
+    tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;padding:40px;color:var(--text-muted,#64748b)">尚無商品</td></tr>';
+    return;
+  }
+  const tdStyle = 'padding:8px 6px;border-bottom:1px solid var(--border,#334155);vertical-align:middle;text-align:center';
+  tbody.innerHTML = products.map(p => {
+    const imgSrc = p.image || '';
+    const thumbHtml = imgSrc
+      ? `<img src="${escAttr(imgSrc)}" style="width:38px;height:38px;border-radius:6px;object-fit:cover" onerror="this.style.display='none'">`
+      : `<div style="width:38px;height:38px;border-radius:6px;background:var(--bg-base,#0f172a);display:flex;align-items:center;justify-content:center;font-size:18px">📦</div>`;
+    const enabled   = !!Number(p.shipping_enabled);
+    const shipName  = p.shipping_name  ? escHtml(p.shipping_name)  : `<span style="color:var(--text-muted,#64748b)">（沿用「${escHtml(p.name)}」）</span>`;
+    const shipPrice = Number(p.shipping_price) > 0 ? `$${Number(p.shipping_price)}` : `<span style="color:var(--text-muted,#64748b)">（沿用 POS $${p.price}）</span>`;
+    const shipSpec  = p.shipping_spec ? escHtml(p.shipping_spec) : '<span style="color:var(--text-muted,#64748b)">—</span>';
+    const upsell    = !!Number(p.shipping_upsell);
+    const shareLine  = p.shipping_share_line_stock != null ? !!Number(p.shipping_share_line_stock) : true;
+    return `<tr id="lpm-ship-row-${p.id}" style="background:var(--bg-card,#1e293b)">
+      <td style="${tdStyle}"><input type="checkbox" class="lpm-ship-chk" data-id="${p.id}" onchange="lpmUpdateShippingSelectedCount()"></td>
+      <td style="${tdStyle}">${thumbHtml}</td>
+      <td style="${tdStyle};text-align:left;padding-left:10px">
+        <div style="font-weight:600;font-size:13px">${escHtml(p.name)}</div>
+        <div style="font-size:11px;color:var(--text-muted,#64748b)">${escHtml(p.category||'')}</div>
+      </td>
+      <td style="${tdStyle}">
+        <label style="display:flex;align-items:center;justify-content:center;gap:4px;cursor:pointer">
+          <input type="checkbox" ${enabled?'checked':''} onchange="lpmToggleShippingEnabled(${p.id},this.checked)">
+          <span style="font-size:10px;color:${enabled?'#06C755':'#94a3b8'}">${enabled?'✅':'⬜'}</span>
+        </label>
+      </td>
+      <td style="${tdStyle};text-align:left;font-size:12px">${shipName}</td>
+      <td style="${tdStyle};font-size:12px">${shipPrice}</td>
+      <td style="${tdStyle};font-size:12px">${shipSpec}</td>
+      <td style="${tdStyle};font-size:12px">${Number(p.shipping_sort_order)||0}</td>
+      <td style="${tdStyle}"><span style="font-size:11px;color:${upsell?'#7c3aed':'#94a3b8'}">${upsell?'✅ 加購':'—'}</span></td>
+      <td style="${tdStyle}"><span style="font-size:11px;color:${shareLine?'#06C755':'#94a3b8'}">${shareLine?'✅ 共用':'獨立'}</span></td>
+      <td style="${tdStyle}">
+        <button onclick="openShippingProductModal(${p.id})" style="padding:4px 8px;background:#1565c0;color:#fff;border:none;border-radius:5px;font-size:12px;cursor:pointer">✏️編輯宅配</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+// ── 選取計數（冷藏宅配 Tab，沿用共用的選取計數列）────────────
+function lpmUpdateShippingSelectedCount() {
+  const sel = document.querySelectorAll('.lpm-ship-chk:checked').length;
+  const el  = document.getElementById('lpm-selected-count');
+  if (el) el.textContent = sel ? `（已選取 ${sel} 個商品）` : '（未選取商品）';
+}
+
+// ── 全選 / 取消全選（表格自身 checkbox 觸發）────────────────
+function lpmToggleAllShipping(checked) {
+  document.querySelectorAll('.lpm-ship-chk').forEach(cb => { cb.checked = checked; });
+  lpmUpdateShippingSelectedCount();
+}
+
+function lpmShippingGetSelected() {
+  return Array.from(document.querySelectorAll('.lpm-ship-chk:checked')).map(cb => Number(cb.dataset.id));
+}
+
+// ── 快速開關可宅配（表格 checkbox 直接切換，只 PATCH shipping-settings）──
+async function lpmToggleShippingEnabled(productId, enabled) {
+  try {
+    const res  = await apiFetch(`/api/products/${productId}/shipping-settings`, {
+      method:'PATCH', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ shipping_enabled: enabled ? 1 : 0 })
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.message);
+    const idx = _lpmProducts.findIndex(x => x.id === productId);
+    if (idx !== -1) _lpmProducts[idx] = { ..._lpmProducts[idx], ...json.data };
+    renderLpmShippingTable(_lpmProducts);
+    showToast(enabled ? '✅ 已開啟可宅配' : '❌ 已關閉可宅配', 'success');
+  } catch(e) { showToast(e.message || '操作失敗', 'error'); }
+}
+
+// ── 套用宅配設定（主按鈕：售價 / 規格 / 排序，只填有輸入的欄位）──
+async function lpmApplyShippingBatch() {
+  const ids = lpmShippingGetSelected();
+  if (!ids.length) { showToast('請先選擇商品', 'error'); return; }
+
+  const priceVal = document.getElementById('lpm-ship-price')?.value?.trim();
+  const specVal  = document.getElementById('lpm-ship-spec')?.value?.trim();
+  const sortVal  = document.getElementById('lpm-ship-sort')?.value?.trim();
+
+  if (!priceVal && !specVal && !sortVal) { showToast('請至少輸入一項要套用的設定', 'error'); return; }
+
+  const body = {};
+  if (priceVal) body.shipping_price = Number(priceVal);
+  if (specVal)  body.shipping_spec  = specVal;
+  if (sortVal)  body.shipping_sort_order = Number(sortVal);
+
+  if (!confirm(`確定要將已選 ${ids.length} 個商品套用以上宅配設定嗎？`)) return;
+  await _lpmShippingBatchSend(ids, body, '宅配設定');
+}
+
+// ── 個別批次按鈕（啟用/關閉/售價/規格/排序/加購/共用份數）──
+async function lpmShippingBatch(type) {
+  const ids = lpmShippingGetSelected();
+  if (!ids.length) { showToast('請先勾選商品', 'error'); return; }
+
+  let body = {};
+  if (type === 'enable') {
+    if (!confirm(`確定要批次啟用已選 ${ids.length} 個商品的宅配嗎？`)) return;
+    body = { shipping_enabled: 1 };
+  } else if (type === 'disable') {
+    if (!confirm(`確定要批次關閉已選 ${ids.length} 個商品的宅配嗎？`)) return;
+    body = { shipping_enabled: 0 };
+  } else if (type === 'price') {
+    const val = document.getElementById('lpm-ship-price')?.value?.trim();
+    if (!val || isNaN(Number(val))) { showToast('請輸入有效的宅配售價', 'error'); return; }
+    if (!confirm(`確定要將已選 ${ids.length} 個商品的宅配售價設定為 $${val} 嗎？`)) return;
+    body = { shipping_price: Number(val) };
+  } else if (type === 'spec') {
+    const val = document.getElementById('lpm-ship-spec')?.value?.trim();
+    if (!val) { showToast('請輸入宅配規格', 'error'); return; }
+    if (!confirm(`確定要將已選 ${ids.length} 個商品的宅配規格設定為「${val}」嗎？`)) return;
+    body = { shipping_spec: val };
+  } else if (type === 'sort') {
+    const val = document.getElementById('lpm-ship-sort')?.value?.trim();
+    if (val === '' || isNaN(Number(val))) { showToast('請輸入有效的排序數字', 'error'); return; }
+    if (!confirm(`確定要將已選 ${ids.length} 個商品的宅配排序設定為 ${val} 嗎？`)) return;
+    body = { shipping_sort_order: Number(val) };
+  } else if (type === 'upsell_on') {
+    if (!confirm(`確定要將已選 ${ids.length} 個商品設為加購商品嗎？`)) return;
+    body = { shipping_upsell: 1 };
+  } else if (type === 'upsell_off') {
+    if (!confirm(`確定要取消已選 ${ids.length} 個商品的加購商品設定嗎？`)) return;
+    body = { shipping_upsell: 0 };
+  } else if (type === 'share_on') {
+    if (!confirm(`確定要將已選 ${ids.length} 個商品設為共用 LINE 份數嗎？`)) return;
+    body = { shipping_share_line_stock: 1 };
+  } else if (type === 'share_off') {
+    if (!confirm(`確定要將已選 ${ids.length} 個商品設為不共用 LINE 份數（獨立庫存）嗎？`)) return;
+    body = { shipping_share_line_stock: 0 };
+  } else {
+    return;
+  }
+
+  await _lpmShippingBatchSend(ids, body, '宅配');
+}
+
+// ── 共用批量發送邏輯（冷藏宅配 Tab 專用，只呼叫 shipping-settings，絕不動 LINE 外帶/外送欄位）──
+async function _lpmShippingBatchSend(ids, body, label) {
+  let successCount = 0, failCount = 0, firstFailReason = '';
+  const chunks = [];
+  for (let i = 0; i < ids.length; i += 5) chunks.push(ids.slice(i, i+5));
+  for (const chunk of chunks) {
+    await Promise.all(chunk.map(async id => {
+      try {
+        const res = await apiFetch(`/api/products/${id}/shipping-settings`, {
+          method:'PATCH', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(body)
+        });
+        let json;
+        if (res && typeof res.json === 'function') {
+          json = await res.json();
+        } else if (res && res.body) {
+          json = res.body;
+        } else {
+          throw new Error(`HTTP error (status=${res?.status ?? 'unknown'})`);
+        }
+        if (json && json.success) {
+          const idx = _lpmProducts.findIndex(x => x.id === id);
+          if (idx !== -1) _lpmProducts[idx] = { ..._lpmProducts[idx], ...json.data };
+          successCount++;
+        } else {
+          const reason = json?.message || '伺服器回傳 success:false';
+          console.warn(`[lpmShippingBatchSend] id=${id} 失敗：`, reason);
+          if (!firstFailReason) firstFailReason = reason;
+          failCount++;
+        }
+      } catch(e) {
+        const reason = e?.message || String(e);
+        console.error(`[lpmShippingBatchSend] id=${id} 例外：`, reason);
+        if (!firstFailReason) firstFailReason = reason;
+        failCount++;
+      }
+    }));
+  }
+  renderLpmShippingTable(_lpmProducts);
+  if (!failCount) {
+    showToast(`✅ 已更新 ${successCount} 個商品的${label}`, 'success');
+  } else if (!successCount) {
+    showToast(`⚠️ 全部 ${failCount} 個失敗。原因：${firstFailReason || '未知'}`, 'error');
+  } else {
+    showToast(`✅ ${successCount} 個成功，⚠️ ${failCount} 個失敗（${firstFailReason}）`, 'error');
+  }
 }
 
 // ── 批量食材控管（開啟 / 關閉 inventory_enabled）────────────

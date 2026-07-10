@@ -205,7 +205,12 @@
           <button class="shortcut-btn"        data-range="week"      onclick="setDateRange('week')">本週</button>
           <button class="shortcut-btn"        data-range="month"     onclick="setDateRange('month')">本月</button>
           <button class="shortcut-btn"        data-range="lastmonth" onclick="setDateRange('lastmonth')">上月</button>
+          <button class="shortcut-btn"        data-range="single"    onclick="setDateRange('single')">單日</button>
           <button class="shortcut-btn"        data-range="custom"    onclick="setDateRange('custom')">自訂</button>
+        </div>
+        <!-- fix18-10-hotfix21：單日查詢，只查指定單一日期 00:00:00~23:59:59 -->
+        <div id="singleDateRange" style="display:none;gap:4px;align-items:center;display:flex">
+          <input type="date" id="singleDate" onchange="applySingleDateRange()">
         </div>
         <div id="customDateRange" style="display:none;gap:4px;align-items:center;display:flex">
           <input type="date" id="dateFrom">
@@ -223,6 +228,7 @@
       <button class="order-tab-btn active" data-tab="all"      onclick="switchOrderTab('all')">📋 全部訂單</button>
       <button class="order-tab-btn"        data-tab="pos"      onclick="switchOrderTab('pos')">🍽️ 內用/外帶</button>
       <button class="order-tab-btn"        data-tab="delivery" onclick="switchOrderTab('delivery')">🛵 外送報表</button>
+      <button class="order-tab-btn"        data-tab="shipping" onclick="switchOrderTab('shipping')">📦 冷藏宅配</button>
     </div>
 
     <!-- fix18-09B：折扣快速篩選列 (fix18-09E: dynamic from API) -->
@@ -273,10 +279,36 @@
         </table>
       </div>
     </div>
+    <!-- 冷藏宅配（fix18-10-hotfix20：簡化列表，詳細物流資訊移至「詳細」彈窗；
+         完整宅配訂單處理中心請至「LINE 預購管理」頁的 📦 冷藏宅配 分頁）-->
+    <div id="order-tab-shipping" class="order-tab-panel" style="display:none">
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px" id="orderRecShippingStatusFilterBar">
+        <button class="disc-filter-btn active" data-sstatus="all"       onclick="setOrderRecShippingStatusFilter('all')">全部</button>
+        <button class="disc-filter-btn"        data-sstatus="pending"   onclick="setOrderRecShippingStatusFilter('pending')">待確認</button>
+        <button class="disc-filter-btn"        data-sstatus="accepted"  onclick="setOrderRecShippingStatusFilter('accepted')">已接單</button>
+        <button class="disc-filter-btn"        data-sstatus="packing"   onclick="setOrderRecShippingStatusFilter('packing')">包裝中</button>
+        <button class="disc-filter-btn"        data-sstatus="shipped"   onclick="setOrderRecShippingStatusFilter('shipped')">已出貨</button>
+        <button class="disc-filter-btn"        data-sstatus="delivered" onclick="setOrderRecShippingStatusFilter('delivered')">已送達</button>
+        <button class="disc-filter-btn"        data-sstatus="completed" onclick="setOrderRecShippingStatusFilter('completed')">已完成</button>
+        <button class="disc-filter-btn"        data-sstatus="cancelled" onclick="setOrderRecShippingStatusFilter('cancelled')">已取消</button>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>訂單編號</th><th>建立時間</th><th>模式</th><th>顧客</th>
+              <th>商品</th><th>金額</th><th>付款方式</th><th>付款狀態</th><th>交易編號</th>
+              <th>物流公司</th><th>物流單號</th><th>物流狀態</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="orderRecShippingBody">
+            <tr><td colspan="13" class="table-empty">載入中...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
   </div>
 </div>
-
-<!-- 商品管理頁 -->
 <div id="page-products" class="page">
   <div class="page-inner">
     <div class="page-toolbar">
@@ -356,6 +388,10 @@
         <button id="lpm-tab-preorder" onclick="lpmSwitchTab('preorder')"
           style="padding:8px 18px;font-size:13px;font-weight:700;border:none;background:none;color:var(--text-muted,#64748b);border-bottom:2px solid transparent;margin-bottom:-2px;cursor:pointer">
           📅 預購數量管理
+        </button>
+        <button id="lpm-tab-shipping" onclick="lpmSwitchTab('shipping')"
+          style="padding:8px 18px;font-size:13px;font-weight:700;border:none;background:none;color:var(--text-muted,#64748b);border-bottom:2px solid transparent;margin-bottom:-2px;cursor:pointer">
+          📦 冷藏宅配商品
         </button>
       </div>
 
@@ -453,10 +489,48 @@
           <button onclick="lpmBatch('preorder_off')" style="font-size:11px;padding:4px 8px;background:var(--bg-base,#0f172a);color:var(--text-secondary,#94a3b8);border:1px solid var(--border,#334155);border-radius:4px;cursor:pointer;white-space:nowrap">停用預購管理</button>
         </div>
       </div>
+
+      <!-- ══ 冷藏宅配商品：批量操作（Tab=shipping 時顯示）══ -->
+      <div id="lpm-shipping-controls" style="display:none">
+        <div style="display:flex;gap:10px;align-items:flex-end;margin-bottom:10px;flex-wrap:wrap">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;flex:1">
+            <div>
+              <div style="font-size:10px;color:#1565c0;margin-bottom:3px">宅配售價 (NT$)</div>
+              <input type="number" id="lpm-ship-price" min="0" placeholder="不變"
+                style="width:100px;padding:6px 8px;border:1px solid #1565c0;border-radius:6px;font-size:13px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">
+            </div>
+            <div>
+              <div style="font-size:10px;color:#1565c0;margin-bottom:3px">宅配規格</div>
+              <input type="text" id="lpm-ship-spec" placeholder="不變"
+                style="width:120px;padding:6px 8px;border:1px solid #1565c0;border-radius:6px;font-size:13px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">
+            </div>
+            <div>
+              <div style="font-size:10px;color:#1565c0;margin-bottom:3px">宅配排序</div>
+              <input type="number" id="lpm-ship-sort" min="0" step="1" placeholder="不變"
+                style="width:80px;padding:6px 8px;border:1px solid #1565c0;border-radius:6px;font-size:13px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">
+            </div>
+          </div>
+          <button onclick="lpmApplyShippingBatch()" style="padding:10px 20px;background:#1565c0;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;white-space:nowrap;box-shadow:0 2px 8px rgba(21,101,192,.35);flex-shrink:0">
+            💾 套用宅配設定
+          </button>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;padding-top:10px;border-top:1px solid var(--border,#334155)">
+          <span style="font-size:11px;color:var(--text-muted,#64748b);align-self:center">批次：</span>
+          <button onclick="lpmShippingBatch('enable')" style="font-size:11px;padding:4px 8px;background:#06C755;color:#fff;border:none;border-radius:4px;cursor:pointer;white-space:nowrap">✅ 批次啟用宅配</button>
+          <button onclick="lpmShippingBatch('disable')" style="font-size:11px;padding:4px 8px;background:#e53935;color:#fff;border:none;border-radius:4px;cursor:pointer;white-space:nowrap">❌ 批次關閉宅配</button>
+          <button onclick="lpmShippingBatch('price')" style="font-size:11px;padding:4px 8px;background:var(--bg-base,#0f172a);color:var(--text-secondary,#94a3b8);border:1px solid var(--border,#334155);border-radius:4px;cursor:pointer;white-space:nowrap">只更新宅配售價</button>
+          <button onclick="lpmShippingBatch('spec')" style="font-size:11px;padding:4px 8px;background:var(--bg-base,#0f172a);color:var(--text-secondary,#94a3b8);border:1px solid var(--border,#334155);border-radius:4px;cursor:pointer;white-space:nowrap">只更新宅配規格</button>
+          <button onclick="lpmShippingBatch('sort')" style="font-size:11px;padding:4px 8px;background:var(--bg-base,#0f172a);color:var(--text-secondary,#94a3b8);border:1px solid var(--border,#334155);border-radius:4px;cursor:pointer;white-space:nowrap">只更新排序</button>
+          <button onclick="lpmShippingBatch('upsell_on')" style="font-size:11px;padding:4px 8px;background:#7c3aed;color:#fff;border:none;border-radius:4px;cursor:pointer;white-space:nowrap">設為加購商品</button>
+          <button onclick="lpmShippingBatch('upsell_off')" style="font-size:11px;padding:4px 8px;background:var(--bg-base,#0f172a);color:var(--text-secondary,#94a3b8);border:1px solid var(--border,#334155);border-radius:4px;cursor:pointer;white-space:nowrap">取消加購商品</button>
+          <button onclick="lpmShippingBatch('share_on')" style="font-size:11px;padding:4px 8px;background:#06C755;color:#fff;border:none;border-radius:4px;cursor:pointer;white-space:nowrap">共用 LINE 份數</button>
+          <button onclick="lpmShippingBatch('share_off')" style="font-size:11px;padding:4px 8px;background:var(--bg-base,#0f172a);color:var(--text-secondary,#94a3b8);border:1px solid var(--border,#334155);border-radius:4px;cursor:pointer;white-space:nowrap">不共用 LINE 份數</button>
+        </div>
+      </div>
     </div>
 
-    <!-- 商品總表 -->
-    <div style="overflow-x:auto;border:1px solid var(--border,#334155);border-radius:10px">
+    <!-- 商品總表（今日販售 / 預購數量 Tab 共用）-->
+    <div id="lpm-table-wrap" style="overflow-x:auto;border:1px solid var(--border,#334155);border-radius:10px">
       <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:900px">
         <thead>
           <tr style="background:var(--bg-card,#1e293b);border-bottom:1px solid var(--border,#334155)">
@@ -478,6 +552,30 @@
         </thead>
         <tbody id="lpm-tbody">
           <tr><td colspan="14" style="text-align:center;padding:40px;color:var(--text-muted,#64748b)">載入中…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- 📦 冷藏宅配商品總表（Tab=shipping 時顯示，fix18-10-hotfix20 新增）-->
+    <div id="lpm-shipping-table-wrap" style="display:none;overflow-x:auto;border:1px solid var(--border,#334155);border-radius:10px">
+      <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:960px">
+        <thead>
+          <tr style="background:var(--bg-card,#1e293b);border-bottom:1px solid var(--border,#334155)">
+            <th style="padding:10px 8px;text-align:center;width:36px"><input type="checkbox" id="lpm-ship-check-all" onchange="lpmToggleAllShipping(this.checked)"></th>
+            <th style="padding:10px 8px;text-align:center;width:52px">圖片</th>
+            <th style="padding:10px 12px;text-align:left">商品名稱</th>
+            <th style="padding:10px 8px;text-align:center;width:72px">宅配啟用</th>
+            <th style="padding:10px 12px;text-align:left">宅配名稱</th>
+            <th style="padding:10px 8px;text-align:center;width:90px">宅配售價</th>
+            <th style="padding:10px 8px;text-align:center;width:100px">宅配規格</th>
+            <th style="padding:10px 8px;text-align:center;width:70px">排序</th>
+            <th style="padding:10px 8px;text-align:center;width:72px">是否加購</th>
+            <th style="padding:10px 8px;text-align:center;width:90px">共用LINE份數</th>
+            <th style="padding:10px 8px;text-align:center;width:120px">操作</th>
+          </tr>
+        </thead>
+        <tbody id="lpm-shipping-tbody">
+          <tr><td colspan="11" style="text-align:center;padding:40px;color:var(--text-muted,#64748b)">載入中…</td></tr>
         </tbody>
       </table>
     </div>
@@ -503,7 +601,13 @@
         <button class="btn-secondary" id="lpf-today" onclick="lpSetFilter('today')" style="font-size:12px;padding:5px 10px">今天</button>
         <button class="btn-secondary" id="lpf-tomorrow" onclick="lpSetFilter('tomorrow')" style="font-size:12px;padding:5px 10px">明天</button>
         <button class="btn-secondary" id="lpf-week" onclick="lpSetFilter('week')" style="font-size:12px;padding:5px 10px">本週</button>
+        <button class="btn-secondary" id="lpf-single" onclick="lpSetFilter('single')" style="font-size:12px;padding:5px 10px">單日</button>
         <button class="btn-secondary" id="lpf-all" onclick="lpSetFilter('all')" style="font-size:12px;padding:5px 10px;background:var(--accent);color:#fff">全部預購</button>
+      </div>
+      <!-- fix18-10-hotfix21：單日查詢，只查指定單一日期 -->
+      <div id="lp-single-date-wrap" style="display:none;gap:6px;align-items:center">
+        <label style="font-size:12px;color:var(--text-secondary,#94a3b8)">指定日期</label>
+        <input type="date" id="lp-date-single" onchange="lpSetFilter('single')" style="padding:5px 8px;border:1px solid var(--border,#334155);border-radius:6px;font-size:12px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">
       </div>
       <div style="display:flex;gap:6px;align-items:center">
         <label style="font-size:12px;color:var(--text-secondary,#94a3b8)">自訂日期</label>
@@ -512,63 +616,95 @@
         <input type="date" id="lp-date-to" style="padding:5px 8px;border:1px solid var(--border,#334155);border-radius:6px;font-size:12px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">
         <button class="btn-secondary" onclick="lpSetFilter('custom')" style="font-size:12px;padding:5px 10px">查詢</button>
       </div>
-      <div style="display:flex;gap:6px">
-        <select id="lp-filter-mode" onchange="renderLinePreordersTable()" style="padding:5px 8px;border:1px solid var(--border,#334155);border-radius:6px;font-size:12px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">
-          <option value="">全部模式</option>
-          <option value="takeout">外帶</option>
-          <option value="delivery">外送</option>
-        </select>
+      <!-- fix18-10-hotfix20：LINE 訂單處理中心——通路 Tab（全部／外帶／外送／冷藏宅配），取代原下拉選單 -->
+      <div style="display:flex;gap:6px" id="lp-mode-tabs">
+        <button class="btn-secondary" id="lpm-mode-all"      onclick="lpSetModeFilter('')"          style="font-size:12px;padding:5px 12px;background:var(--accent);color:#fff">全部</button>
+        <button class="btn-secondary" id="lpm-mode-takeout"  onclick="lpSetModeFilter('takeout')"   style="font-size:12px;padding:5px 12px">🛍 外帶</button>
+        <button class="btn-secondary" id="lpm-mode-delivery" onclick="lpSetModeFilter('delivery')"  style="font-size:12px;padding:5px 12px">🛵 外送</button>
+        <button class="btn-secondary" id="lpm-mode-shipping" onclick="lpSetModeFilter('shipping')"  style="font-size:12px;padding:5px 12px">📦 冷藏宅配</button>
+      </div>
+      <div style="display:flex;gap:6px" id="lp-status-filter-wrap">
         <select id="lp-filter-status" onchange="renderLinePreordersTable()" style="padding:5px 8px;border:1px solid var(--border,#334155);border-radius:6px;font-size:12px;background:var(--bg-base,#0f172a);color:var(--text-primary,#f1f5f9)">
           <option value="">全部狀態</option>
-          <option value="pending">待接單</option>
+          <option value="confirm">待確認</option>
           <option value="accepted">已接單</option>
-          <option value="preparing">製作中</option>
-          <option value="ready">可取餐</option>
-          <option value="completed">已完成</option>
-          <option value="cancelled">已取消</option>
+          <option value="processing">處理中</option>
+          <option value="done">已完成</option>
+          <option value="cancel">已取消</option>
         </select>
       </div>
       <span id="lp-count-badge" style="font-size:12px;color:#06C755;font-weight:600;margin-left:auto"></span>
     </div>
 
-    <!-- 統計卡 -->
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:14px" id="lp-stats-row">
-      <div style="background:var(--bg-card,#1e293b);border:1px solid var(--border,#334155);border-radius:8px;padding:12px;text-align:center">
-        <div style="font-size:11px;color:var(--text-muted,#64748b)">預購筆數</div>
-        <div style="font-size:22px;font-weight:700" id="lp-stat-total">—</div>
+    <!-- 外帶／外送／全部：預購訂單面板 -->
+    <div id="lp-preorder-panel">
+      <!-- 統計卡 -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:14px" id="lp-stats-row">
+        <div style="background:var(--bg-card,#1e293b);border:1px solid var(--border,#334155);border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:11px;color:var(--text-muted,#64748b)">預購筆數</div>
+          <div style="font-size:22px;font-weight:700" id="lp-stat-total">—</div>
+        </div>
+        <div style="background:var(--bg-card,#1e293b);border:1px solid var(--border,#334155);border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:11px;color:var(--text-muted,#64748b)">待處理</div>
+          <div style="font-size:22px;font-weight:700;color:#fbbf24" id="lp-stat-pending">—</div>
+        </div>
+        <div style="background:var(--bg-card,#1e293b);border:1px solid var(--border,#334155);border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:11px;color:var(--text-muted,#64748b)">預購金額</div>
+          <div style="font-size:22px;font-weight:700;color:#06C755" id="lp-stat-revenue">—</div>
+        </div>
       </div>
-      <div style="background:var(--bg-card,#1e293b);border:1px solid var(--border,#334155);border-radius:8px;padding:12px;text-align:center">
-        <div style="font-size:11px;color:var(--text-muted,#64748b)">待處理</div>
-        <div style="font-size:22px;font-weight:700;color:#fbbf24" id="lp-stat-pending">—</div>
-      </div>
-      <div style="background:var(--bg-card,#1e293b);border:1px solid var(--border,#334155);border-radius:8px;padding:12px;text-align:center">
-        <div style="font-size:11px;color:var(--text-muted,#64748b)">預購金額</div>
-        <div style="font-size:22px;font-weight:700;color:#06C755" id="lp-stat-revenue">—</div>
+
+      <!-- 預購訂單表 -->
+      <div style="overflow-x:auto;border:1px solid var(--border,#334155);border-radius:10px">
+        <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:960px">
+          <thead>
+            <tr style="background:var(--bg-card,#1e293b);border-bottom:1px solid var(--border,#334155)">
+              <th style="padding:10px 10px;text-align:left;width:140px">訂單編號／建立時間</th>
+              <th style="padding:10px 8px;text-align:center;width:140px">預約取餐</th>
+              <th style="padding:10px 8px;text-align:left;width:90px">顧客</th>
+              <th style="padding:10px 8px;text-align:center;width:70px">電話</th>
+              <th style="padding:10px 8px;text-align:center;width:60px">方式</th>
+              <th style="padding:10px 8px;text-align:left">商品明細</th>
+              <th style="padding:10px 8px;text-align:center;width:70px">金額</th>
+              <th style="padding:10px 8px;text-align:center;width:60px">付款</th>
+              <th style="padding:10px 8px;text-align:left;width:80px">備註</th>
+              <th style="padding:10px 8px;text-align:center;width:90px">狀態</th>
+              <th style="padding:10px 8px;text-align:center;width:110px">操作</th>
+            </tr>
+          </thead>
+          <tbody id="lp-tbody">
+            <tr><td colspan="11" style="text-align:center;padding:40px;color:var(--text-muted,#64748b)">載入中…</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
 
-    <!-- 預購訂單表 -->
-    <div style="overflow-x:auto;border:1px solid var(--border,#334155);border-radius:10px">
-      <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:960px">
-        <thead>
-          <tr style="background:var(--bg-card,#1e293b);border-bottom:1px solid var(--border,#334155)">
-            <th style="padding:10px 10px;text-align:left;width:140px">訂單編號</th>
-            <th style="padding:10px 8px;text-align:center;width:130px">預購日期時段</th>
-            <th style="padding:10px 8px;text-align:left;width:90px">顧客</th>
-            <th style="padding:10px 8px;text-align:center;width:70px">電話</th>
-            <th style="padding:10px 8px;text-align:center;width:60px">方式</th>
-            <th style="padding:10px 8px;text-align:left">商品明細</th>
-            <th style="padding:10px 8px;text-align:center;width:70px">金額</th>
-            <th style="padding:10px 8px;text-align:center;width:60px">付款</th>
-            <th style="padding:10px 8px;text-align:left;width:80px">備註</th>
-            <th style="padding:10px 8px;text-align:center;width:90px">狀態</th>
-            <th style="padding:10px 8px;text-align:center;width:110px">操作</th>
-          </tr>
-        </thead>
-        <tbody id="lp-tbody">
-          <tr><td colspan="11" style="text-align:center;padding:40px;color:var(--text-muted,#64748b)">載入中…</td></tr>
-        </tbody>
-      </table>
+    <!-- 📦 冷藏宅配：訂單處理面板（fix18-10-hotfix20：由「訂單紀錄」頁移入，此處為 LINE 宅配訂單詳細處理中心）-->
+    <div id="lp-shipping-panel" style="display:none">
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px" id="shippingStatusFilterBar">
+        <button class="disc-filter-btn active" data-sstatus="all"       onclick="setShippingStatusFilter('all')">全部</button>
+        <button class="disc-filter-btn"        data-sstatus="pending"   onclick="setShippingStatusFilter('pending')">待確認</button>
+        <button class="disc-filter-btn"        data-sstatus="accepted"  onclick="setShippingStatusFilter('accepted')">已接單</button>
+        <button class="disc-filter-btn"        data-sstatus="packing"   onclick="setShippingStatusFilter('packing')">包裝中</button>
+        <button class="disc-filter-btn"        data-sstatus="shipped"   onclick="setShippingStatusFilter('shipped')">已出貨</button>
+        <button class="disc-filter-btn"        data-sstatus="delivered" onclick="setShippingStatusFilter('delivered')">已送達</button>
+        <button class="disc-filter-btn"        data-sstatus="completed" onclick="setShippingStatusFilter('completed')">已完成</button>
+        <button class="disc-filter-btn"        data-sstatus="cancelled" onclick="setShippingStatusFilter('cancelled')">已取消</button>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>訂單編號</th><th>建立時間</th><th>收件人</th><th>電話</th><th>收件地址</th>
+              <th>商品明細</th><th>小計</th><th>優惠折扣</th><th>運費</th><th>應付金額</th><th>希望到貨日</th>
+              <th>付款方式</th><th>宅配狀態</th><th>物流公司</th><th>物流單號</th><th>備註</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="shippingOrdersBody">
+            <tr><td colspan="17" class="table-empty">載入中...</td></tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   </div>
 </div>
@@ -639,6 +775,11 @@
         <div class="settings-card full" id="lineEntryCard">
           <h3>📲 LINE 點餐入口資訊</h3>
           <div id="lineEntryContent">載入中...</div>
+        </div>
+        <!-- fix18-10-hotfix19：冷藏宅配獨立入口（僅後台顯示，不放在顧客點餐頁）-->
+        <div class="settings-card full" id="shipEntryCard">
+          <h3>📦 冷藏宅配入口</h3>
+          <div id="shipEntryContent">載入中...</div>
         </div>
       </div>
     </div>
@@ -893,6 +1034,120 @@
           <div id="businessCalendarList" style="display:flex;flex-direction:column;gap:10px">載入中…</div>
         </div>
 
+        <!-- 📢 商家公告中心（Hotfix17）──────────────────────── -->
+        <div class="settings-card" style="grid-column:1/-1">
+          <h3>📢 商家公告</h3>
+          <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
+            設定顯示在 LINE 點餐前台的公告（活動 / 新品 / 店休提醒等）。若未啟用手動公告，且「Business Calendar 休假時自動產生休假公告」開啟，休假期間會自動顯示休假公告。
+          </p>
+          <div style="display:grid;grid-template-columns:1fr 340px;gap:20px;align-items:start">
+            <div>
+              <label class="checkbox-label" style="margin-bottom:14px">
+                <input type="checkbox" id="set-line_announcement_enabled" onchange="renderAnnouncementPreview()">
+                <span style="font-size:14px;font-weight:700">啟用公告</span>
+              </label>
+              <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:14px">
+                <label>
+                  <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">公告類型</div>
+                  <select id="set-line_announcement_type" class="form-input" style="width:100%" onchange="renderAnnouncementPreview()">
+                    <option value="general">📢 一般公告</option>
+                    <option value="holiday">🏖️ 店休公告</option>
+                    <option value="promo">🎉 活動公告</option>
+                    <option value="new_product">🆕 新品上市</option>
+                    <option value="delivery">📦 宅配公告</option>
+                    <option value="member">🎁 會員公告</option>
+                    <option value="custom">✨ 自訂公告</option>
+                  </select>
+                </label>
+                <label>
+                  <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">公告版本</div>
+                  <input type="text" id="set-line_announcement_version" class="form-input" style="width:100%" placeholder="1" oninput="renderAnnouncementPreview()">
+                  <div style="font-size:11px;color:var(--text-muted);margin-top:4px">內容更新時建議手動 +1，讓已關閉過公告的客人重新看到</div>
+                </label>
+              </div>
+              <label style="display:block;margin-bottom:14px">
+                <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">公告標題</div>
+                <input type="text" id="set-line_announcement_title" class="form-input" style="width:100%" placeholder="例：新品上市" oninput="renderAnnouncementPreview()">
+              </label>
+              <label style="display:block;margin-bottom:14px">
+                <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">公告內容</div>
+                <textarea id="set-line_announcement_body" class="form-input" style="width:100%;min-height:80px;resize:vertical" placeholder="支援換行" oninput="renderAnnouncementPreview()"></textarea>
+              </label>
+              <label style="display:block;margin-bottom:14px">
+                <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">公告圖片 URL（選填）</div>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <input type="text" id="set-line_announcement_image_url" class="form-input" style="flex:1" placeholder="https://..." oninput="renderAnnouncementPreview()">
+                  <button type="button" class="btn-secondary" style="white-space:nowrap" onclick="document.getElementById('announceImageFileInput').click()">📤 上傳圖片</button>
+                  <input type="file" id="announceImageFileInput" accept="image/png,image/jpeg,image/webp,image/gif" style="display:none" onchange="uploadAnnouncementImage(this)">
+                </div>
+                <div id="announceImageUploadHint" style="font-size:11px;color:var(--text-muted);margin-top:4px;display:none"></div>
+              </label>
+              <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:14px">
+                <label>
+                  <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">按鈕文字</div>
+                  <input type="text" id="set-line_announcement_button_text" class="form-input" style="width:100%" placeholder="立即查看" oninput="renderAnnouncementPreview()">
+                </label>
+                <label>
+                  <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">按鈕動作</div>
+                  <select id="set-line_announcement_button_action" class="form-input" style="width:100%" onchange="onAnnouncementButtonActionChange()">
+                    <option value="close">關閉公告</option>
+                    <option value="scroll_products">捲到商品</option>
+                    <option value="open_cart">開啟購物車</option>
+                    <option value="open_url">開啟網址</option>
+                    <option value="category">指定分類</option>
+                    <option value="product">指定商品</option>
+                    <option value="none">不顯示按鈕</option>
+                  </select>
+                </label>
+              </div>
+              <label id="announceUrlWrap" style="display:none;margin-bottom:14px">
+                <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">按鈕網址（button_action=open_url 時使用）</div>
+                <input type="text" id="set-line_announcement_button_url" class="form-input" style="width:100%" placeholder="https://...">
+              </label>
+              <label id="announceCategoryWrap" style="display:none;margin-bottom:14px">
+                <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">指定分類 ID（button_action=category 時使用）</div>
+                <input type="text" id="set-line_announcement_category_id" class="form-input" style="width:100%">
+              </label>
+              <label id="announceProductWrap" style="display:none;margin-bottom:14px">
+                <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">指定商品 ID（button_action=product 時使用）</div>
+                <input type="text" id="set-line_announcement_product_id" class="form-input" style="width:100%">
+              </label>
+              <div style="margin-bottom:6px;font-size:12px;font-weight:700;color:var(--text-secondary)">公告有效期間</div>
+              <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
+                <input type="date" id="set-line_announcement_start_date" class="form-input" style="flex:1;min-width:140px">
+                <span style="color:var(--text-muted)">～</span>
+                <input type="date" id="set-line_announcement_end_date" class="form-input" style="flex:1;min-width:140px">
+                <span style="font-size:11px;color:var(--text-muted)">留空代表不限制</span>
+              </div>
+              <label class="checkbox-label" style="margin-bottom:10px">
+                <input type="checkbox" id="set-line_announcement_closable" checked>
+                <span>允許顧客關閉</span>
+              </label>
+              <div style="margin-bottom:6px;font-size:12px;font-weight:700;color:var(--text-secondary)">顯示方式</div>
+              <div style="display:flex;gap:16px;margin-bottom:14px">
+                <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="radio" name="announceDisplayMode" value="modal" id="set-line_announcement_display_mode-modal" onchange="renderAnnouncementPreview()">彈窗</label>
+                <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="radio" name="announceDisplayMode" value="banner" id="set-line_announcement_display_mode-banner" onchange="renderAnnouncementPreview()">頁面公告</label>
+              </div>
+              <div style="margin-bottom:6px;font-size:12px;font-weight:700;color:var(--text-secondary)">再次顯示</div>
+              <div style="display:flex;gap:14px;margin-bottom:14px;flex-wrap:wrap">
+                <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="radio" name="announceFrequency" value="always" id="set-line_announcement_frequency-always">每次都顯示</label>
+                <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="radio" name="announceFrequency" value="daily" id="set-line_announcement_frequency-daily">每天一次</label>
+                <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="radio" name="announceFrequency" value="version" id="set-line_announcement_frequency-version">公告更新才重新顯示</label>
+                <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="radio" name="announceFrequency" value="once" id="set-line_announcement_frequency-once">永遠只顯示一次</label>
+              </div>
+              <label class="checkbox-label" style="margin-bottom:16px">
+                <input type="checkbox" id="set-line_announcement_auto_holiday" checked>
+                <span>Business Calendar 休假時自動產生休假公告</span>
+              </label>
+              <button class="btn-primary" style="background:#06C755;border-color:#06C755" onclick="saveAnnouncementSettings()">💾 儲存公告設定</button>
+            </div>
+            <div style="position:sticky;top:12px">
+              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:8px">即時預覽</div>
+              <div id="announcementPreview" style="border:1px solid var(--border,#334155);border-radius:12px;padding:16px;background:var(--bg-card,#1e293b);min-height:120px"></div>
+            </div>
+          </div>
+        </div>
+
         <!-- 外帶/外送當前狀態一覽 -->
         <div class="settings-card">
           <h3>🚦 當前接單狀態</h3>
@@ -1015,33 +1270,49 @@
           <button class="btn-primary" style="margin-top:12px;background:#06C755;border-color:#06C755" onclick="saveTakeoutDeliveryRule('delivery')">💾 儲存外送設定</button>
         </div>
 
-        <div class="settings-card">
-          <h3>💳 LINE 點餐付款方式</h3>
-          <p style="font-size:12px;color:#888;margin-bottom:12px">控制 LINE 點餐頁顯示的付款方式</p>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 16px" id="linePaymentToggles">
-            <label class="checkbox-label">
-              <input type="checkbox" id="lp-cash" onchange="saveLinePaymentSettings()">
-              <span>💵 現金 (cash)</span>
-            </label>
-            <label class="checkbox-label">
-              <input type="checkbox" id="lp-linepay" onchange="saveLinePaymentSettings()">
-              <span>💚 LINE Pay</span>
-            </label>
-            <label class="checkbox-label">
-              <input type="checkbox" id="lp-credit_card" onchange="saveLinePaymentSettings()">
-              <span>💳 信用卡</span>
-            </label>
-            <label class="checkbox-label">
-              <input type="checkbox" id="lp-platform" onchange="saveLinePaymentSettings()">
-              <span>📱 平台付款</span>
-            </label>
-            <label class="checkbox-label">
-              <input type="checkbox" id="lp-transfer" onchange="saveLinePaymentSettings()">
-              <span>🏦 轉帳</span>
-            </label>
+        <div class="settings-card full">
+          <h3>💳 線上付款方式管理</h3>
+          <p style="font-size:12px;color:#888;margin-bottom:4px">
+            控制 LINE 線上點餐三個通路（外帶／外送／冷藏宅配）各自可用的付款方式，<b>與實體 POS「系統設定 → 付款方式管理」、「系統設定 → 金流 API」完全獨立，互不影響</b>。
+          </p>
+          <p style="font-size:12px;color:#e65100;margin-bottom:12px">⚠️ 每個通路至少需要勾選一種付款方式，否則無法儲存。</p>
+
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:20px">
+            <div>
+              <h4 style="font-size:13px;font-weight:700;margin-bottom:8px">🛍️ 外帶付款方式</h4>
+              <div style="display:flex;flex-direction:column;gap:6px">
+                <label class="checkbox-label"><input type="checkbox" id="op-takeout-cash"><span>💵 現金</span></label>
+                <label class="checkbox-label"><input type="checkbox" id="op-takeout-linepay"><span>💚 LINE Pay</span></label>
+                <label class="checkbox-label"><input type="checkbox" id="op-takeout-transfer"><span>🏦 轉帳</span></label>
+                <label class="checkbox-label"><input type="checkbox" id="op-takeout-credit_card"><span>💳 信用卡</span></label>
+                <label class="checkbox-label"><input type="checkbox" id="op-takeout-platform"><span>📱 平台付款</span></label>
+              </div>
+            </div>
+            <div>
+              <h4 style="font-size:13px;font-weight:700;margin-bottom:8px">🛵 外送付款方式</h4>
+              <div style="display:flex;flex-direction:column;gap:6px">
+                <label class="checkbox-label"><input type="checkbox" id="op-delivery-cash"><span>💵 現金</span></label>
+                <label class="checkbox-label"><input type="checkbox" id="op-delivery-linepay"><span>💚 LINE Pay</span></label>
+                <label class="checkbox-label"><input type="checkbox" id="op-delivery-transfer"><span>🏦 轉帳</span></label>
+                <label class="checkbox-label"><input type="checkbox" id="op-delivery-credit_card"><span>💳 信用卡</span></label>
+                <label class="checkbox-label"><input type="checkbox" id="op-delivery-platform"><span>📱 平台付款</span></label>
+              </div>
+            </div>
+            <div>
+              <h4 style="font-size:13px;font-weight:700;margin-bottom:8px">📦 冷藏宅配付款方式</h4>
+              <div style="display:flex;flex-direction:column;gap:6px">
+                <label class="checkbox-label"><input type="checkbox" id="op-shipping-cash"><span>💵 現金</span></label>
+                <label class="checkbox-label"><input type="checkbox" id="op-shipping-linepay"><span>💚 LINE Pay</span></label>
+                <label class="checkbox-label"><input type="checkbox" id="op-shipping-transfer"><span>🏦 轉帳</span></label>
+                <label class="checkbox-label"><input type="checkbox" id="op-shipping-credit_card"><span>💳 信用卡</span></label>
+                <label class="checkbox-label"><input type="checkbox" id="op-shipping-platform"><span>📱 平台付款</span></label>
+              </div>
+            </div>
           </div>
-          <div id="linePaymentStatus" style="margin-top:10px;font-size:12px;color:#888"></div>
+
+          <button class="btn-primary" style="margin-top:16px;background:#06C755;border-color:#06C755" onclick="saveOnlinePaymentMethods()">💾 儲存線上付款方式管理</button>
         </div>
+
         <div class="settings-card" style="grid-column:1/-1;overflow:hidden">
           <details class="legacy-collapse" id="legacyBizHoursDetails">
             <summary>
@@ -1094,6 +1365,129 @@
           <h3>📋 指定店休日（每行一個日期，格式 YYYY-MM-DD）</h3>
           <textarea id="set-line_closed_dates_text" rows="3" placeholder="例：2026-06-04\n2026-06-05" style="width:100%;background:var(--bg-card);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);padding:8px 10px;font-family:var(--font-body);font-size:13px;resize:vertical"></textarea>
           <button class="btn-primary" style="margin-top:12px" onclick="saveAdvancedLineSettings()">💾 儲存預約設定</button>
+        </div>
+
+        <!-- 📦 冷藏宅配設定（Hotfix18 fix18-10-hotfix18）───────────────── -->
+        <div class="settings-card" style="grid-column:1/-1">
+          <h3>📦 冷藏宅配設定</h3>
+          <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
+            獨立於外帶/外送的冷藏宅配入口。啟用後，LINE 點餐首頁會出現「📦 冷藏宅配」按鈕，導向獨立下單頁面。
+          </p>
+          <label class="checkbox-label" style="margin-bottom:14px;display:block">
+            <input type="checkbox" id="set-shipping_enabled"> 啟用冷藏宅配
+          </label>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px">
+            <label>
+              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">宅配頁標題</div>
+              <input type="text" id="set-shipping_title" placeholder="冷藏宅配" class="form-input" style="width:100%">
+            </label>
+            <label>
+              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">物流公司名稱</div>
+              <input type="text" id="set-shipping_carrier_name" placeholder="黑貓冷藏宅配" class="form-input" style="width:100%">
+            </label>
+          </div>
+          <label style="display:block;margin-top:10px">
+            <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">宅配說明</div>
+            <textarea id="set-shipping_description" rows="2" style="width:100%;background:var(--bg-card);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);padding:8px 10px;font-family:var(--font-body);font-size:13px;resize:vertical"></textarea>
+          </label>
+          <label style="display:block;margin-top:10px">
+            <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">宅配公告（顯示於前台頁）</div>
+            <textarea id="set-shipping_notice" rows="3" style="width:100%;background:var(--bg-card);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);padding:8px 10px;font-family:var(--font-body);font-size:13px;resize:vertical" placeholder="例：📦 全台冷藏宅配&#10;真空包裝冷藏配送&#10;收到後請立即冷藏"></textarea>
+          </label>
+          <label style="display:block;margin-top:10px">
+            <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">保存方式提醒</div>
+            <input type="text" id="set-shipping_storage_note" placeholder="收到後請立即冷藏，建議 48 小時內食用完畢" class="form-input" style="width:100%">
+          </label>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-top:10px">
+            <label>
+              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">宅配運費（NT$）</div>
+              <input type="number" id="set-shipping_fee" min="0" step="1" class="form-input" style="width:100%">
+            </label>
+            <label>
+              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">滿額免運門檻（NT$）</div>
+              <input type="number" id="set-shipping_free_threshold" min="0" step="1" class="form-input" style="width:100%">
+            </label>
+            <label>
+              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">最低訂購金額（NT$）</div>
+              <input type="number" id="set-shipping_min_order_amount" min="0" step="1" class="form-input" style="width:100%">
+            </label>
+            <label>
+              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">可提前指定到貨天數</div>
+              <input type="number" id="set-shipping_arrival_days_limit" min="0" max="60" step="1" class="form-input" style="width:100%">
+            </label>
+            <label>
+              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">最短出貨準備天數</div>
+              <input type="number" id="set-shipping_lead_days" min="0" step="1" class="form-input" style="width:100%">
+            </label>
+          </div>
+          <label class="checkbox-label" style="margin-top:10px;display:block">
+            <input type="checkbox" id="set-shipping_allow_arrival_date"> 開放顧客指定到貨日期
+          </label>
+          <label class="checkbox-label" style="margin-top:6px;display:block">
+            <input type="checkbox" id="set-shipping_upsell_enabled"> 顯示加購區
+          </label>
+          <h3 style="margin-top:14px;font-size:14px">🚫 不可到貨星期</h3>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px" id="shippingClosedWeekdayBtns">
+            <label class="checkbox-label"><input type="checkbox" class="ship-cwd-chk" value="mon"> 週一</label>
+            <label class="checkbox-label"><input type="checkbox" class="ship-cwd-chk" value="tue"> 週二</label>
+            <label class="checkbox-label"><input type="checkbox" class="ship-cwd-chk" value="wed"> 週三</label>
+            <label class="checkbox-label"><input type="checkbox" class="ship-cwd-chk" value="thu"> 週四</label>
+            <label class="checkbox-label"><input type="checkbox" class="ship-cwd-chk" value="fri"> 週五</label>
+            <label class="checkbox-label"><input type="checkbox" class="ship-cwd-chk" value="sat"> 週六</label>
+            <label class="checkbox-label"><input type="checkbox" class="ship-cwd-chk" value="sun"> 週日</label>
+          </div>
+          <p style="font-size:12px;color:#888;margin-top:4px">💳 付款方式已統一移至「LINE 營業 → 線上付款方式管理」設定，此處不再重複顯示。</p>
+          <button class="btn-primary" onclick="saveShippingSettings()">💾 儲存冷藏宅配設定</button>
+        </div>
+
+        <!-- 📦 物流 API 設定（fix18-10-hotfix21：架構預留 V1，尚未串接正式物流商）───── -->
+        <div class="settings-card" style="grid-column:1/-1">
+          <h3>📦 物流 API 設定</h3>
+          <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
+            V1 僅預留物流 API 串接架構，目前物流公司與物流單號仍為手動輸入；啟用後也不會自動呼叫正式物流商 API。
+          </p>
+          <label class="checkbox-label" style="margin-bottom:14px;display:block">
+            <input type="checkbox" id="set-shipping_api_enabled"> 啟用物流 API（V1 架構預留，尚未正式串接）
+          </label>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px">
+            <label>
+              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">物流商</div>
+              <select id="set-shipping_provider" class="form-input" style="width:100%">
+                <option value="manual">手動輸入</option>
+              </select>
+            </label>
+            <label>
+              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">API Key</div>
+              <input type="text" id="set-shipping_api_key" class="form-input" style="width:100%" autocomplete="off">
+            </label>
+            <label>
+              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">API Secret</div>
+              <input type="password" id="set-shipping_api_secret" class="form-input" style="width:100%" autocomplete="off">
+            </label>
+            <label>
+              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">客戶代號（Merchant ID）</div>
+              <input type="text" id="set-shipping_customer_id" class="form-input" style="width:100%">
+            </label>
+            <label>
+              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">寄件人名稱</div>
+              <input type="text" id="set-shipping_sender_name" class="form-input" style="width:100%">
+            </label>
+            <label>
+              <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">寄件人電話</div>
+              <input type="text" id="set-shipping_sender_phone" class="form-input" style="width:100%">
+            </label>
+          </div>
+          <label style="display:block;margin-top:10px">
+            <div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">寄件人地址</div>
+            <input type="text" id="set-shipping_sender_address" class="form-input" style="width:100%">
+          </label>
+          <label class="checkbox-label" style="margin-top:10px;display:block">
+            <input type="checkbox" id="set-shipping_test_mode"> 測試模式
+          </label>
+          <div style="display:flex;gap:10px;margin-top:14px">
+            <button class="btn-secondary" onclick="testShippingApiConnection()">🔌 測試連線</button>
+            <button class="btn-primary" onclick="saveShippingApiSettings()">💾 儲存設定</button>
+          </div>
         </div>
       </div>
     </div>
@@ -1836,6 +2230,21 @@
   </div>
 </div>
 
+<!-- 📦 冷藏宅配訂單詳細 Modal（fix18-10-hotfix20：訂單紀錄頁「詳細」按鈕，訂單紀錄列表保持簡潔，詳細物流資訊在此顯示）-->
+<div class="modal-overlay" id="shipOrderDetailModal" onclick="if(event.target===this)closeShipOrderDetail()">
+  <div class="modal" style="max-width:520px;max-height:92vh;overflow-y:auto">
+    <div class="modal-header">
+      <h3>📦 冷藏宅配訂單詳細 <span id="shipDetailOrderNo" style="font-size:13px;color:var(--accent);font-family:monospace"></span></h3>
+      <button class="modal-close" onclick="closeShipOrderDetail()">✕</button>
+    </div>
+    <div class="modal-body" id="shipOrderDetailBody" style="font-size:13px;line-height:1.8">
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeShipOrderDetail()">關閉</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="editOrderModal" onclick="if(event.target===this)closeEditOrder()">
   <div class="modal" style="max-width:600px;max-height:92vh;overflow-y:auto">
     <div class="modal-header">
@@ -2360,7 +2769,7 @@
 <!-- Toast 通知 -->
 <div class="toast-container" id="toastContainer"></div>
 
-<script src="/js/app.js?v=fix18-09F-h2"></script>
+<script src="/js/app.js?v=fix18-10-hotfix22"></script>
 <script src="/js/coupons.js?v=fix18-06"></script>
 <script src="/js/qrcode.min.js?v=fix18-09F-h2"></script>
 <script src="/license.js?v=fix18-06"></script>
@@ -2375,6 +2784,11 @@
     <div class="modal-body">
       <input type="hidden" id="lineSettingsProductId">
       <p id="lineSettingsProductName" style="font-weight:700;font-size:15px;margin-bottom:12px;color:#222"></p>
+
+      <!-- ══ 1️⃣ LINE 點餐商品設定（fix18-10-hotfix19：整理分區）══ -->
+      <div style="background:#f0faf4;border-radius:8px;padding:4px 10px;margin-bottom:10px">
+        <h4 style="font-size:13px;font-weight:700;color:#06C755;margin:0">1️⃣ LINE 點餐商品設定</h4>
+      </div>
 
       <!-- LINE 顯示開關 -->
       <label class="checkbox-label" style="margin-bottom:12px">
@@ -2400,6 +2814,11 @@
       <!-- LINE 價格 -->
       <label>LINE 售價 (NT$)
         <input type="number" id="lineProductPrice" placeholder="空白時使用 POS 售價" min="0">
+      </label>
+
+      <!-- LINE 規格（fix18-10-hotfix19）-->
+      <label>LINE 規格
+        <input type="text" id="lineProductSpec" placeholder="例：200g（空白時不顯示規格）">
       </label>
 
       <!-- LINE 描述 -->
@@ -2448,10 +2867,10 @@
         <span>🔄 今日完售隔日自動恢復為正常販售</span>
       </label>
 
-      <!-- ── LINE 可售份數管理（v1）────────────────────── -->
+      <!-- ── 2️⃣ LINE 今日可售份數（fix18-10-hotfix19：整理分區）────────── -->
       <div style="border-top:1px solid #eee;margin-top:16px;padding-top:16px">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-          <h4 style="font-size:14px;font-weight:700;color:#222;margin:0">📦 LINE 今日可售份數</h4>
+        <div style="background:#fff8e1;border-radius:8px;padding:4px 10px;margin-bottom:10px">
+          <h4 style="font-size:13px;font-weight:700;color:#e65100;margin:0">2️⃣ LINE 今日可售份數</h4>
         </div>
         <p style="font-size:11px;color:#888;margin-bottom:12px">
           ⚠️ LINE 份數獨立管理，不影響 Web / Android 現場庫存與販售
@@ -2532,6 +2951,15 @@
           <p style="font-size:11px;color:#aaa;margin-top:6px">販售時段留空 = 不限時段</p>
         </div>
       </div>
+
+      <!-- fix18-10-hotfix20：冷藏宅配商品設定已移至「LINE 商品管理 → 📦 冷藏宅配商品」分頁獨立管理，
+           此 Modal 只保留 LINE 外帶/外送商品資料，不再與宅配欄位混合 -->
+    </div>
+    <!-- ↑ fix18-10-hotfix22A（真正原因修正）：補上原本缺漏的 .modal-body 收尾 </div>。
+         缺少這個收尾標籤導致後面所有標籤深度多算一層，連帶使 lineSettingsModal 的外層
+         <div> 永遠沒有正確關閉，把緊接在後面的 shippingProductModal 整個吃進巢狀結構裡。
+         這就是「編輯宅配沒開 Modal、之後 LINE設定又兩個 Modal 一起跑出」的真正原因，
+         不是 JS 事件或 open class 的問題。-->
     <div class="modal-footer">
       <button class="btn-secondary" onclick="closeLineSettingsModal()">取消</button>
       <button class="btn-primary" style="background:#06C755;border-color:#06C755" onclick="saveLineSettings()">💾 儲存 LINE 設定</button>
@@ -2539,8 +2967,65 @@
   </div>
 </div>
 
+<!-- 📦 冷藏宅配商品設定 Modal (fix18-10-hotfix20：從 LINE 上架設定 Modal 移出，獨立管理) -->
+<div class="modal-overlay" id="shippingProductModal" onclick="if(event.target===this)closeShippingProductModal()">
+  <div class="modal" style="max-width:520px;max-height:92vh;overflow-y:auto">
+    <div class="modal-header">
+      <h3 style="color:#1565c0">📦 冷藏宅配商品設定</h3>
+      <button class="modal-close" onclick="closeShippingProductModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="shipSettingsProductId">
+      <p id="shipSettingsProductName" style="font-weight:700;font-size:15px;margin-bottom:12px;color:#222"></p>
 
+      <label class="checkbox-label" style="margin-bottom:10px">
+        <input type="checkbox" id="shipEnabled">
+        <span>可宅配（顯示於冷藏宅配獨立頁面）</span>
+      </label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+        <label style="font-size:13px;color:#555">
+          宅配顯示名稱
+          <input type="text" id="shipName" placeholder="空白時使用商品名稱" style="width:100%;margin-top:4px;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:14px">
+        </label>
+        <label style="font-size:13px;color:#555">
+          宅配售價 (NT$)
+          <input type="number" id="shipPrice" min="0" placeholder="空白時使用 POS 售價" style="width:100%;margin-top:4px;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:14px">
+        </label>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+        <label style="font-size:13px;color:#555">
+          宅配規格
+          <input type="text" id="shipSpec" placeholder="例：500g / 三寶組" style="width:100%;margin-top:4px;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:14px">
+        </label>
+        <label style="font-size:13px;color:#555">
+          宅配排序
+          <input type="number" id="shipSortOrder" min="0" step="1" placeholder="0" style="width:100%;margin-top:4px;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:14px">
+        </label>
+      </div>
+      <label style="font-size:13px;color:#555;display:block;margin-bottom:10px">
+        宅配描述
+        <textarea id="shipDescription" placeholder="空白時使用 POS 商品描述" rows="2" style="width:100%;margin-top:4px;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:14px;resize:vertical"></textarea>
+      </label>
+      <label style="font-size:13px;color:#555;display:block;margin-bottom:10px">
+        宅配圖片 URL
+        <input type="text" id="shipImageUrl" placeholder="空白時使用 POS 商品圖片" style="width:100%;margin-top:4px;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:14px">
+      </label>
+      <label class="checkbox-label" style="margin-bottom:6px">
+        <input type="checkbox" id="shipUpsell">
+        <span>設為加購商品（顯示於「加購區」而非主商品區）</span>
+      </label>
+      <label class="checkbox-label">
+        <input type="checkbox" id="shipShareLineStock" checked>
+        <span>共用 LINE 份數（沿用「LINE 商品管理 → 今日販售管理」設定）</span>
+      </label>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeShippingProductModal()">取消</button>
+      <button class="btn-primary" style="background:#1565c0;border-color:#1565c0" onclick="saveShippingProductSettings()">💾 儲存宅配設定</button>
+    </div>
+  </div>
 </div>
+
 <!-- fix18-09F：商品分析群組 Modal (moved to body-end by hotfix2) -->
 <!-- fix18-09F：商品分析群組 新增/編輯 Modal -->
 <div class="modal-overlay" id="analysisGroupModal" onclick="if(event.target===this)closeAnalysisGroupModal()">

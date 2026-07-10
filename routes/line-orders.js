@@ -130,6 +130,17 @@ function dateDiffDays(aStr, bStr) {
   const a = parseLocalDate(aStr), b = parseLocalDate(bStr);
   return Math.round((b - a) / 86400000);
 }
+// YYYY-MM-DD → M/D（供自動休假公告文案顯示用，如 "7/5"）
+function fmtMDShort(s) {
+  if (!s) return '';
+  const p = String(s).split('-');
+  return p.length >= 3 ? `${Number(p[1])}/${Number(p[2])}` : s;
+}
+// Hotfix17：商家公告類型 icon
+const ANNOUNCEMENT_ICONS = {
+  general: '📢', holiday: '🏖️', promo: '🎉', new_product: '🆕',
+  delivery: '📦', member: '🎁', custom: '✨',
+};
 
 // ── 台灣時間工具 ──────────────────────────────────────────
 function twNow() {
@@ -163,18 +174,42 @@ function getCalendarDateInfo(db, storeId, dateStr) {
   catch { return { matched: false }; }
 }
 
-// ── 公休/店休日判斷（Business Calendar 為覆蓋層，命中時優先於每週設定）──
-// 命中行事曆：mode=closed → closed:true；mode=custom_hours/open_all_day → closed:false（覆蓋每週設定，不再套用固定公休/指定店休日）
-// 未命中：完全走舊邏輯（line_closed_weekdays / line_closed_dates），舊設定保留、行為不變
-function isClosedDate(db, storeId, dateStr) {
+// ── Hotfix16 BUG-003：日期休假狀態單一判斷函式 ──────────────
+// 優先序（由高到低，命中即回傳，不再往下判斷）：
+//   1. Business Calendar（mode=closed → closed:true；custom_hours/open_all_day → closed:false，且完全覆蓋今日臨時休息與固定公休）
+//   2. 今日臨時休息（line_today_closed，僅在 dateStr 為「今天」時才可能命中；Business Calendar 命中時一律不檢查此項）
+//   3. 固定公休（line_closed_weekdays）/ 指定店休日（line_closed_dates）
+// 回傳：{ closed, source: 'calendar'|'today_closed'|'weekly'|'specific'|null, isWeekly, calendar }
+function getDateClosedStatus(db, storeId, dateStr) {
   const cal = getCalendarDateInfo(db, storeId, dateStr);
   if (cal.matched) {
-    return { closed: cal.mode === 'closed', isWeekly: false, calendar: cal };
+    return { closed: cal.mode === 'closed', source: 'calendar', isWeekly: false, calendar: cal };
+  }
+  const todayStr = twDateStr();
+  if (dateStr === todayStr) {
+    const todayClosed = getSetting(db, storeId, 'line_today_closed', '0') === '1'
+      && getSetting(db, storeId, 'line_today_closed_date', '') === todayStr;
+    if (todayClosed) {
+      return { closed: true, source: 'today_closed', isWeekly: false, calendar: null };
+    }
   }
   const dow = WD_KEYS[parseLocalDate(dateStr).getDay()];  // 安全解析
   const closedWds = (() => { try { return JSON.parse(getSetting(db, storeId, 'line_closed_weekdays', '[]')); } catch { return []; } })();
   const closedDts = (() => { try { return JSON.parse(getSetting(db, storeId, 'line_closed_dates', '[]')); } catch { return []; } })();
-  return { closed: closedWds.includes(dow) || closedDts.includes(dateStr), isWeekly: closedWds.includes(dow), calendar: null };
+  const isWeekly   = closedWds.includes(dow);
+  const isSpecific = closedDts.includes(dateStr);
+  return {
+    closed: isWeekly || isSpecific,
+    source: isWeekly ? 'weekly' : (isSpecific ? 'specific' : null),
+    isWeekly, calendar: null,
+  };
+}
+
+// ── 公休/店休日判斷（向後相容包裝，維持原本 {closed,isWeekly,calendar} 介面）──
+// 內部已改用 getDateClosedStatus()，自動套用 Hotfix16 的優先序（Business Calendar > 今日臨時休息 > 固定公休）
+function isClosedDate(db, storeId, dateStr) {
+  const r = getDateClosedStatus(db, storeId, dateStr);
+  return { closed: r.closed, isWeekly: r.isWeekly, calendar: r.calendar };
 }
 
 // ── Business Calendar V2：某模式（takeout/delivery）在某日的時段覆蓋 ──
@@ -212,6 +247,29 @@ function getDayOpenClose(db, storeId, mode, dateStr, modeSettings) {
 }
 
 // ── 模式（外帶 takeout / 外送 delivery）設定讀取 ─────────
+// fix18-10-hotfix22A：外帶/外送付款方式改為與冷藏宅配一致的「通路獨立開關」架構。
+// 若店家尚未設定新版 JSON 陣列（takeout_payment_methods / delivery_payment_methods），
+// 自動 fallback 沿用舊版全域 line_payment_*_enabled 設定，確保既有店家設定/行為完全不變。
+function getModePaymentMethods(db, storeId, settingKey) {
+  const raw = getSetting(db, storeId, settingKey, '');
+  if (raw) {
+    try {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr) && arr.length) return arr;
+    } catch {}
+  }
+  const legacyMap = [
+    ['cash', 'line_payment_cash_enabled'],
+    ['linepay', 'line_payment_linepay_enabled'],
+    ['transfer', 'line_payment_transfer_enabled'],
+    ['platform', 'line_payment_platform_enabled'],
+    ['credit_card', 'line_payment_credit_card_enabled'],
+  ];
+  return legacyMap
+    .filter(([, key]) => getSetting(db, storeId, key, '') === '1')
+    .map(([code]) => code);
+}
+
 function getModeSettings(db, storeId, mode) {
   // mode: 'takeout' | 'delivery'
   // fix18-06: 今日臨時截止時間判斷
@@ -379,17 +437,25 @@ router.get('/shop', (req, res) => {
       'delivery_today_cutoff_time','delivery_today_cutoff_date',
       // Hotfix15 LINE 營業中心 V3
       'line_preorder_days_limit',
+      // Hotfix17：商家公告中心
+      'line_announcement_enabled','line_announcement_type','line_announcement_title','line_announcement_body',
+      'line_announcement_image_url','line_announcement_button_text','line_announcement_button_action',
+      'line_announcement_button_url','line_announcement_category_id','line_announcement_product_id',
+      'line_announcement_start_date','line_announcement_end_date','line_announcement_closable',
+      'line_announcement_display_mode','line_announcement_frequency','line_announcement_version',
+      'line_announcement_auto_holiday',
     ];
     const settings = {};
     keys.forEach(k => { settings[k] = getSetting(db, storeId, k, ''); });
 
-    const isClosed = settings.line_today_closed === '1' && settings.line_today_closed_date === todayStr;
-    settings.is_open = settings.line_ordering_enabled === '1' && !isClosed;
+    // Hotfix16 BUG-003：今日休假狀態改用單一函式判斷，優先序 Business Calendar > 今日臨時休息 > 固定公休
+    const todayClosedStatus = getDateClosedStatus(db, storeId, todayStr);
+    settings.is_open = settings.line_ordering_enabled === '1' && !todayClosedStatus.closed;
 
     // 外帶/外送獨立狀態
     const takeoutMode   = getModeSettings(db, storeId, 'takeout');
     const deliveryMode  = getModeSettings(db, storeId, 'delivery');
-    const closedInfo    = isClosedDate(db, storeId, todayStr);
+    const closedInfo    = { closed: todayClosedStatus.closed, isWeekly: todayClosedStatus.isWeekly, calendar: todayClosedStatus.calendar };
 
     settings.takeout_status = {
       enabled:        takeoutMode.enabled,
@@ -412,6 +478,10 @@ router.get('/shop', (req, res) => {
         : null,
       today_cutoff:   deliveryMode.todayCutoff || '',
     };
+
+    // fix18-10-hotfix22A：外帶/外送付款方式（通路獨立開關，未設定時 fallback 沿用全域設定）
+    settings.takeout_payment_methods  = getModePaymentMethods(db, storeId, 'takeout_payment_methods');
+    settings.delivery_payment_methods = getModePaymentMethods(db, storeId, 'delivery_payment_methods');
 
     // 找下一個可訂日（掃描範圍受 line_preorder_days_limit 限制，避免建議超出可預訂範圍的日期）
     // v2：改用 getDayOpenClose（Business Calendar 優先，沒命中才走舊的 bizHours 空值=全天可訂邏輯）
@@ -436,6 +506,103 @@ router.get('/shop', (req, res) => {
     settings.today_closed_info   = closedInfo;
     settings.today = todayStr;
     settings.now_mins = nowMins;
+
+    // ── Hotfix16 BUG-004/007：休假公告 Banner（單一資料來源，前台 Banner 與後台今日摘要都吃這份）──
+    const _preorderLimitForBanner = getPreorderDaysLimit(db, storeId);
+    let holidayBanner = { active: false };
+    if (todayClosedStatus.closed) {
+      if (todayClosedStatus.source === 'calendar') {
+        const cal = todayClosedStatus.calendar;
+        const daysAheadToResume = dateDiffDays(todayStr, cal.resume_date);
+        holidayBanner = {
+          active: true,
+          type: 'calendar',
+          start_date: cal.start_date,
+          end_date: cal.end_date,
+          reason: (cal.show_reason && cal.reason) ? cal.reason : '',
+          show_reason: !!cal.show_reason,
+          resume_date: cal.resume_date,
+          resume_within_limit: daysAheadToResume <= _preorderLimitForBanner,
+        };
+      } else if (todayClosedStatus.source === 'today_closed') {
+        holidayBanner = { active: true, type: 'today_closed' };
+      } else {
+        holidayBanner = { active: true, type: 'weekly' };
+      }
+    }
+    settings.holiday_banner = holidayBanner;
+
+    // ── Hotfix17：商家公告中心（優先序：手動公告 > 自動休假公告 > 無）──
+    // 注意：公告只負責顯示提醒，不可取代送單驗證；能不能送單仍由 Business Calendar / validateOrderConditions 把關。
+    {
+      const announceEnabled = settings.line_announcement_enabled === '1';
+      const startD = settings.line_announcement_start_date || '';
+      const endD   = settings.line_announcement_end_date || '';
+      const withinRange = (!startD || todayStr >= startD) && (!endD || todayStr <= endD);
+      const hasContent  = !!(settings.line_announcement_title || settings.line_announcement_body);
+
+      let announcement = { enabled: announceEnabled, active: false, source: 'none' };
+
+      if (announceEnabled && withinRange && hasContent) {
+        const type = settings.line_announcement_type || 'general';
+        announcement = {
+          enabled: true,
+          active: true,
+          type,
+          icon: ANNOUNCEMENT_ICONS[type] || '📢',
+          title: settings.line_announcement_title || '',
+          body: settings.line_announcement_body || '',
+          image_url: settings.line_announcement_image_url || '',
+          button_text: settings.line_announcement_button_text || '我知道了',
+          button_action: settings.line_announcement_button_action || 'close',
+          button_url: settings.line_announcement_button_url || '',
+          category_id: settings.line_announcement_category_id || '',
+          product_id: settings.line_announcement_product_id || '',
+          start_date: startD,
+          end_date: endD,
+          closable: settings.line_announcement_closable !== '0',
+          display_mode: settings.line_announcement_display_mode || 'modal',
+          frequency: settings.line_announcement_frequency || 'version',
+          version: settings.line_announcement_version || '1',
+          source: 'manual',
+        };
+      } else {
+        // 沒有生效中的手動公告 → 是否自動產生休假公告（僅在 Business Calendar 命中休假時，預設開啟）
+        const autoHoliday = settings.line_announcement_auto_holiday !== '0';
+        if (autoHoliday && holidayBanner.active && holidayBanner.type === 'calendar') {
+          const rangeTxt = holidayBanner.start_date === holidayBanner.end_date
+            ? fmtMDShort(holidayBanner.start_date)
+            : `${fmtMDShort(holidayBanner.start_date)}～${fmtMDShort(holidayBanner.end_date)}`;
+          const bodyLines = [rangeTxt];
+          if (holidayBanner.reason) bodyLines.push(holidayBanner.reason);
+          bodyLines.push(`${fmtMDShort(holidayBanner.resume_date)} 恢復營業`);
+          announcement = {
+            enabled: announceEnabled,
+            active: true,
+            type: 'holiday',
+            icon: ANNOUNCEMENT_ICONS.holiday,
+            title: '目前休假中',
+            body: bodyLines.join('\n'),
+            image_url: '',
+            button_text: '立即預訂',
+            button_action: holidayBanner.resume_within_limit ? 'open_cart' : 'scroll_products',
+            button_url: '',
+            category_id: '',
+            product_id: '',
+            start_date: holidayBanner.start_date,
+            end_date: holidayBanner.end_date,
+            closable: true,
+            display_mode: 'banner',
+            frequency: 'always',
+            version: holidayBanner.resume_date || '1',
+            source: 'auto_holiday',
+            resume_date: holidayBanner.resume_date,
+            resume_within_limit: holidayBanner.resume_within_limit,
+          };
+        }
+      }
+      settings.announcement = announcement;
+    }
 
     // ── Business Calendar V2：今日行事曆命中狀態（供後台/前台顯示用）──
     const calToday = getCalendarDateInfo(db, storeId, todayStr);
@@ -470,12 +637,20 @@ router.get('/menu', (req, res) => {
     const storeId = req.storeId;
     const now = twNow();
     const nowMins = now.getHours()*60 + now.getMinutes();
+    const todayStr = twDateStr(now);
 
     // 模式截止狀態（外帶/外送獨立）
     const takeoutMode  = getModeSettings(db, storeId, 'takeout');
     const deliveryMode = getModeSettings(db, storeId, 'delivery');
     const toCutoff = isCutoffPassed(takeoutMode.cutoffTime, nowMins);
     const dlCutoff = isCutoffPassed(deliveryMode.cutoffTime, nowMins);
+
+    // ── Hotfix16 BUG-003/006：今日休假狀態（優先序 Business Calendar > 今日臨時休息 > 固定公休），
+    //    命中時所有商品當天皆視為休假（今日售完原因統一顯示為休假，不再各別顯示販售時段/份數狀態）
+    const todayDayClosed = getDateClosedStatus(db, storeId, todayStr);
+    const dayClosedReason = !todayDayClosed.closed ? null
+      : (todayDayClosed.source === 'calendar' ? 'calendar_closed'
+        : (todayDayClosed.source === 'today_closed' ? 'today_closed' : 'weekly_closed'));
 
     const categories = db.all(
       'SELECT * FROM categories WHERE store_id=? AND is_active=1 ORDER BY sort_order ASC, id ASC',
@@ -548,48 +723,61 @@ router.get('/menu', (req, res) => {
       const effectiveIngredientOk = true;
 
       // ══════════════════════════════════════════════════════
-      // LINE 接單規則優先順序：
-      //   第一位階：每週營業時間（日期/時段基礎）
+      // Hotfix16 LINE 接單規則優先順序：
+      //   第零位階：模式關閉（外帶/外送總開關）
+      //   第一位階：今日休假（Business Calendar > 今日臨時休息 > 固定公休，見 getDateClosedStatus）
       //   第二位階：今日最後接單時間（臨時提前結束今日接單）
       //   第三位階：商品販售時段（商品級行銷設定，只限今日）
       //   第四位階：LINE 可售份數（今日額度）
       //
-      // 重要原則：位階 2/3/4 都只限制「今日下單」
+      // 重要原則：位階 1/2/3/4 都只限制「今日下單」
       // 只要允許明日預購，任何今日限制都不阻擋未來預約
+      //
+      // BUG-002（Hotfix16）：商品尚未到販售開始時間時，若該商品已啟用 LINE 預購管理
+      // （line_preorder_enabled=1，即既有「允許預購」開關），則不阻擋今日加入購物車，
+      // 客人可直接預約「今天稍後」的時段（送單時仍會檢查取餐時間需 >= 開賣時間）。
       // ══════════════════════════════════════════════════════
 
       const nowHHMM = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+      const allowPreorderBeforeStart = Number(p.line_preorder_enabled) === 1;
 
       // ── 第三位階：商品自身販售時段（只影響今日）──────────
       let productTimeReason = null; // 'not_started' | 'time_ended'（均僅限今日）
+      let preSaleAvailable = false; // BUG-002：尚未開賣但允許預購今天稍後時段
       if (p.line_sell_end && nowHHMM >= p.line_sell_end) {
         productTimeReason = 'time_ended';   // 今日販售已結束，不影響明日
       } else if (p.line_sell_start && nowHHMM < p.line_sell_start) {
-        productTimeReason = 'not_started';  // 今日尚未開賣，不影響明日
+        if (allowPreorderBeforeStart) {
+          preSaleAvailable = true;          // 不阻擋加入購物車，前台顯示「🟢 可預約」
+        } else {
+          productTimeReason = 'not_started';  // 今日尚未開賣，不影響明日
+        }
       }
 
       // ── 第四位階：LINE 可售份數（只影響今日額度）─────────
       const realSoldOut = quota.hasQuota && quota.remaining <= 0;
 
       // ── 外帶/外送各自的今日售完原因（僅描述今日狀態）─────
-      // 優先順序：模式關閉 > 第二位階截止 > 第三位階商品時段 > 第四位階份數
+      // 優先順序：模式關閉 > 今日休假 > 第二位階截止 > 第三位階商品時段 > 第四位階份數
       const takeoutSoldOutReason = !takeoutMode.enabled ? 'mode_closed'
-        : (toCutoff ? 'cutoff_sold_out'
-          : (productTimeReason === 'time_ended'   ? 'product_time_ended'
-            : (productTimeReason === 'not_started' ? 'product_not_started'
-              : (realSoldOut ? 'real_sold_out' : null))));
+        : (dayClosedReason ? dayClosedReason
+          : (toCutoff ? 'cutoff_sold_out'
+            : (productTimeReason === 'time_ended'   ? 'product_time_ended'
+              : (productTimeReason === 'not_started' ? 'product_not_started'
+                : (realSoldOut ? 'real_sold_out' : null)))));
 
       const deliverySoldOutReason = !deliveryMode.enabled ? 'mode_closed'
-        : (dlCutoff ? 'cutoff_sold_out'
-          : (productTimeReason === 'time_ended'   ? 'product_time_ended'
-            : (productTimeReason === 'not_started' ? 'product_not_started'
-              : (realSoldOut ? 'real_sold_out' : null))));
+        : (dayClosedReason ? dayClosedReason
+          : (dlCutoff ? 'cutoff_sold_out'
+            : (productTimeReason === 'time_ended'   ? 'product_time_ended'
+              : (productTimeReason === 'not_started' ? 'product_not_started'
+                : (realSoldOut ? 'real_sold_out' : null)))));
 
       // ── 可預約明日旗標 ────────────────────────────────────
       // 條件：今日有售完原因（非模式關閉，非尚未開賣） + 該模式允許次日預購
       // BUG-003 修正：product_not_started 不應觸發「預約明日」
       //   今日尚未開賣 ≠ 今日售完；商品只是還沒到販售時間，稍後仍可購買
-      //   只有真正的售完/截止/販售結束才允許預約明日
+      //   只有真正的售完/截止/販售結束/今日休假才允許預約明日（或恢復營業日）
       const todayTrulySoldOutForTakeout = !!takeoutSoldOutReason
         && takeoutSoldOutReason !== 'mode_closed'
         && takeoutSoldOutReason !== 'product_not_started';
@@ -621,6 +809,8 @@ router.get('/menu', (req, res) => {
         delivery_sold_out_reason: deliverySoldOutReason,
         takeout_can_next_day:  takeoutCanNextDay,
         delivery_can_next_day: deliveryCanNextDay,
+        // Hotfix16 BUG-002/006：尚未開賣但允許預約今天稍後時段（前台顯示 🟢 可預約）
+        pre_sale_available: preSaleAvailable,
       };
     });
 
@@ -729,20 +919,19 @@ function validateOrderConditions(db, storeId, mode, dateStr, pickupTime, nowMins
       message: `此日期超出可預訂範圍（最多可預訂 ${preorderLimit} 天內）` };
   }
 
-  // 2. 今日臨時休息（最高優先：即使 Business Calendar 設定當天營業，臨時休息一律蓋過，見 V2 需求）
-  const todayClosed = getSetting(db, storeId, 'line_today_closed', '0');
-  const closedDate  = getSetting(db, storeId, 'line_today_closed_date', '');
-  if (todayClosed === '1' && closedDate === todayStr && orderDate === todayStr)
-    return { ok: false, reason: 'today_closed', message: '今日 LINE 點餐休息' };
-
-  // 3. 店休日判斷（isClosedDate 內部已整合 Business Calendar 覆蓋層；沒命中才走舊的每週公休/指定店休日）
-  const closedInfo = isClosedDate(db, storeId, orderDate);
-  if (closedInfo.closed) {
-    if (closedInfo.calendar) {
-      const cal = closedInfo.calendar;
+  // 2/3. 店休/休假判斷（Hotfix16 BUG-003：優先序改為 Business Calendar > 今日臨時休息 > 固定公休，
+  //      getDateClosedStatus() 內部已整合此優先序，一次判斷完成）
+  const closedStatus = getDateClosedStatus(db, storeId, orderDate);
+  const closedInfo = { closed: closedStatus.closed, isWeekly: closedStatus.isWeekly, calendar: closedStatus.calendar }; // 相容下方既有變數名稱
+  if (closedStatus.closed) {
+    if (closedStatus.source === 'calendar') {
+      const cal = closedStatus.calendar;
       const reasonMsg = (cal.show_reason && cal.reason) ? `（${cal.reason}）` : '';
       return { ok: false, reason: 'calendar_closed',
         message: `${orderDate} 為特殊休假日${reasonMsg}，預計 ${cal.resume_date} 恢復營業` };
+    }
+    if (closedStatus.source === 'today_closed') {
+      return { ok: false, reason: 'today_closed', message: '今日 LINE 點餐休息' };
     }
     return { ok: false, reason: 'closed_day', message: `${orderDate} 為店休日，請選擇其他日期` };
   }
@@ -852,10 +1041,23 @@ router.post('/', async (req, res) => {
         // 今日商品販售時段驗證（只限今日）
         if (prod.line_sell_start || prod.line_sell_end) {
           const nowHHMM = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
-          if (prod.line_sell_start && nowHHMM < prod.line_sell_start)
-            return res.status(400).json({ success: false, message: `「${prod.name}」尚未開始販售（${prod.line_sell_start} 開賣）` });
           if (prod.line_sell_end && nowHHMM >= prod.line_sell_end)
             return res.status(400).json({ success: false, message: `「${prod.name}」今日販售時段已結束，可選擇預購` });
+          if (prod.line_sell_start && nowHHMM < prod.line_sell_start) {
+            // Hotfix16 BUG-002：已啟用 LINE 預購管理（既有「允許預購」開關）→ 不阻擋下單，
+            // 但客人選的取餐時間（若非「盡快」）必須 >= 開賣時間，否則拒絕
+            const allowPreorderBeforeStart = Number(prod.line_preorder_enabled) === 1;
+            if (!allowPreorderBeforeStart) {
+              return res.status(400).json({ success: false, message: `「${prod.name}」尚未開始販售（${prod.line_sell_start} 開賣）` });
+            }
+            const pt = pickup_time ? String(pickup_time).trim() : '';
+            if (pt && pt !== '盡快' && pt < prod.line_sell_start) {
+              return res.status(400).json({
+                success: false,
+                message: `「${prod.name}」最早可於 ${prod.line_sell_start} 取餐，請重新選擇取餐時間`,
+              });
+            }
+          }
         }
       } else {
         // ── 預購訂單：使用 line_preorder_* 驗證 ────────────

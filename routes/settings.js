@@ -19,6 +19,10 @@ const LINE_KEYS = new Set([
   'line_payment_cash_enabled', 'line_payment_linepay_enabled',
   'line_payment_transfer_enabled', 'line_payment_platform_enabled',
   'line_payment_credit_card_enabled',
+  // fix18-10-hotfix22A：付款方式改為與冷藏宅配一致的「通路獨立開關」架構（JSON 陣列，
+  // 例如 '["cash","linepay","transfer"]'）。未設定時，後端會自動 fallback 沿用上面的
+  // 全域 line_payment_*_enabled 設定，確保既有店家設定不受影響、行為不變。
+  'takeout_payment_methods', 'delivery_payment_methods',
   // LINE 接單與可售管理中心 v1
   'takeout_enabled', 'takeout_cutoff_time', 'takeout_prep_minutes',
   'takeout_allow_next_day', 'takeout_business_hours',
@@ -30,6 +34,15 @@ const LINE_KEYS = new Set([
   'delivery_today_cutoff_time', 'delivery_today_cutoff_date',
   // Hotfix15 LINE 營業中心 V3：顧客可提前預訂天數（0~60，預設14）
   'line_preorder_days_limit',
+  // Hotfix17：商家公告中心
+  'line_announcement_enabled', 'line_announcement_type',
+  'line_announcement_title', 'line_announcement_body', 'line_announcement_image_url',
+  'line_announcement_button_text', 'line_announcement_button_action', 'line_announcement_button_url',
+  'line_announcement_category_id', 'line_announcement_product_id',
+  'line_announcement_start_date', 'line_announcement_end_date',
+  'line_announcement_closable', 'line_announcement_display_mode',
+  'line_announcement_frequency', 'line_announcement_version',
+  'line_announcement_auto_holiday',
 ]);
 
 // fix18-06：外送距離費率相關 key
@@ -41,6 +54,22 @@ const DELIVERY_FEE_KEYS = [
   'delivery_basic_fee',
   'delivery_free_threshold',
   'coupon_apply_to_delivery_fee',
+];
+
+// fix18-10-hotfix18：LINE 冷藏宅配中心 V1 設定 key
+const SHIPPING_KEYS = [
+  'shipping_enabled', 'shipping_title', 'shipping_description', 'shipping_notice',
+  'shipping_storage_note', 'shipping_fee', 'shipping_free_threshold',
+  'shipping_min_order_amount', 'shipping_arrival_days_limit', 'shipping_lead_days',
+  'shipping_closed_weekdays', 'shipping_payment_methods', 'shipping_carrier_name',
+  'shipping_allow_arrival_date', 'shipping_upsell_enabled',
+];
+
+// fix18-10-hotfix21：冷藏宅配「物流 API 設定架構預留」key（V1 只做架構，不串接正式物流商）
+const SHIPPING_API_KEYS = [
+  'shipping_api_enabled', 'shipping_provider', 'shipping_api_key', 'shipping_api_secret',
+  'shipping_customer_id', 'shipping_sender_name', 'shipping_sender_phone',
+  'shipping_sender_address', 'shipping_test_mode',
 ];
 
 // fix18-08：外送平台抽成率 key
@@ -70,6 +99,8 @@ const ALL_ALLOWED = [
   ...DELIVERY_FEE_KEYS,
   ...LINE_KEYS,
   ...COMMISSION_KEYS,
+  ...SHIPPING_KEYS,
+  ...SHIPPING_API_KEYS,
 ];
 
 // GET /api/settings
@@ -92,7 +123,7 @@ router.put('/', (req, res) => {
 
     // ── fix14：檢查是否修改 LINE key ───────────────────────
     const requestedKeys = Object.keys(req.body);
-    const hasLineKey    = requestedKeys.some(k => LINE_KEYS.has(k));
+    const hasLineKey    = requestedKeys.some(k => LINE_KEYS.has(k) || SHIPPING_KEYS.includes(k) || SHIPPING_API_KEYS.includes(k));
 
     if (hasLineKey) {
       // 查授權

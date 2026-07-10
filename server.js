@@ -99,7 +99,16 @@ setInterval(() => {
 app.use(cors());
 app.use(bodyParser.json({ limit: '5mb' }));
 app.use(bodyParser.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, 'public')));
+// fix18-10-hotfix22A：LINE 內建瀏覽器（尤其 iOS）對 .html 進入頁常有過度快取問題，
+// 導致客戶端點開 line-order.html / line-shipping.html 時吃到舊版畫面。
+// 僅對 .html 文件關閉快取，其餘靜態資源（js/css/圖片）不受影響、行為不變。
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.html')) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    }
+  },
+}));
 
 app.post('/webhook/n8n', (req, res) => {
   console.log('[n8n Webhook]', JSON.stringify(req.body, null, 2));
@@ -389,6 +398,15 @@ initDb().then((db) => {
   app.use('/api/line-validate-cart', requireStore, requireFeature('line_order'), (req, res, next) => { req.url = '/validate-cart'; lineOrderRouter(req, res, next); });
   app.use('/api/line-orders',  requireStore, requireFeature('line_order'), lineOrderRouter);
   app.use('/api/online-orders', requireStore, requireFeature('line_order'), require('./routes/online-orders'));
+
+  // fix18-10-hotfix19：通用圖片上傳 API（商品圖片、公告圖片等共用，避免新增重複 API）
+  app.use('/api/uploads', requireStore, require('./routes/uploads'));
+
+  // fix18-10-hotfix18：LINE 冷藏宅配中心 V1（獨立入口與獨立流程，不動外帶/外送）
+  app.use('/api/line-shipping', requireStore, requireFeature('line_order'), require('./routes/line-shipping'));
+
+  // fix18-10-hotfix21：物流 API 架構預留 V1（不串接正式物流商，僅設定架構）
+  app.use('/api/shipping', requireStore, requireFeature('line_order'), require('./routes/shipping'));
 
   // ── 老闆儀表板 Dashboard API（reports feature gate）─────
   app.use('/api/dashboard', requireStore, requireFeature('reports'), require('./routes/dashboard'));

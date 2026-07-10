@@ -1,0 +1,1083 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<meta name="theme-color" content="#1565c0">
+<title>冷藏宅配</title>
+<style>
+:root{--g:#1565c0;--gd:#0d47a1;--bg:#f5f7fa;--card:#fff;--text:#222;--sub:#888;--bd:#eee;--shadow:0 2px 10px rgba(0,0,0,.10);--r:12px}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--bg);font-family:-apple-system,'Noto Sans TC',sans-serif;color:var(--text);min-height:100vh}
+button{border:none;cursor:pointer;font-family:inherit}
+img{max-width:100%;display:block}
+.hdr{background:linear-gradient(135deg,var(--g),var(--gd));color:#fff;padding:20px 16px 64px}
+.hdr h1{font-size:22px;font-weight:700}
+.hdr p{font-size:12px;opacity:.85;margin-top:4px}
+.hdr-btns{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.hdr-btn{background:rgba(255,255,255,.22);color:#fff;border:1.5px solid rgba(255,255,255,.5);padding:7px 14px;border-radius:20px;font-size:13px;font-weight:600;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.hdr-btn:active{background:rgba(255,255,255,.35)}
+.copy-btn{padding:8px;margin-top:6px;background:#fff;color:var(--sub);border:1.5px solid var(--bd);border-radius:8px;font-size:12px;font-weight:600}
+.ship-info-box{background:#f0f6ff;border-radius:8px;padding:10px 12px;margin-bottom:14px;font-size:12px;color:#0d47a1;line-height:1.7}
+.ship-info-box .sib-row{display:flex;justify-content:space-between;gap:8px}
+.ship-info-box .sib-note{white-space:pre-line;margin-top:4px;color:#1565c0}
+.min-order-warn{background:#fff3e0;color:#e65100;border-radius:6px;padding:8px 10px;font-size:12px;margin:6px 0;font-weight:600}
+.mo-card{background:#fff;border:1px solid var(--bd);border-radius:var(--r);padding:12px 14px;margin:0 12px 10px}
+.mo-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.mo-no{font-size:13px;font-weight:700}
+.mo-time{font-size:11px;color:var(--sub);margin-top:2px}
+.mo-badges{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}
+.mo-badge{font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;white-space:nowrap}
+.mo-badge.pay-paid{background:#e8f5e9;color:#2e7d32}
+.mo-badge.pay-pending{background:#fff3e0;color:#e65100}
+.mo-badge.pay-failed,.mo-badge.pay-refunded,.mo-badge.pay-cancelled{background:#fce8e8;color:#b71c1c}
+.mo-badge.ship{background:#e3f2fd;color:#0d47a1}
+.mo-bottom{display:flex;justify-content:space-between;align-items:center;margin-top:6px}
+.mo-amount{font-size:14px;font-weight:700;color:var(--g)}
+.mo-detail-btn{padding:6px 12px;background:var(--g);color:#fff;border-radius:16px;font-size:12px;font-weight:700}
+.shop-card{background:#fff;border-radius:var(--r);margin:0 12px;margin-top:-52px;padding:16px;box-shadow:var(--shadow);display:flex;gap:14px;align-items:center}
+.shop-logo{width:56px;height:56px;border-radius:50%;background:var(--g);display:flex;align-items:center;justify-content:center;font-size:26px;color:#fff;flex-shrink:0;overflow:hidden}
+.shop-logo img{width:100%;height:100%;object-fit:cover}
+.shop-info h2{font-size:17px;font-weight:700}
+.shop-info p{font-size:12px;color:var(--sub);margin-top:3px}
+.notice{background:#e3f2fd;border-left:3px solid var(--g);padding:10px 14px;font-size:13px;color:#0d47a1;border-radius:4px;margin:10px 12px 0;white-space:pre-line;display:none}
+.storage-note{background:#fff8e1;border-left:3px solid #ffa000;padding:8px 14px;font-size:12px;color:#8d6e00;border-radius:4px;margin:8px 12px 0}
+.sec-title{font-size:15px;font-weight:700;padding:14px 12px 6px}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;padding:0 12px}
+@media(min-width:480px){.grid{grid-template-columns:repeat(3,1fr)}}
+.prod-card{background:var(--card);border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden;position:relative;display:flex;flex-direction:column}
+.prod-img{width:100%;height:110px;object-fit:cover;display:block;background:#f0f0f0}
+.prod-ph{width:100%;height:110px;display:flex;align-items:center;justify-content:center;font-size:40px;background:linear-gradient(135deg,#e3f2fd,#dcecff)}
+.prod-body{padding:10px;flex:1;display:flex;flex-direction:column}
+.prod-name{font-size:14px;font-weight:700;line-height:1.3;margin-bottom:3px}
+.prod-spec{font-size:11px;color:var(--g);font-weight:600;margin-bottom:2px}
+.prod-desc{font-size:11px;color:var(--sub);margin-bottom:6px;line-height:1.4;flex:1}
+.prod-price{font-size:16px;font-weight:700;color:var(--g)}
+.prod-footer{display:flex;align-items:center;justify-content:space-between;margin-top:8px}
+.add-btn{width:30px;height:30px;border-radius:50%;background:var(--g);color:#fff;font-size:20px;display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent}
+.add-btn:active{transform:scale(.9)}
+.qty-ctrl{display:flex;align-items:center;gap:6px}
+.qty-ctrl button{width:26px;height:26px;border-radius:50%;font-size:16px;display:flex;align-items:center;justify-content:center}
+.qty-ctrl .minus{background:#f5f5f5;color:#333}
+.qty-ctrl .plus{background:var(--g);color:#fff}
+.qty-ctrl .qnum{font-size:14px;font-weight:700;min-width:20px;text-align:center}
+.cart-bar{position:fixed;bottom:0;left:0;right:0;background:var(--g);color:#fff;padding:12px 16px;display:flex;align-items:center;gap:12px;z-index:100;cursor:pointer;box-shadow:0 -2px 12px rgba(0,0,0,.18);-webkit-tap-highlight-color:transparent}
+.cart-bar.hidden{display:none}
+.cart-cnt{background:rgba(255,255,255,.25);border-radius:20px;padding:3px 10px;font-size:13px;font-weight:700;min-width:28px;text-align:center}
+.cart-lbl{flex:1;font-size:15px;font-weight:700}
+.cart-ttl{font-size:15px;font-weight:700}
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:200;display:none}
+.overlay.show{display:block}
+.sheet{position:fixed;bottom:0;left:0;right:0;background:#fff;border-radius:16px 16px 0 0;max-height:92vh;overflow-y:auto;z-index:201;transform:translateY(100%);transition:transform .28s cubic-bezier(.4,0,.2,1)}
+.sheet.show{transform:translateY(0)}
+.sheet-hd{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--bd);position:sticky;top:0;background:#fff;z-index:1}
+.close-btn{width:30px;height:30px;border-radius:50%;background:#f5f5f5;font-size:16px;color:#666}
+.cf{padding:14px 16px 24px}
+.fg{margin-bottom:14px}
+.fl{font-size:13px;font-weight:600;color:#555;margin-bottom:6px;display:block}
+.fl .req{color:#e53935}
+.fi{width:100%;border:1px solid var(--bd);border-radius:8px;padding:10px 12px;font-size:15px;outline:none;-webkit-appearance:none}
+.fi:focus{border-color:var(--g)}
+.fr{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.fr3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+.pay-btns{display:flex;gap:8px;flex-wrap:wrap}
+.pay-btn{padding:8px 16px;border-radius:20px;font-size:13px;border:1.5px solid var(--bd);background:#fff;color:#555}
+.pay-btn.active{border-color:var(--g);background:#e3f2fd;color:var(--g);font-weight:600}
+.arrival-btns{display:flex;gap:8px;margin-bottom:10px}
+.arrival-btn{flex:1;padding:9px;border-radius:8px;font-size:13px;border:1.5px solid var(--bd);background:#fff;color:#555}
+.arrival-btn.active{border-color:var(--g);background:#e3f2fd;color:var(--g);font-weight:700}
+.ot{display:flex;justify-content:space-between;padding:8px 0;font-size:14px;font-weight:500;color:#777}
+.ot.total{font-size:17px;font-weight:700;color:var(--text);border-top:1px solid var(--bd);margin-top:4px;padding-top:10px}
+.free-hint{font-size:12px;color:var(--g);background:#e3f2fd;border-radius:6px;padding:6px 10px;margin:6px 0}
+.sub-btn{width:100%;padding:14px;background:var(--g);color:#fff;border-radius:var(--r);font-size:16px;font-weight:700;margin-top:12px}
+.sub-btn:disabled{background:#ccc;cursor:not-allowed}
+.pb{padding-bottom:80px}
+.loading{text-align:center;padding:60px 20px;color:var(--sub)}
+.spinner{width:36px;height:36px;border:3px solid #eee;border-top-color:var(--g);border-radius:50%;animation:spin .7s linear infinite;margin:0 auto 12px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:10px 20px;border-radius:20px;font-size:13px;z-index:999;opacity:0;transition:.3s;pointer-events:none;white-space:nowrap}
+.toast.show{opacity:1}
+.success-screen{position:fixed;inset:0;background:#fff;z-index:300;display:none;flex-direction:column;align-items:center;overflow-y:auto;padding:24px 20px 40px;text-align:center}
+.success-screen.show{display:flex}
+.suc-icon{font-size:72px;margin-top:24px}
+.suc-title{font-size:24px;font-weight:700;color:var(--g);margin-top:8px}
+.suc-no{font-size:20px;font-weight:700;margin-top:4px;color:#333}
+.suc-btns{display:flex;flex-direction:column;gap:10px;width:100%;max-width:380px;margin-top:20px}
+.suc-btn{padding:14px;background:var(--g);color:#fff;border-radius:var(--r);font-size:16px;font-weight:700}
+.suc-btn-outline{padding:12px;background:#fff;color:var(--g);border:2px solid var(--g);border-radius:var(--r);font-size:15px;font-weight:700}
+.order-detail{padding:16px;text-align:left}
+.od-section{background:#f8f8f8;border-radius:var(--r);padding:14px;margin-bottom:14px}
+.od-row{display:flex;justify-content:space-between;align-items:flex-start;padding:5px 0;border-bottom:1px solid var(--bd)}
+.od-row:last-child{border-bottom:none}
+.od-label{font-size:13px;color:var(--sub);flex-shrink:0;margin-right:8px}
+.od-val{font-size:13px;font-weight:600;text-align:right;word-break:break-all}
+.od-total{font-size:16px;color:var(--g);font-weight:700}
+.empty-hint{text-align:center;padding:50px 20px;color:var(--sub)}
+.empty-hint .ei{font-size:48px;margin-bottom:12px}
+.empty-hint p{font-size:14px;line-height:1.7}
+.closed-screen{text-align:center;padding:60px 24px;color:#888;min-height:60vh;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.closed-screen .ei{font-size:64px;margin-bottom:16px}
+.closed-screen h2{font-size:20px;color:#444;margin-bottom:12px}
+.closed-screen p{font-size:15px;line-height:1.6;max-width:280px}
+.back-btn{display:flex;align-items:center;gap:4px;padding:4px 0;font-size:14px;color:var(--g);font-weight:600;background:none;border:none;margin:10px 12px 0}
+.upsell-hint{font-size:11px;color:var(--sub);padding:0 12px;margin-top:-4px;margin-bottom:6px}
+/* fix18-10-hotfix19：宅配訂單狀態查詢頁專用樣式 */
+.ship-status-title{font-size:16px;font-weight:700;text-align:center;margin-bottom:14px;color:var(--g)}
+.ship-stepper{display:flex;justify-content:space-between;margin-bottom:18px;position:relative}
+.ship-step{flex:1;text-align:center;position:relative;z-index:1}
+.ship-step .dot{width:22px;height:22px;border-radius:50%;background:#e0e0e0;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;margin:0 auto 4px}
+.ship-step.done .dot{background:var(--g)}
+.ship-step.current .dot{background:var(--gd);box-shadow:0 0 0 4px #e3f2fd}
+.ship-step .lbl{font-size:10px;color:var(--sub);line-height:1.3}
+.ship-step.done .lbl,.ship-step.current .lbl{color:var(--g);font-weight:700}
+.ship-stepper::before{content:'';position:absolute;top:11px;left:8%;right:8%;height:2px;background:#e0e0e0;z-index:0}
+.ship-cancelled-banner{background:#fce8e8;color:#b71c1c;text-align:center;padding:10px;border-radius:8px;font-weight:700;margin-bottom:14px}
+.track-btn{width:100%;padding:10px;margin-top:8px;background:#fff;color:var(--g);border:1.5px solid var(--g);border-radius:8px;font-size:13px;font-weight:700}
+</style>
+</head>
+<body>
+
+<div id="loading" class="loading"><div class="spinner"></div><p>載入中…</p></div>
+<div id="closedScreen" class="closed-screen" style="display:none">
+  <div class="ei">📦</div>
+  <h2>冷藏宅配尚未開放</h2>
+  <p>請洽詢店家，或稍後再試。</p>
+</div>
+
+<div id="content" style="display:none">
+  <div class="hdr">
+    <h1 id="shopTitle">冷藏宅配</h1>
+    <p id="shopSub"></p>
+    <div class="hdr-btns">
+      <button class="hdr-btn" onclick="openQuerySheet()">🔍 查詢訂單</button>
+      <button class="hdr-btn" onclick="openMyOrders()">📋 我的訂單</button>
+    </div>
+  </div>
+  <div class="shop-card">
+    <div class="shop-logo" id="logoWrap">📦</div>
+    <div class="shop-info"><h2 id="shopName2"></h2><p id="shopAddr"></p></div>
+  </div>
+  <div class="notice" id="notice"></div>
+  <div class="storage-note" id="storageNote"></div>
+
+  <div class="sec-title">📦 可宅配商品</div>
+  <div id="prodGrid" class="grid pb"></div>
+
+  <div id="upsellSection" style="display:none">
+    <div class="sec-title">➕ 加購商品</div>
+    <div class="upsell-hint">可與宅配商品一起加入購物車</div>
+    <div id="upsellGrid" class="grid pb"></div>
+  </div>
+</div>
+
+<div class="cart-bar hidden" id="cartBar" onclick="openCartSheet()">
+  <div class="cart-cnt" id="cartCnt">0</div>
+  <div class="cart-lbl">查看購物車</div>
+  <div class="cart-ttl" id="cartBarTotal">$0</div>
+</div>
+
+<div class="overlay" id="overlay" onclick="closeSheet()"></div>
+
+<div class="sheet" id="cartSheet">
+  <div class="sheet-hd"><h3>🛒 宅配購物車</h3><button class="close-btn" onclick="closeSheet()">✕</button></div>
+  <div id="cartItems" style="padding:0 16px"></div>
+  <div class="cf">
+    <div id="cartShipInfo" style="padding:0"></div>
+    <!-- hotfix22-C：優惠券輸入（與 line-order.html 相同流程，共用同一組 /api/coupons/validate） -->
+    <div class="fg" id="couponArea" style="display:none">
+      <label class="fl">🎟️ 優惠券代碼</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input class="fi" id="couponInput" placeholder="輸入優惠券代碼（如 WELCOME30）" style="flex:1;text-transform:uppercase" oninput="this.value=this.value.toUpperCase()" onkeydown="if(event.key==='Enter'){event.preventDefault();applyCoupon();}">
+        <button id="couponApplyBtn" onclick="applyCoupon()" style="padding:10px 14px;background:#06C755;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;white-space:nowrap;flex-shrink:0;cursor:pointer">套用</button>
+      </div>
+      <div id="couponMsg" style="font-size:12px;margin-top:4px;min-height:18px"></div>
+      <div id="couponAppliedRow" style="display:none;margin-top:4px;font-size:12px;color:#06C755;align-items:center;gap:8px">
+        <span id="couponAppliedText"></span>
+        <button onclick="clearCoupon()" style="background:none;border:1px solid #06C755;color:#06C755;border-radius:6px;padding:2px 8px;font-size:11px;cursor:pointer">清除優惠券</button>
+      </div>
+    </div>
+    <div class="ot"><span>小計</span><span id="subtotalDisplay">$0</span></div>
+    <div id="discountRow" class="ot" style="display:none">
+      <span style="color:#06C755;font-weight:600">🎟️ 優惠折扣</span><span id="discountDisplay" style="color:#06C755;font-weight:600">-$0</span>
+    </div>
+    <div class="ot"><span>運費</span><span id="feeDisplay">$0</span></div>
+    <div id="freeHint" class="free-hint" style="display:none"></div>
+    <div id="minOrderWarn" class="min-order-warn" style="display:none"></div>
+    <div class="ot total"><span>應付金額</span><span id="orderTotal">$0</span></div>
+
+    <div class="fg"><label class="fl">收件人姓名 <span class="req">*</span></label><input class="fi" id="rName" placeholder="收件人姓名" oninput="persistCart()"></div>
+    <div class="fr">
+      <div class="fg"><label class="fl">收件電話 <span class="req">*</span></label><input class="fi" id="rPhone" placeholder="聯絡電話" type="tel" oninput="persistCart()"></div>
+      <div class="fg"><label class="fl">郵遞區號</label><input class="fi" id="rPostal" placeholder="郵遞區號" oninput="persistCart()"></div>
+    </div>
+    <div class="fr">
+      <div class="fg"><label class="fl">縣市 <span class="req">*</span></label><input class="fi" id="rCity" placeholder="縣市" oninput="persistCart()"></div>
+      <div class="fg"><label class="fl">鄉鎮市區 <span class="req">*</span></label><input class="fi" id="rDistrict" placeholder="鄉鎮市區" oninput="persistCart()"></div>
+    </div>
+    <div class="fg"><label class="fl">詳細地址 <span class="req">*</span></label><input class="fi" id="rAddress" placeholder="詳細地址" oninput="persistCart()"></div>
+    <div class="fg"><label class="fl">地址備註</label><input class="fi" id="rAddressNote" placeholder="例：管理室代收" oninput="persistCart()"></div>
+
+    <div class="fg">
+      <label class="fl">希望到貨</label>
+      <div class="arrival-btns">
+        <button class="arrival-btn active" id="arrivalAsapBtn" onclick="setArrivalType('asap')">🚚 最快出貨</button>
+        <button class="arrival-btn" id="arrivalDateBtn" onclick="setArrivalType('date')">📅 指定日期</button>
+      </div>
+      <input class="fi" id="rArrivalDate" type="date" style="display:none" onchange="persistCart()">
+    </div>
+
+    <div class="fg">
+      <label class="fl">付款方式</label>
+      <div class="pay-btns" id="payBtns"></div>
+    </div>
+
+    <div class="fg"><label class="fl">備註</label><input class="fi" id="rNote" placeholder="給店家的話（選填）" oninput="persistCart()"></div>
+
+    <button class="sub-btn" id="submitBtn" onclick="submitOrder()">送出訂單</button>
+  </div>
+</div>
+
+<!-- 查詢訂單 Sheet -->
+<div class="sheet" id="querySheet">
+  <div class="sheet-hd"><h3>🔍 查詢宅配訂單</h3><button class="close-btn" onclick="closeSheet()">✕</button></div>
+  <div class="cf">
+    <div class="fg"><label class="fl">訂單編號</label><input class="fi" id="qOrderNo" placeholder="例：SHIP-20260708-120000"></div>
+    <button class="sub-btn" onclick="queryOrder()">查詢</button>
+    <div id="queryResult" style="margin-top:14px"></div>
+  </div>
+</div>
+
+<!-- 我的訂單 Sheet -->
+<div class="sheet" id="myOrdersSheet">
+  <div class="sheet-hd"><h3>📋 我的宅配訂單</h3><button class="close-btn" onclick="closeSheet()">✕</button></div>
+  <div id="myOrdersBody" style="padding-bottom:20px"></div>
+</div>
+
+<!-- 訂單詳情 Sheet（供「我的訂單」列表點入使用；查詢訂單維持原本 querySheet 內嵌顯示，不受影響） -->
+<div class="sheet" id="shipDetailSheet">
+  <div class="sheet-hd">
+    <button class="close-btn" onclick="backToMyOrders()" style="width:auto;border-radius:16px;padding:0 12px;font-size:13px">← 返回</button>
+    <button class="close-btn" onclick="closeSheet()">✕</button>
+  </div>
+  <div id="shipDetailBody" style="padding:0 16px 20px"></div>
+</div>
+
+<div class="success-screen" id="successScreen">
+  <div class="suc-icon">🎉</div>
+  <div class="suc-title">訂單已送出</div>
+  <div class="suc-no" id="sucOrderNo"></div>
+  <div class="order-detail" id="sucDetail"></div>
+  <div class="suc-btns">
+    <button class="suc-btn" onclick="backToShop()">繼續選購</button>
+    <button class="suc-btn-outline" onclick="openQueryFromSuccess()">查詢訂單</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const STORE_ID = params.get('store_id') || '';
+let SHOP_DATA = null;
+let cart = {}; // product_id -> {product, qty}
+let arrivalType = 'asap';
+let selectedPayment = '';
+// hotfix22-C：優惠券狀態（共用 /api/coupons/validate，與 line-order.html 相同結構）
+let appliedCoupon = null; // { code, discount_amount, coupon: {...} }
+let couponFeatureEnabled = false;
+// fix18-10-hotfix22A補充：購物車 localStorage 暫存（關閉視窗/重新整理不清空，24小時有效期，下單成功才清空）
+const SHIP_CART_KEY = 'line_shipping_cart_' + STORE_ID;
+const SHIP_CART_TTL_MS = 24 * 60 * 60 * 1000;
+
+function apiUrl(path) {
+  const sep = path.includes('?') ? '&' : '?';
+  return path + sep + 'store_id=' + encodeURIComponent(STORE_ID);
+}
+async function apiGet(path) {
+  const res = await fetch(apiUrl(path));
+  return res.json();
+}
+async function apiPost(path, body) {
+  const res = await fetch(apiUrl(path), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {})
+  });
+  return res.json();
+}
+function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+// hotfix22-B：冷藏宅配 LINE Pay 正式付款流程已確認可用（見 routes/line-shipping.js 與
+// routes/linepay.js），移除舊版「尚未串接」阻擋提示。
+
+async function init() {
+  // ── hotfix22-B：LINE Pay 導回結果處理（宅配專用，導回本頁而非 line-order.html）──
+  const _lpP = new URLSearchParams(window.location.search);
+  if (_lpP.get('linepay') === 'success') {
+    document.getElementById('loading').style.display = 'none';
+    const orderNo = _lpP.get('order') || '';
+    try {
+      const qres = await apiGet(`/api/line-shipping/order/${encodeURIComponent(orderNo)}`);
+      if (qres.success) { showSuccess(qres.data); }
+      else {
+        document.getElementById('sucOrderNo').textContent = orderNo;
+        document.getElementById('sucDetail').innerHTML = '<div style="color:#06C755;font-weight:700;font-size:16px;text-align:center;padding:20px">💚 LINE Pay 付款成功！宅配訂單已建立。</div>';
+        document.getElementById('successScreen').classList.add('show');
+      }
+    } catch {
+      document.getElementById('sucOrderNo').textContent = orderNo;
+      document.getElementById('sucDetail').innerHTML = '<div style="color:#06C755;font-weight:700;font-size:16px;text-align:center;padding:20px">💚 LINE Pay 付款成功！宅配訂單已建立。</div>';
+      document.getElementById('successScreen').classList.add('show');
+    }
+    return;
+  }
+  if (_lpP.get('linepay') === 'cancel') {
+    setTimeout(() => toast('LINE Pay 付款已取消，請重新選擇付款方式'), 600);
+  }
+  if (_lpP.get('linepay') === 'fail' || _lpP.get('linepay') === 'error') {
+    setTimeout(() => toast('LINE Pay 付款失敗，請重新嘗試或選擇其他付款方式'), 600);
+  }
+  try {
+    const res = await apiGet('/api/line-shipping/shop');
+    if (!res.success) throw new Error(res.message || '載入失敗');
+    SHOP_DATA = res.data;
+    if (!SHOP_DATA.settings.shipping_enabled) {
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('closedScreen').style.display = 'flex';
+      return;
+    }
+    // hotfix22-C：依 coupon_feature_enabled 顯示/隱藏優惠券輸入區（與 line-order.html 相同判斷）
+    couponFeatureEnabled = SHOP_DATA.coupon_feature_enabled === true;
+    const couponAreaEl = document.getElementById('couponArea');
+    if (couponAreaEl) couponAreaEl.style.display = couponFeatureEnabled ? '' : 'none';
+    renderShop();
+    await restoreCart();
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('content').style.display = 'block';
+  } catch (e) {
+    document.getElementById('loading').innerHTML = `<p>載入失敗：${esc(e.message)}</p>`;
+  }
+}
+
+function renderShop() {
+  const d = SHOP_DATA;
+  document.getElementById('shopTitle').textContent = d.settings.shipping_title || '冷藏宅配';
+  document.getElementById('shopSub').textContent = d.settings.shipping_description || '';
+  document.getElementById('shopName2').textContent = d.store.name || '';
+  document.getElementById('shopAddr').textContent = d.store.address || '';
+  const logoWrap = document.getElementById('logoWrap');
+  if (d.store.logo) logoWrap.innerHTML = `<img src="${esc(d.store.logo)}">`;
+
+  const noticeEl = document.getElementById('notice');
+  if (d.shipping_notice) { noticeEl.textContent = d.shipping_notice; noticeEl.style.display = 'block'; }
+
+  const storageNote = d.settings.shipping_storage_note || '';
+  const storageEl = document.getElementById('storageNote');
+  if (storageNote) { storageEl.textContent = '❄️ ' + storageNote; storageEl.style.display = 'block'; }
+  else storageEl.style.display = 'none';
+
+  renderProductGrid('prodGrid', d.products);
+  if (d.settings.shipping_upsell_enabled && d.upsell_products && d.upsell_products.length) {
+    document.getElementById('upsellSection').style.display = 'block';
+    renderProductGrid('upsellGrid', d.upsell_products);
+  }
+  // fix18-10-hotfix19（BUG1 修正）：綁定一次事件委派即可涵蓋所有重繪後的 +/- 按鈕
+  bindQtyDelegation('prodGrid');
+  bindQtyDelegation('upsellGrid');
+  bindQtyDelegation('cartItems');
+
+  // 付款方式按鈕
+  const payLabels = { cash: '💵 現金', linepay: '📱 LINE Pay', transfer: '🏦 轉帳', credit_card: '💳 信用卡', platform: '📱 平台付款' };
+  const payWrap = document.getElementById('payBtns');
+  payWrap.innerHTML = '';
+  (d.payment_methods || []).forEach((code, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'pay-btn' + (i === 0 ? ' active' : '');
+    btn.dataset.code = code;
+    btn.textContent = payLabels[code] || code;
+    btn.onclick = () => {
+      document.querySelectorAll('.pay-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      selectedPayment = code;
+      persistCart();
+    };
+    payWrap.appendChild(btn);
+  });
+  if ((d.payment_methods || []).length) selectedPayment = d.payment_methods[0];
+
+  // 到貨日期輸入範圍限制
+  const dateInput = document.getElementById('rArrivalDate');
+  dateInput.min = d.earliest_date;
+  dateInput.max = d.latest_date;
+  dateInput.value = d.earliest_date;
+}
+
+// fix18-10-hotfix22A補充：購物車 + 表單 localStorage 完整暫存（24小時有效期，下單成功才清空）
+function persistCart() {
+  try {
+    const cartQtyMap = {};
+    Object.entries(cart).forEach(([pid, c]) => { cartQtyMap[pid] = c.qty; });
+    const data = {
+      cart: cartQtyMap,
+      paymentMethod: selectedPayment,
+      deliveryMode: arrivalType, // 'asap' | 'date'
+      recipient: document.getElementById('rName')?.value || '',
+      phone: document.getElementById('rPhone')?.value || '',
+      zipcode: document.getElementById('rPostal')?.value || '',
+      city: document.getElementById('rCity')?.value || '',
+      district: document.getElementById('rDistrict')?.value || '',
+      address: document.getElementById('rAddress')?.value || '',
+      addressNote: document.getElementById('rAddressNote')?.value || '',
+      shippingDate: document.getElementById('rArrivalDate')?.value || '',
+      shippingTime: '', // 目前畫面無獨立到貨時段欄位，保留欄位供未來擴充
+      remark: document.getElementById('rNote')?.value || '',
+      // hotfix22-C：只保存 coupon code，絕不保存 discount_amount —— 還原時一律重新呼叫
+      // /api/coupons/validate 驗證，避免用一個可能已經失效/被竄改的折扣金額
+      couponCode: appliedCoupon?.code || '',
+      savedAt: Date.now(),
+    };
+    localStorage.setItem(SHIP_CART_KEY, JSON.stringify(data));
+  } catch (e) { /* localStorage 不可用時安靜略過，不影響下單流程 */ }
+}
+
+function clearCartStorage() {
+  try { localStorage.removeItem(SHIP_CART_KEY); } catch (e) {}
+}
+
+// 頁面初始化時呼叫：還原購物車商品、收件資料、付款方式、備註（需在 renderShop() 之後執行，
+// 因為要透過 findProduct() 用目前商品清單重建購物車項目、並同步付款按鈕選取狀態）
+// hotfix22-C：改為 async，因為優惠券還原需要重新呼叫後端驗證 API，不能直接信任 localStorage
+async function restoreCart() {
+  let data;
+  try {
+    const raw = localStorage.getItem(SHIP_CART_KEY);
+    if (!raw) return;
+    data = JSON.parse(raw);
+  } catch (e) { clearCartStorage(); return; }
+  if (!data || !data.savedAt || (Date.now() - data.savedAt) > SHIP_CART_TTL_MS) {
+    clearCartStorage();
+    return;
+  }
+
+  // 還原購物車商品（依目前商品清單重新查找，商品若已下架/刪除則自動略過）
+  cart = {};
+  if (data.cart) {
+    Object.entries(data.cart).forEach(([pid, qty]) => {
+      const p = findProduct(Number(pid));
+      const q = Number(qty);
+      if (p && q > 0) cart[pid] = { product: p, qty: q };
+    });
+  }
+
+  // 還原收件資料/備註
+  const setV = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = v; };
+  setV('rName', data.recipient);
+  setV('rPhone', data.phone);
+  setV('rPostal', data.zipcode);
+  setV('rCity', data.city);
+  setV('rDistrict', data.district);
+  setV('rAddress', data.address);
+  setV('rAddressNote', data.addressNote);
+  setV('rArrivalDate', data.shippingDate);
+  setV('rNote', data.remark);
+
+  // 還原付款方式選取狀態（若還原的付款代碼目前仍在開放清單內）
+  if (data.paymentMethod) {
+    let matched = false;
+    document.querySelectorAll('#payBtns .pay-btn').forEach(b => {
+      const isMatch = b.dataset.code === data.paymentMethod;
+      b.classList.toggle('active', isMatch);
+      if (isMatch) matched = true;
+    });
+    if (matched) selectedPayment = data.paymentMethod;
+  }
+
+  // 還原希望到貨模式（asap/date）— 放在付款方式還原之後，避免此函式內觸發的 persistCart()
+  // 存下尚未還原完成的付款方式快照
+  setArrivalType(data.deliveryMode === 'date' ? 'date' : 'asap');
+
+  // hotfix22-C：優惠券還原 —— 只保存過 code，這裡一律重新呼叫 /api/coupons/validate 驗證，
+  // 絕不直接信任 localStorage 存的折扣金額（規則2/3）。若優惠券已過期、店家停用、商品金額
+  // 變動後不再達最低消費門檻、或使用次數已滿等，一率自動清除並顯示友善提示（規則4），
+  // 不會擋住顧客繼續購物或送單。
+  appliedCoupon = null;
+  const restoredCode = data.couponCode ? String(data.couponCode).trim().toUpperCase() : '';
+  if (restoredCode && cartCount() > 0) {
+    try {
+      const sub = cartSubtotal();
+      const phone = document.getElementById('rPhone')?.value || '';
+      const res = await apiPost('/api/coupons/validate', { code: restoredCode, subtotal: sub, customer_phone: phone });
+      if (res.success) {
+        appliedCoupon = { code: res.coupon.code, discount_amount: res.discount_amount, coupon: res.coupon };
+        const inp = document.getElementById('couponInput'); if (inp) inp.value = res.coupon.code;
+        const appliedRow  = document.getElementById('couponAppliedRow');
+        const appliedText = document.getElementById('couponAppliedText');
+        if (appliedText) appliedText.textContent = `✅ ${res.coupon.name}：折扣 -$${res.discount_amount}`;
+        if (appliedRow) appliedRow.style.display = 'flex';
+      } else {
+        toast(`優惠券「${restoredCode}」已無法使用（${res.message || '請重新套用'}），已自動移除`);
+      }
+    } catch (e) {
+      // 網路錯誤：安全起見不恢復優惠券顯示，避免顯示未經驗證的折扣，使用者可自行重新套用
+    }
+  }
+
+  // 重新渲染商品卡（顯示已還原的數量）與購物車列
+  renderProductGrid('prodGrid', SHOP_DATA.products);
+  if (SHOP_DATA.upsell_products && SHOP_DATA.upsell_products.length) renderProductGrid('upsellGrid', SHOP_DATA.upsell_products);
+  updateCartBar();
+  // 若優惠券還原失敗而被清除，重新寫回 localStorage，避免下次整頁重整又嘗試恢復同一張失效券
+  persistCart();
+}
+
+function renderProductGrid(elId, products) {
+  const grid = document.getElementById(elId);
+  if (!products || !products.length) {
+    grid.innerHTML = '<div class="empty-hint" style="grid-column:1/-1"><div class="ei">📦</div><p>目前尚無可宅配商品</p></div>';
+    return;
+  }
+  grid.innerHTML = products.map(p => {
+    const qty = cart[p.id] ? cart[p.id].qty : 0;
+    const soldOut = p.quota_remaining !== null && p.quota_remaining <= 0;
+    return `
+      <div class="prod-card" data-pid="${p.id}">
+        ${p.image ? `<img class="prod-img" src="${esc(p.image)}">` : `<div class="prod-ph">📦</div>`}
+        <div class="prod-body">
+          ${p.spec ? `<div class="prod-spec">${esc(p.spec)}</div>` : ''}
+          <div class="prod-name">${esc(p.name)}</div>
+          <div class="prod-desc">${esc(p.description || '')}</div>
+          <div class="prod-price">$${p.price}</div>
+          <div class="prod-footer">
+            ${soldOut ? '<span style="font-size:12px;color:#c62828;font-weight:700">已售完</span>' :
+              qty > 0
+              ? `<div class="qty-ctrl">
+                  <button type="button" class="minus qty-btn" data-pid="${p.id}" data-delta="-1">−</button>
+                  <span class="qnum">${qty}</span>
+                  <button type="button" class="plus qty-btn" data-pid="${p.id}" data-delta="1">＋</button>
+                 </div>`
+              : `<button type="button" class="add-btn qty-btn" data-pid="${p.id}" data-delta="1">＋</button>`
+            }
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+// fix18-10-hotfix19（BUG1 修正）：改用事件委派（event delegation）處理 +/- 按鈕，
+// 避免商品卡重繪後 inline onclick 綁定失效或型別不一致造成按鈕無反應。
+// 所有 +/- 按鈕統一帶 class="qty-btn" data-pid data-delta，由外層容器監聽 click 統一分派。
+function bindQtyDelegation(containerId) {
+  const el = document.getElementById(containerId);
+  if (!el || el._qtyBound) return;
+  el._qtyBound = true;
+  el.addEventListener('click', (e) => {
+    const btn = e.target.closest('.qty-btn');
+    if (!btn || !el.contains(btn)) return;
+    const pid = Number(btn.dataset.pid);
+    const delta = Number(btn.dataset.delta);
+    if (!pid || !delta) return;
+    changeQty(pid, delta);
+  });
+}
+
+function findProduct(pid) {
+  const all = [...(SHOP_DATA.products || []), ...(SHOP_DATA.upsell_products || [])];
+  return all.find(p => Number(p.id) === Number(pid));
+}
+
+async function changeQty(pid, delta) {
+  pid = Number(pid);
+  const p = findProduct(pid);
+  if (!p) return;
+  const cur = cart[pid] ? cart[pid].qty : 0;
+  const next = Math.max(0, cur + delta);
+  if (next === 0) delete cart[pid];
+  else cart[pid] = { product: p, qty: next };
+  persistCart();
+  renderProductGrid('prodGrid', SHOP_DATA.products);
+  if (SHOP_DATA.upsell_products && SHOP_DATA.upsell_products.length) renderProductGrid('upsellGrid', SHOP_DATA.upsell_products);
+  updateCartBar();
+  // hotfix22-C：購物車清空時一併清除優惠券（避免下次加商品時殘留舊折扣顯示）
+  if (cartCount() === 0 && appliedCoupon) clearCoupon();
+  // hotfix22-C：商品數量變動後，若已套用優惠券，重新呼叫驗證 API 拿最新折扣金額
+  // （百分比折扣會隨小計變動；小計變小也可能跌破最低消費門檻）
+  else if (appliedCoupon) await revalidateAppliedCoupon();
+  // 若購物車 Sheet 目前開啟中，同步刷新明細與金額（BUG1 驗收項目 4：購物車內也可 +/-）
+  const cartSheetEl = document.getElementById('cartSheet');
+  if (cartSheetEl && cartSheetEl.classList.contains('show')) {
+    renderCartItems();
+    refreshCartSheetTotals();
+  }
+}
+
+// hotfix22-C：重新驗證已套用的優惠券（購物車金額變動後呼叫），絕不沿用舊的折扣金額
+async function revalidateAppliedCoupon() {
+  if (!appliedCoupon) return;
+  const sub = cartSubtotal();
+  if (sub <= 0) { clearCoupon(); return; }
+  try {
+    const phone = document.getElementById('rPhone')?.value || '';
+    const res = await apiPost('/api/coupons/validate', { code: appliedCoupon.code, subtotal: sub, customer_phone: phone });
+    if (res.success) {
+      appliedCoupon = { code: res.coupon.code, discount_amount: res.discount_amount, coupon: res.coupon };
+      const appliedText = document.getElementById('couponAppliedText');
+      if (appliedText) appliedText.textContent = `✅ ${res.coupon.name}：折扣 -$${res.discount_amount}`;
+    } else {
+      appliedCoupon = null;
+      const appliedRow = document.getElementById('couponAppliedRow'); if (appliedRow) appliedRow.style.display = 'none';
+      const inp = document.getElementById('couponInput'); if (inp) inp.value = '';
+      toast(`優惠券已不符合套用條件（${res.message || ''}），已自動移除`);
+    }
+    persistCart();
+  } catch (e) { /* 網路錯誤時暫時保留顯示，送單前後端一定會再驗一次，不會多算折扣 */ }
+}
+
+function cartList() { return Object.values(cart); }
+function cartSubtotal() { return cartList().reduce((s, c) => s + c.product.price * c.qty, 0); }
+function cartCount() { return cartList().reduce((s, c) => s + c.qty, 0); }
+
+function updateCartBar() {
+  const bar = document.getElementById('cartBar');
+  const cnt = cartCount();
+  if (cnt <= 0) { bar.classList.add('hidden'); return; }
+  bar.classList.remove('hidden');
+  document.getElementById('cartCnt').textContent = cnt;
+  document.getElementById('cartBarTotal').textContent = '$' + cartSubtotal();
+}
+
+function calcFee() {
+  const settings = SHOP_DATA.settings;
+  const sub = cartSubtotal();
+  const minAmt = Number(settings.shipping_min_order_amount || 0);
+  const belowMin = minAmt > 0 && sub > 0 && sub < minAmt;
+  // hotfix22-C：優惠券只折商品小計，不折運費；顯示端也用 min() 夾住，避免購物車數量減少後
+  // 折扣金額超過小計（送單時後端 validateCoupon() 一定會重新驗證，這裡只是畫面上不要出現負數）
+  const discount = appliedCoupon ? Math.min(Number(appliedCoupon.discount_amount || 0), sub) : 0;
+  // hotfix22-C 規則C：免運門檻固定以「折扣後商品小計」計算，前後端必須完全一致
+  // discounted_subtotal = max(0, subtotal - discount_amount)
+  const discountedSub = Math.max(0, sub - discount);
+  const meetsFree = settings.shipping_free_threshold > 0 && discountedSub >= settings.shipping_free_threshold;
+  const fee = meetsFree ? 0 : settings.shipping_fee;
+  return { sub, fee, meetsFree, belowMin, minAmt, discount, discountedSub, total: discountedSub + fee };
+}
+
+function renderCartItems() {
+  const wrap = document.getElementById('cartItems');
+  const list = cartList();
+  if (!list.length) { wrap.innerHTML = '<p style="padding:14px 0;color:#888;font-size:13px">購物車是空的</p>'; return; }
+  wrap.innerHTML = list.map(c => `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--bd)">
+      <div>
+        <div style="font-size:14px;font-weight:600">${esc(c.product.name)}${c.product.spec ? ' · ' + esc(c.product.spec) : ''}</div>
+        <div style="font-size:12px;color:#888">$${c.product.price} × ${c.qty}</div>
+      </div>
+      <div class="qty-ctrl">
+        <button type="button" class="minus qty-btn" data-pid="${c.product.id}" data-delta="-1">−</button>
+        <span class="qnum">${c.qty}</span>
+        <button type="button" class="plus qty-btn" data-pid="${c.product.id}" data-delta="1">＋</button>
+      </div>
+    </div>`).join('');
+}
+
+function refreshCartSheetTotals() {
+  const { sub, fee, meetsFree, belowMin, minAmt, discount, discountedSub, total } = calcFee();
+  document.getElementById('subtotalDisplay').textContent = '$' + sub;
+  document.getElementById('feeDisplay').textContent = '$' + fee;
+  document.getElementById('orderTotal').textContent = '$' + total;
+  const discRow = document.getElementById('discountRow');
+  const discDisplay = document.getElementById('discountDisplay');
+  if (discRow) discRow.style.display = discount > 0 ? 'flex' : 'none';
+  if (discDisplay) discDisplay.textContent = '-$' + discount;
+  const freeHint = document.getElementById('freeHint');
+  const threshold = SHOP_DATA.settings.shipping_free_threshold;
+  if (threshold > 0) {
+    if (meetsFree) { freeHint.style.display = 'block'; freeHint.textContent = '🎉 已達免運門檻'; }
+    else { freeHint.style.display = 'block'; freeHint.textContent = `再買 NT$${threshold - discountedSub} 免運`; }
+  } else freeHint.style.display = 'none';
+
+  const warnEl = document.getElementById('minOrderWarn');
+  if (belowMin) { warnEl.style.display = 'block'; warnEl.textContent = `⚠️ 未達最低訂購金額 NT$${minAmt}，還差 NT$${minAmt - sub}`; }
+  else warnEl.style.display = 'none';
+
+  const submitBtn = document.getElementById('submitBtn');
+  if (submitBtn) submitBtn.disabled = belowMin;
+
+  renderCartShipInfo();
+}
+
+// hotfix22-C：優惠券套用／清除（直接共用 /api/coupons/validate，與 line-order.html 相同流程與規則）
+async function applyCoupon() {
+  const code = (document.getElementById('couponInput')?.value || '').trim().toUpperCase();
+  const msgEl = document.getElementById('couponMsg');
+  if (!code) { if (msgEl) msgEl.innerHTML = '<span style="color:#e53935">請輸入優惠券代碼</span>'; return; }
+  const sub = cartSubtotal();
+  if (!sub) { if (msgEl) msgEl.innerHTML = '<span style="color:#e53935">購物車是空的，無法套用優惠券</span>'; return; }
+  const phone = (document.getElementById('rPhone')?.value || '').trim();
+  const btn = document.getElementById('couponApplyBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '驗證中…'; }
+  try {
+    const res = await apiPost('/api/coupons/validate', { code, subtotal: sub, customer_phone: phone });
+    if (res.success) {
+      appliedCoupon = { code: res.coupon.code, discount_amount: res.discount_amount, coupon: res.coupon };
+      if (msgEl) msgEl.innerHTML = '';
+      const appliedRow = document.getElementById('couponAppliedRow');
+      const appliedText = document.getElementById('couponAppliedText');
+      if (appliedText) appliedText.textContent = `✅ ${res.coupon.name}：折扣 -$${res.discount_amount}`;
+      if (appliedRow) appliedRow.style.display = 'flex';
+    } else {
+      appliedCoupon = null;
+      if (res.error === 'COUPON_FEATURE_DISABLED') {
+        const area = document.getElementById('couponArea');
+        if (area) area.style.display = 'none';
+      }
+      if (msgEl) msgEl.innerHTML = `<span style="color:#e53935">❌ ${esc(res.message || '優惠券無效')}</span>`;
+    }
+    persistCart();
+    refreshCartSheetTotals();
+  } catch (e) {
+    if (msgEl) msgEl.innerHTML = '<span style="color:#e53935">❌ 網路錯誤，請稍後再試</span>';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '套用'; }
+  }
+}
+function clearCoupon() {
+  appliedCoupon = null;
+  const inp = document.getElementById('couponInput'); if (inp) inp.value = '';
+  const msg = document.getElementById('couponMsg'); if (msg) msg.innerHTML = '';
+  const appliedRow = document.getElementById('couponAppliedRow'); if (appliedRow) appliedRow.style.display = 'none';
+  persistCart();
+  refreshCartSheetTotals();
+}
+
+// fix18-10-hotfix22：購物車內顯示物流資訊（物流公司／配送方式提醒／後台設定的宅配說明公告）
+function renderCartShipInfo() {
+  const el = document.getElementById('cartShipInfo');
+  if (!el || !SHOP_DATA) return;
+  const s = SHOP_DATA.settings;
+  const carrier = s.shipping_carrier_name || '';
+  const notes = [s.shipping_notice, s.shipping_storage_note].filter(Boolean);
+  el.innerHTML = `<div class="ship-info-box">
+    ${carrier ? `<div class="sib-row"><span>🚚 物流公司</span><span>${esc(carrier)}</span></div>` : ''}
+    <div class="sib-row"><span>📦 配送方式</span><span>${arrivalType === 'date' ? '指定到貨' : '最快出貨'}</span></div>
+    ${notes.length ? `<div class="sib-note">${notes.map(esc).join('\n')}</div>` : ''}
+  </div>`;
+}
+
+function openCartSheet() {
+  renderCartItems();
+  refreshCartSheetTotals();
+  document.getElementById('overlay').classList.add('show');
+  document.getElementById('cartSheet').classList.add('show');
+}
+function openQuerySheet() {
+  document.getElementById('overlay').classList.add('show');
+  document.getElementById('querySheet').classList.add('show');
+}
+function closeSheet() {
+  document.getElementById('overlay').classList.remove('show');
+  document.querySelectorAll('.sheet').forEach(s => s.classList.remove('show'));
+}
+
+function setArrivalType(type) {
+  arrivalType = type;
+  document.getElementById('arrivalAsapBtn').classList.toggle('active', type === 'asap');
+  document.getElementById('arrivalDateBtn').classList.toggle('active', type === 'date');
+  document.getElementById('rArrivalDate').style.display = type === 'date' ? 'block' : 'none';
+  renderCartShipInfo();
+  persistCart();
+}
+
+async function submitOrder() {
+  if (!cartList().length) { toast('購物車是空的'); return; }
+  if (calcFee().belowMin) { toast(`未達最低訂購金額 NT$${SHOP_DATA.settings.shipping_min_order_amount}`); return; }
+  const name = document.getElementById('rName').value.trim();
+  const phone = document.getElementById('rPhone').value.trim();
+  const postal = document.getElementById('rPostal').value.trim();
+  const city = document.getElementById('rCity').value.trim();
+  const district = document.getElementById('rDistrict').value.trim();
+  const address = document.getElementById('rAddress').value.trim();
+  const addressNote = document.getElementById('rAddressNote').value.trim();
+  const note = document.getElementById('rNote').value.trim();
+  const arrivalDate = document.getElementById('rArrivalDate').value;
+
+  if (!name || !phone) { toast('請填寫收件人姓名與電話'); return; }
+  if (!city || !district || !address) { toast('請填寫完整收件地址'); return; }
+  if (!selectedPayment) { toast('請選擇付款方式'); return; }
+
+  const btn = document.getElementById('submitBtn');
+  btn.disabled = true; btn.textContent = '送出中…';
+  try {
+    const res = await apiPost('/api/line-shipping', {
+      items: cartList().map(c => ({ product_id: c.product.id, name: c.product.name, qty: c.qty })),
+      recipient_name: name, phone, postal_code: postal, city, district, address, address_note: addressNote,
+      arrival_type: arrivalType, arrival_date: arrivalType === 'date' ? arrivalDate : '',
+      payment_method: selectedPayment, note,
+      // hotfix22-C：只送 coupon_code，折扣金額一律由後端重新計算，前端算出來的數字只作畫面預覽用
+      coupon_code: appliedCoupon?.code || '',
+    });
+    if (!res.success) { toast(res.message || '送出失敗'); btn.disabled = false; btn.textContent = '送出訂單'; return; }
+    const d = res.data;
+
+    // hotfix22-B：宅配 LINE Pay 正式付款流程 — 沿用 line-order.html 已驗證過的模式
+    // （POST /api/linepay/request → 導向 LINE Pay → /api/linepay/confirm 導回本頁）。
+    // confirmUrl 帶上 &source=shipping，讓 /api/linepay/confirm 導回宅配頁而非外帶/外送頁。
+    if (selectedPayment === 'linepay') {
+      btn.textContent = '前往 LINE Pay…';
+      try {
+        const baseUrl = `${location.protocol}//${location.host}`;
+        // LINE Pay 商品明細金額加總必須等於 amount/total（見 routes/linepay.js 驗證），
+        // 因此運費需視為獨立品項一併帶入，與外帶/外送「外送費」品項的作法一致。
+        const lpItems = (d.items || []).map(i => ({ name: i.name, qty: i.qty, price: i.price }));
+        if (Number(d.shipping_fee) > 0) {
+          lpItems.push({ name: '運費', qty: 1, price: Number(d.shipping_fee) });
+        }
+        const lpRes = await apiPost('/api/linepay/request', {
+          order_uuid: d.uuid,
+          order_number: d.order_number,
+          total: d.total,
+          items: lpItems,
+          customer_name: name,
+          redirect_url: `${baseUrl}/api/linepay/confirm?store_id=${STORE_ID}&source=shipping`,
+          cancel_url: `${baseUrl}/line-shipping.html?store_id=${STORE_ID}&linepay=cancel`,
+        });
+        if (lpRes.success && lpRes.payment_url) {
+          cart = {};
+          appliedCoupon = null;
+          clearCartStorage();
+          window.location.href = lpRes.payment_url;
+          return;
+        } else {
+          toast(lpRes.message || 'LINE Pay 建立付款失敗，請改選其他付款方式');
+          btn.disabled = false; btn.textContent = '送出訂單';
+          return;
+        }
+      } catch (lpErr) {
+        toast('LINE Pay 連線失敗：' + lpErr.message);
+        btn.disabled = false; btn.textContent = '送出訂單';
+        return;
+      }
+    }
+
+    // 現金 / 轉帳 / 其他付款 → 直接顯示成功頁
+    showSuccess(d);
+    cart = {};
+    appliedCoupon = null;
+    clearCartStorage();
+    updateCartBar();
+    closeSheet();
+  } catch (e) {
+    toast('送出失敗，請稍後再試');
+  } finally {
+    btn.disabled = false; btn.textContent = '送出訂單';
+  }
+}
+
+function showSuccess(d) {
+  document.getElementById('sucOrderNo').textContent = d.order_number;
+  const payLabels = { cash: '現金', linepay: 'LINE Pay', transfer: '轉帳', credit_card: '信用卡', platform: '平台付款' };
+  // hotfix22-B：若已知付款狀態（例如 LINE Pay 導回後查到 payment_status_label），明確顯示「付款成功」
+  const payStatusRow = d.payment_status_label
+    ? `<div class="od-row"><span class="od-label">付款狀態</span><span class="od-val" style="color:${d.payment_status==='paid'?'#06C755':'#e65100'};font-weight:700">${esc(d.payment_status_label)}</span></div>`
+    : '';
+  // hotfix22-C：有套用優惠券時顯示折扣列
+  const discAmt = Number(d.discount_amount || 0);
+  const discountRow = discAmt > 0
+    ? `<div class="od-row"><span class="od-label">優惠折扣${d.coupon_code ? '（'+esc(d.coupon_code)+'）' : ''}</span><span class="od-val" style="color:#06C755">-$${discAmt}</span></div>`
+    : '';
+  document.getElementById('sucDetail').innerHTML = `
+    <div class="od-section">
+      <div class="od-row"><span class="od-label">收件人</span><span class="od-val">${esc(d.recipient_name)}</span></div>
+      <div class="od-row"><span class="od-label">電話</span><span class="od-val">${esc(d.phone)}</span></div>
+      <div class="od-row"><span class="od-label">地址</span><span class="od-val">${esc(d.address)}</span></div>
+      <div class="od-row"><span class="od-label">希望到貨</span><span class="od-val">${d.arrival_type === 'date' ? esc(d.arrival_date) : '最快出貨'}</span></div>
+      <div class="od-row"><span class="od-label">付款方式</span><span class="od-val">${payLabels[d.payment_method] || esc(d.payment_method)}</span></div>
+      ${payStatusRow}
+      <div class="od-row"><span class="od-label">商品</span><span class="od-val">${d.items.map(i => `${esc(i.name)}×${i.qty}`).join('<br>')}</span></div>
+      <div class="od-row"><span class="od-label">商品小計</span><span class="od-val">$${d.subtotal != null ? d.subtotal : ''}</span></div>
+      ${discountRow}
+      <div class="od-row"><span class="od-label">運費</span><span class="od-val">$${d.shipping_fee}</span></div>
+      <div class="od-row"><span class="od-label">應付金額</span><span class="od-val od-total">$${d.total}</span></div>
+    </div>`;
+  document.getElementById('successScreen').classList.add('show');
+}
+
+function backToShop() {
+  document.getElementById('successScreen').classList.remove('show');
+}
+function openQueryFromSuccess() {
+  document.getElementById('successScreen').classList.remove('show');
+  openQuerySheet();
+}
+
+// fix18-10-hotfix19：宅配訂單狀態查詢頁重新設計（不再沿用 LINE 點餐樣式）
+const SHIP_STEPS = [
+  { key: 'pending',   label: '待確認' },
+  { key: 'accepted',  label: '已接單' },
+  { key: 'packing',   label: '包裝中' },
+  { key: 'shipped',   label: '已出貨' },
+  { key: 'delivered', label: '已送達' },
+  { key: 'completed', label: '已完成' },
+];
+function renderShipStepper(status) {
+  if (status === 'cancelled') {
+    return '<div class="ship-cancelled-banner">❌ 此訂單已取消</div>';
+  }
+  const curIdx = SHIP_STEPS.findIndex(s => s.key === status);
+  const idx = curIdx === -1 ? 0 : curIdx;
+  return `<div class="ship-stepper">${SHIP_STEPS.map((s, i) => {
+    const cls = i < idx ? 'done' : (i === idx ? 'current' : '');
+    return `<div class="ship-step ${cls}"><div class="dot">${i < idx ? '✓' : i + 1}</div><div class="lbl">${s.label}</div></div>`;
+  }).join('')}</div>`;
+}
+
+// fix18-10-hotfix22：把訂單詳情樣板抽成共用函式，供「查詢訂單」與新增的「我的訂單」共用，
+// 避免重複維護兩份幾乎相同的樣板（不影響既有 queryOrder() 對外行為）。
+const SHIP_PAY_LABELS = { pending: '待付款', paid: '付款成功', failed: '付款失敗', refunded: '退款', cancelled: '取消' };
+function renderShipOrderDetailHTML(d, opts) {
+  opts = opts || {};
+  const trackBtnId = opts.idPrefix ? opts.idPrefix + 'TrackBtn' : 'trackBtn';
+  const copyBtnId = opts.idPrefix ? opts.idPrefix + 'CopyBtn' : 'copyTrackBtn';
+  const payLabel = d.payment_status_label || SHIP_PAY_LABELS[d.payment_status] || '待付款';
+  const trackBtn = d.tracking_number
+    ? `<button type="button" class="track-btn" id="${trackBtnId}">🔍 物流查詢（${esc(d.carrier_name || '')} ${esc(d.tracking_number)}）</button>
+       <button type="button" class="copy-btn" id="${copyBtnId}" style="width:100%">📋 複製物流單號</button>`
+    : '';
+  return `
+    <div class="ship-status-title">📦 宅配訂單狀態</div>
+    ${renderShipStepper(d.status)}
+    <div class="od-section">
+      <div class="od-row"><span class="od-label">訂單編號</span><span class="od-val">${esc(d.order_number)}</span></div>
+      <div class="od-row"><span class="od-label">建立時間</span><span class="od-val">${esc(d.created_at || '')}</span></div>
+      <div class="od-row"><span class="od-label">付款狀態</span><span class="od-val">${esc(payLabel)}</span></div>
+      <div class="od-row"><span class="od-label">付款方式</span><span class="od-val">${esc(d.payment_method_label || d.payment_method || '')}</span></div>
+      <div class="od-row"><span class="od-label">收件人</span><span class="od-val">${esc(d.recipient_name)}</span></div>
+      <div class="od-row"><span class="od-label">電話</span><span class="od-val">${esc(d.phone || (d.phone_last3 ? '***' + d.phone_last3 : ''))}</span></div>
+      <div class="od-row"><span class="od-label">地址</span><span class="od-val">${esc(d.address)}</span></div>
+      <div class="od-row"><span class="od-label">希望到貨</span><span class="od-val">${d.arrival_type === 'date' ? esc(d.arrival_date) : '最快出貨'}</span></div>
+      <div class="od-row"><span class="od-label">商品明細</span><span class="od-val">${(d.items||[]).map(i => `${esc(i.name)}${i.spec ? '（'+esc(i.spec)+'）' : ''} × ${i.qty}`).join('<br>')}</span></div>
+      <div class="od-row"><span class="od-label">小計</span><span class="od-val">$${d.subtotal}</span></div>
+      <div class="od-row"><span class="od-label">運費</span><span class="od-val">$${d.shipping_fee}</span></div>
+      <div class="od-row"><span class="od-label">總金額</span><span class="od-val od-total">$${d.total}</span></div>
+      <div class="od-row"><span class="od-label">物流公司</span><span class="od-val">${esc(d.carrier_name || '－')}</span></div>
+      <div class="od-row"><span class="od-label">物流單號</span><span class="od-val">${esc(d.tracking_number || '－')}</span></div>
+      <div class="od-row"><span class="od-label">備註</span><span class="od-val">${esc(d.note || d.shipping_note || '－')}</span></div>
+    </div>
+    ${trackBtn}`;
+}
+function bindShipDetailButtons(d, opts) {
+  opts = opts || {};
+  const trackBtnId = opts.idPrefix ? opts.idPrefix + 'TrackBtn' : 'trackBtn';
+  const copyBtnId = opts.idPrefix ? opts.idPrefix + 'CopyBtn' : 'copyTrackBtn';
+  const tb = document.getElementById(trackBtnId);
+  // V2：物流查詢按鈕先開啟物流公司官網（尚未串接黑貓 API 追蹤，先做通用導引）
+  if (tb) tb.onclick = () => { window.open('https://www.t-cat.com.tw/inquire/trace.aspx', '_blank'); };
+  const cb = document.getElementById(copyBtnId);
+  if (cb) cb.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(d.tracking_number || '');
+      toast('已複製物流單號');
+    } catch (e) { toast('複製失敗，請手動選取'); }
+  };
+}
+
+async function queryOrder() {
+  const no = document.getElementById('qOrderNo').value.trim();
+  const resultEl = document.getElementById('queryResult');
+  if (!no) { toast('請輸入訂單編號'); return; }
+  resultEl.innerHTML = '<p style="color:#888;font-size:13px">查詢中…</p>';
+  try {
+    const res = await apiGet(`/api/line-shipping/order/${encodeURIComponent(no)}`);
+    if (!res.success) { resultEl.innerHTML = `<p style="color:#c62828;font-size:13px">${esc(res.message || '查無訂單')}</p>`; return; }
+    const d = res.data;
+    resultEl.innerHTML = renderShipOrderDetailHTML(d);
+    bindShipDetailButtons(d);
+  } catch (e) {
+    resultEl.innerHTML = '<p style="color:#c62828;font-size:13px">查詢失敗</p>';
+  }
+}
+
+// ── Hotfix22：我的訂單（依電話查詢歷史宅配訂單，獨立於「查詢訂單」單號查詢）──
+function openMyOrders() {
+  const phone = localStorage.getItem('line_shipping_customer_phone');
+  const name = localStorage.getItem('line_shipping_customer_name');
+  if (phone) loadMyOrders(phone, name);
+  else showMyOrdersLogin();
+  document.getElementById('overlay').classList.add('show');
+  document.getElementById('myOrdersSheet').classList.add('show');
+}
+function showMyOrdersLogin() {
+  document.getElementById('myOrdersBody').innerHTML = `
+    <div style="padding:16px">
+      <div class="ship-info-box">📱 請輸入您訂購時填寫的電話查看宅配歷史訂單</div>
+      <div class="fg"><label class="fl">電話 / 後三碼 <span class="req">*</span></label><input class="fi" id="moPhone" placeholder="完整電話或後三碼" type="tel"></div>
+      <div class="fg"><label class="fl">收件人姓名（後三碼查詢時必填）</label><input class="fi" id="moName" placeholder="收件人姓名" type="text"></div>
+      <button class="sub-btn" onclick="loginMyOrders()">查詢我的訂單</button>
+    </div>`;
+}
+async function loginMyOrders() {
+  const phone = document.getElementById('moPhone')?.value.trim();
+  const name = document.getElementById('moName')?.value.trim();
+  if (!phone) { toast('請輸入電話'); return; }
+  await loadMyOrders(phone, name, true);
+}
+function clearMyOrdersLogin() {
+  localStorage.removeItem('line_shipping_customer_phone');
+  localStorage.removeItem('line_shipping_customer_name');
+  showMyOrdersLogin();
+}
+async function loadMyOrders(phone, name, save) {
+  const body = document.getElementById('myOrdersBody');
+  body.innerHTML = '<div style="text-align:center;padding:40px;color:#888"><div class="spinner" style="margin:0 auto 8px"></div>載入中…</div>';
+  try {
+    const b = { phone }; if (name) b.customer_name = name;
+    const res = await apiPost('/api/line-shipping/history', b);
+    if (!res.success) {
+      body.innerHTML = `<div class="empty-hint"><div class="ei">📭</div><p>${esc(res.message || '查無宅配訂單')}</p><button class="sub-btn" style="margin:16px auto 0;max-width:240px" onclick="clearMyOrdersLogin()">重新輸入</button></div>`;
+      return;
+    }
+    if (save) {
+      localStorage.setItem('line_shipping_customer_phone', phone);
+      if (name) localStorage.setItem('line_shipping_customer_name', name);
+    }
+    _myOrdersCache = res.orders;
+    body.innerHTML = `<div style="padding:10px 16px;display:flex;justify-content:space-between;align-items:center"><span style="font-size:13px;color:#888">共 ${res.orders.length} 筆宅配訂單</span><button onclick="clearMyOrdersLogin()" style="font-size:12px;color:var(--sub);background:none;border:none;cursor:pointer">切換帳號</button></div>`
+      + res.orders.map((o, i) => buildShipOrderCardHTML(o, i)).join('') + '<div style="height:20px"></div>';
+  } catch (e) {
+    body.innerHTML = '<p style="color:#c62828;text-align:center;padding:40px">載入失敗，請重試</p>';
+  }
+}
+let _myOrdersCache = [];
+function buildShipOrderCardHTML(o, idx) {
+  const payClass = 'pay-' + (o.payment_status || 'pending');
+  return `<div class="mo-card">
+    <div class="mo-head">
+      <div><div class="mo-no">📦 ${esc(o.order_number)}</div><div class="mo-time">🕒 ${esc((o.created_at||'').slice(0,16))}</div></div>
+      <div class="mo-badges">
+        <span class="mo-badge ${payClass}">${esc(o.payment_status_label)}</span>
+        <span class="mo-badge ship">${esc(o.status_label)}</span>
+      </div>
+    </div>
+    <div class="mo-bottom">
+      <span class="mo-amount">💰 $${o.total}</span>
+      <button class="mo-detail-btn" onclick="openShipOrderDetail(${idx})">查看詳情</button>
+    </div>
+  </div>`;
+}
+function openShipOrderDetail(idx) {
+  const d = _myOrdersCache[idx];
+  if (!d) return;
+  document.getElementById('shipDetailBody').innerHTML = renderShipOrderDetailHTML(d, { idPrefix: 'mo' });
+  bindShipDetailButtons(d, { idPrefix: 'mo' });
+  document.getElementById('shipDetailSheet').classList.add('show');
+}
+function backToMyOrders() {
+  document.getElementById('shipDetailSheet').classList.remove('show');
+}
+
+init();
+</script>
+</body>
+</html>
