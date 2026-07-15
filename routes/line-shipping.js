@@ -15,6 +15,9 @@ const router  = express.Router();
 const { getDb } = require('../utils/db');
 const { broadcastToStore } = require('../utils/wssBroadcast');
 const { v4: uuidv4 } = require('uuid');
+const { logServerEvent, buildTrackingMetadata } = require('../utils/analyticsLog'); // fix18-10-hotfix23-A/D：Analytics Foundation + Ads Attribution
+const { touchMemberOnOrder, recordMemberPurchase } = require('../utils/lineMemberStats'); // fix18-10-hotfix23-E：LINE 會員入口
+const { verifyMemberSession } = require('../utils/lineMemberSession'); // fix18-10-hotfix23-E：安全 Member Session
 // hotfix22-C：冷藏宅配優惠券支援 — 直接共用既有優惠券引擎（routes/coupons.js），
 // 不重做驗證規則（期限／最低消費／每人次數上限／tenant 隔離皆沿用同一份邏輯），
 // 也不影響 routes/line-shipping.js 本來「不共用外帶/外送購物車與驗證流程」的獨立設計。
@@ -75,6 +78,16 @@ function getShippingSettings(db, storeId) {
     'shipping_allow_arrival_date', 'shipping_upsell_enabled',
     // 沿用既有店家基本資料
     'shop_name', 'shop_logo', 'shop_address',
+    // fix18-10-hotfix23-D：廣告追蹤設定（與 line-order 頁一致，同一套 key）
+    'analytics_meta_pixel_enabled', 'analytics_meta_pixel_id',
+    'analytics_ga4_enabled', 'analytics_ga4_measurement_id',
+    // fix18-10-hotfix23-E：LINE 會員入口（與 line-order 頁一致，同一套 key，
+    // 不含 Channel Secret）
+    'line_member_gate_enabled', 'line_member_gate_mode', 'line_member_require_friend',
+    'line_member_allow_skip', 'line_member_add_friend_url', 'line_member_basic_id',
+    'line_member_login_channel_id', 'line_member_liff_id', 'line_member_return_url',
+    'line_member_title', 'line_member_description', 'line_member_friend_button_text',
+    'line_member_login_button_text', 'line_member_skip_button_text',
   ];
   const s = {};
   keys.forEach(k => { s[k] = getSetting(db, storeId, k, ''); });
@@ -381,7 +394,13 @@ router.post('/', (req, res) => {
       recipient_name, phone, postal_code, city, district, address, address_note,
       arrival_type, arrival_date,
       payment_method, note, coupon_code,
+      // fix18-10-hotfix23-A：Analytics Foundation — 追蹤欄位，不影響金額/付款信任邊界
+      analytics: analyticsPayload,
+      // fix18-10-hotfix23-E：LINE 會員入口 —— 只信任後端簽發的 member_session
+      member_session,
     } = req.body;
+
+    const knownLineUserId = member_session ? verifyMemberSession(member_session, storeId) : null;
 
     const settings = getShippingSettings(db, storeId);
     if (!settings.shipping_enabled) {
@@ -502,8 +521,8 @@ router.post('/', (req, res) => {
         shipping_recipient_name, shipping_phone, shipping_postal_code, shipping_city,
         shipping_district, shipping_address, shipping_address_note,
         shipping_arrival_type, shipping_arrival_date, shipping_fee, shipping_free_discount,
-        shipping_carrier_name, shipping_status
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        shipping_carrier_name, shipping_status, line_user_id
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         uuid, uuid, orderNo, storeId, 'shipping', 'pending', 'pending',
         recipient_name, phone,
@@ -514,7 +533,7 @@ router.post('/', (req, res) => {
         recipient_name, phone, postal_code || '', city || '',
         district || '', address, address_note || '',
         finalArrivalType, finalArrivalType === 'date' ? (arrival_date || '') : '', feeResult.shipping_fee, feeResult.free_discount,
-        settings.shipping_carrier_name || '', 'pending',
+        settings.shipping_carrier_name || '', 'pending', knownLineUserId || '',
       ]
     );
 
@@ -559,6 +578,46 @@ router.post('/', (req, res) => {
     triggerN8nWebhook(db, storeId, 'line_shipping_new_order', {
       order_number: orderNo, recipient_name, phone, total, items: finalItems,
     });
+
+    // ── fix18-10-hotfix23-A：Analytics Foundation ──────────────────────
+    // 規則與 routes/line-orders.js 一致：submit_order 無論付款方式都寫入；
+    // purchase 非 LINE Pay 訂單於此立即寫入，LINE Pay 訂單改由 /api/linepay/confirm 寫入。
+    try {
+      const ap = (analyticsPayload && typeof analyticsPayload === 'object') ? analyticsPayload : {};
+      const evtBase = {
+        store_id: storeId,
+        visitor_id: ap.visitor_id || `unknown_${uuid}`,
+        session_id: ap.session_id || `unknown_${uuid}`,
+        cart_id: ap.cart_id || null,
+        order_id: uuid,
+        order_mode: 'shipping',
+        source: ap.source || null,
+        medium: ap.medium || null,
+        campaign: ap.campaign || null,
+        referrer: ap.referrer || null,
+        landing_page: ap.landing_page || null,
+        fbclid: ap.fbclid || null,
+        gclid: ap.gclid || null,
+        // fix18-10-hotfix23-D：與 routes/line-orders.js 一致的追蹤欄位白名單組裝
+        metadata: buildTrackingMetadata(ap),
+        // fix18-10-hotfix24-A3：Identity × Channel（需求文件四／六）—— 冷藏宅配訂單
+        // 一律視為 fulfillment_type='shipping'，channel_source 固定為 'line'。
+        line_user_id: knownLineUserId || null,
+        channel_source: 'line',
+        fulfillment_type: 'shipping',
+      };
+      logServerEvent(db, { ...evtBase, event_name: 'submit_order' });
+      if (knownLineUserId) touchMemberOnOrder(db, storeId, knownLineUserId);
+      if (payment_method !== 'linepay') {
+        const purchaseWritten = logServerEvent(db, { ...evtBase, event_name: 'purchase' });
+        if (purchaseWritten && knownLineUserId) {
+          const purchaseEvent = recordMemberPurchase(db, storeId, knownLineUserId, uuid, total);
+          if (purchaseEvent) logServerEvent(db, { ...evtBase, event_name: purchaseEvent === 'first_purchase' ? 'member_first_purchase' : 'member_repeat_purchase' });
+        }
+      }
+    } catch (evtErr) {
+      console.warn('[line-shipping] analytics event write failed:', evtErr.message);
+    }
 
     res.json({
       success: true,

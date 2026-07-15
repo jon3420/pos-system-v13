@@ -228,7 +228,14 @@ function hasFeature(key) {
   return window.currentFeatures[key] === true;
 }
 
-/** 載入老闆儀表板（fix16b 升級）*/
+/** 載入老闆儀表板 V2（fix18-10-hotfix23-B：日期同步 × Conversion Analytics）*/
+// 統一日期篩選狀態，所有 KPI／漏斗／購物車／商品／付款／來源／回購／未完成／健康度／建議
+// 一律共用這一個 state，不得各區塊自行算日期。
+let dashboardDateState = { preset: 'today', start_date: '', end_date: '', timezone: 'Asia/Taipei' };
+let _dashboardLastData = null;      // 保留最後一次成功資料，API 失敗時不讓整頁白屏
+let _dashboardProductsCache = [];   // 商品轉換排行原始資料（排序在前端做，不重打 API）
+let _dashboardProductSort = 'cart';
+
 function loadReportsPage() {
   const container = document.getElementById('reports-container');
   if (!container) return;
@@ -243,48 +250,138 @@ function loadReportsPage() {
     return;
   }
 
-  container.innerHTML = _dashboardSkeleton();
-  _loadDashboard();
+  // 還原上次的日期篩選狀態（同分頁內重新整理保留目前選擇）
+  try {
+    const saved = JSON.parse(sessionStorage.getItem('dashboardDateState') || 'null');
+    if (saved && saved.preset) dashboardDateState = Object.assign({ preset:'today', start_date:'', end_date:'', timezone:'Asia/Taipei' }, saved);
+  } catch (e) {}
+
+  container.innerHTML = _dashboardSkeletonV2();
+  renderDashboardDateControls();
+  loadDashboardV2();
 }
 
-function _dashboardSkeleton() {
+function _dashboardSkeletonV2() {
   return `
+  <style>
+    /* fix18-10-hotfix23-C：Dashboard V3 版面優化——卡片陰影／hover／色彩區隔，維持 Dark Theme */
+    .db-v3-hover { box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: transform .15s ease, box-shadow .15s ease; }
+    .db-v3-hover:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,.35); }
+  </style>
   <div id="dashboard-wrap" style="font-family:-apple-system,sans-serif;width:100%;box-sizing:border-box">
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;flex-wrap:wrap">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
       <h2 style="margin:0;font-size:1.2rem">📊 老闆儀表板</h2>
-      <input type="date" id="db-date" style="padding:6px 10px;border-radius:8px;border:1px solid var(--border,#2a2d3e);background:var(--bg-card,#1a1d27);color:var(--text-primary,#e2e8f0);font-size:.85rem"
-        onchange="_loadDashboard()">
-      <button onclick="_loadDashboard()" style="padding:6px 12px;border-radius:8px;background:#6366f1;border:none;color:#fff;cursor:pointer;font-size:.85rem">🔄 重新整理</button>
     </div>
-    <div id="db-body"><div style="color:var(--text-secondary,#64748b);padding:20px">載入中...</div></div>
+    <div id="db-date-controls" style="margin-bottom:20px"></div>
+    <div id="db-body-v2"><div style="color:var(--text-secondary,#64748b);padding:20px">載入中...</div></div>
   </div>`;
 }
 
-async function _loadDashboard() {
-  const dateEl = document.getElementById('db-date');
-  if (dateEl && !dateEl.value) {
-    // 設定預設日期（台灣今日）
-    const n = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
-    dateEl.value = n.toISOString().slice(0,10);
+// ── A. 日期篩選 UI ──────────────────────────────────────────────
+function renderDashboardDateControls() {
+  const el = document.getElementById('db-date-controls');
+  if (!el) return;
+  const presets = [['today','今日'],['yesterday','昨日'],['week','本週'],['month','本月'],['lastmonth','上月'],['single','單日'],['custom','自訂']];
+  const btnStyle = (active) => `padding:6px 12px;border-radius:8px;border:1px solid var(--border,#2a2d3e);font-size:.8rem;cursor:pointer;white-space:nowrap;background:${active?'#6366f1':'transparent'};color:${active?'#fff':'var(--text-secondary,#64748b)'}`;
+  const isSingle = dashboardDateState.preset === 'single';
+  const isCustom = dashboardDateState.preset === 'custom';
+  el.innerHTML = `
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      ${presets.map(([k,label]) => `<button onclick="setDashboardPreset('${k}')" style="${btnStyle(dashboardDateState.preset===k)}">${label}</button>`).join('')}
+      <div id="db-single-wrap" style="display:${isSingle?'flex':'none'};gap:4px;align-items:center">
+        <input type="date" id="db-single-date" value="${escHtml(dashboardDateState.start_date||twTodayStr())}"
+          style="padding:5px 8px;border-radius:8px;border:1px solid var(--border,#2a2d3e);background:var(--bg-card,#1a1d27);color:var(--text-primary,#e2e8f0);font-size:.8rem">
+      </div>
+      <div id="db-custom-wrap" style="display:${isCustom?'flex':'none'};gap:4px;align-items:center">
+        <input type="date" id="db-custom-start" value="${escHtml(dashboardDateState.start_date||'')}"
+          style="padding:5px 8px;border-radius:8px;border:1px solid var(--border,#2a2d3e);background:var(--bg-card,#1a1d27);color:var(--text-primary,#e2e8f0);font-size:.8rem">
+        <span style="color:var(--text-secondary,#64748b)">～</span>
+        <input type="date" id="db-custom-end" value="${escHtml(dashboardDateState.end_date||'')}"
+          style="padding:5px 8px;border-radius:8px;border:1px solid var(--border,#2a2d3e);background:var(--bg-card,#1a1d27);color:var(--text-primary,#e2e8f0);font-size:.8rem">
+      </div>
+      <button onclick="applyDashboardDateFilter()" style="padding:6px 14px;border-radius:8px;background:#10b981;border:none;color:#fff;cursor:pointer;font-size:.8rem">🔍 查詢</button>
+      <button onclick="refreshDashboardV2()" style="padding:6px 14px;border-radius:8px;background:#6366f1;border:none;color:#fff;cursor:pointer;font-size:.8rem">🔄 重新整理</button>
+    </div>
+    <div style="font-size:.72rem;color:var(--text-secondary,#64748b);margin-top:6px">
+      目前查詢區間：${escHtml(dashboardDateState.start_date||'—')} ～ ${escHtml(dashboardDateState.end_date||'—')}（Asia/Taipei）
+    </div>`;
+}
+
+function setDashboardPreset(preset) {
+  dashboardDateState.preset = preset;
+  if (preset !== 'single' && preset !== 'custom') {
+    dashboardDateState.start_date = '';
+    dashboardDateState.end_date = '';
+  } else if (preset === 'single' && !dashboardDateState.start_date) {
+    dashboardDateState.start_date = dashboardDateState.end_date = twTodayStr();
   }
-  const date = dateEl ? dateEl.value : '';
-  const body = document.getElementById('db-body');
+  renderDashboardDateControls();
+  // 今日/昨日/本週/本月/上月可直接查；單日/自訂要等使用者選好日期按「查詢」
+  if (preset !== 'single' && preset !== 'custom') loadDashboardV2();
+}
+
+function applyDashboardDateFilter() {
+  if (dashboardDateState.preset === 'single') {
+    const d = document.getElementById('db-single-date')?.value;
+    if (!d) { showToast('請選擇日期', 'error'); return; }
+    dashboardDateState.start_date = d;
+    dashboardDateState.end_date = d;
+  } else if (dashboardDateState.preset === 'custom') {
+    const s = document.getElementById('db-custom-start')?.value;
+    const e = document.getElementById('db-custom-end')?.value;
+    if (!s || !e) { showToast('請選擇開始與結束日期', 'error'); return; }
+    if (e < s) { showToast('結束日期不得早於開始日期', 'error'); return; }
+    dashboardDateState.start_date = s;
+    dashboardDateState.end_date = e;
+  }
+  renderDashboardDateControls();
+  loadDashboardV2();
+}
+
+function refreshDashboardV2() {
+  loadDashboardV2();
+}
+
+// ── N. API 串接 ─────────────────────────────────────────────────
+async function loadDashboardV2() {
+  try { sessionStorage.setItem('dashboardDateState', JSON.stringify(dashboardDateState)); } catch (e) {}
+
+  const body = document.getElementById('db-body-v2');
   if (!body) return;
-  body.innerHTML = '<div style="color:var(--text-secondary,#64748b);padding:20px">載入中...</div>';
+  if (!_dashboardLastData) body.innerHTML = '<div style="color:var(--text-secondary,#64748b);padding:20px">載入中...</div>';
+
+  const params = new URLSearchParams({ preset: dashboardDateState.preset, timezone: 'Asia/Taipei' });
+  if (dashboardDateState.start_date) params.set('start_date', dashboardDateState.start_date);
+  if (dashboardDateState.end_date) params.set('end_date', dashboardDateState.end_date);
 
   try {
-    const url = '/api/dashboard' + (date ? '?date=' + date : '');
-    const res  = await apiFetch(url);
+    const res = await apiFetch('/api/analytics/dashboard?' + params.toString());
     if (!res || res.status === 403) {
-      body.innerHTML = '<div style="color:#ef4444;padding:20px">❌ 無法載入報表（功能未授權）</div>';
+      renderDashboardLoadError('無法載入儀表板（功能未授權）');
       return;
     }
     const json = await res.json();
-    if (!json.success) { body.innerHTML = '<div style="color:#ef4444;padding:20px">❌ ' + (json.message || '載入失敗') + '</div>'; return; }
-    body.innerHTML = _renderDashboard(json.data, json.date);
-  } catch(e) {
-    body.innerHTML = '<div style="color:#ef4444;padding:20px">❌ 載入失敗：' + e.message + '</div>';
+    if (!json.success) { renderDashboardLoadError(json.message || '載入失敗'); return; }
+    _dashboardLastData = json;
+    renderDashboardV2(json);
+  } catch (e) {
+    renderDashboardLoadError(e.message);
   }
+}
+
+// API 失敗時：若已有上次成功資料，保留既有畫面只提示 toast；完全沒資料時才顯示錯誤區塊，
+// 不讓整個老闆儀表板白屏。
+function renderDashboardLoadError(msg) {
+  if (_dashboardLastData) {
+    showToast('儀表板更新失敗：' + msg, 'error');
+    return;
+  }
+  const body = document.getElementById('db-body-v2');
+  if (body) body.innerHTML = `<div style="color:#ef4444;padding:20px">❌ 載入失敗：${escHtml(msg)}</div>`;
+}
+
+function _fmtPct(v) {
+  return (v === null || v === undefined || typeof v !== 'number' || !isFinite(v)) ? '—' : (v + '%');
 }
 
 function _nt(n) { return 'NT$' + Number(n||0).toLocaleString('zh-TW',{minimumFractionDigits:0,maximumFractionDigits:0}); }
@@ -305,204 +402,786 @@ function _section(title, html) {
   </div>`;
 }
 
-function _renderDashboard(d, date) {
-  const f = window.currentFeatures || {};
+// ── 組裝所有區塊（依需求文件 M. UI 規則指定順序；fix18-10-hotfix23-C 起
+//    在既有 Hotfix23-B 區塊「之上」疊加 Dashboard V3 首頁模式／KPI 成長比較／
+//    健康度 V2／30 天趨勢／Funnel V2／商品分級，既有區塊本身不刪除）──────
+function renderDashboardV2(data) {
+  const body = document.getElementById('db-body-v2');
+  if (!body) return;
   let html = '';
+  html += renderDashboardTodo(data.todo_list);
+  html += renderDashboardHome(data);
+  html += renderDashboardKpiV3(data.kpi, data.kpi_comparison, data.range);
+  html += renderDashboardHealthV2(data.health_score_v2, data.range);
+  html += renderDashboardTrend30d(data.trend_30d);
+  html += `<div style="font-size:.72rem;color:var(--text-secondary,#64748b);margin:-8px 0 12px 2px">🔎 目前：全部渠道（渠道篩選請至「營運分析 V2」）</div>`;
+  html += renderDashboardFunnelV2(data.funnel, data.funnel_summary);
+  html += renderDashboardRealtime(data.realtime);
+  html += renderDashboardCart(data.cart);
+  html += renderDashboardProductsV2(data.products, data.product_tiers);
+  html += renderDashboardPayments(data.payments);
+  html += renderDashboardSources(data.sources);
+  html += renderDashboardAdsAttribution(data.ads_attribution);
+  html += renderDashboardLineMemberFunnel(data.line_member_funnel);
+  html += renderDashboardLineCrmKpi(data.line_crm_kpi);
+  html += renderDashboardLineCrmHealth(data.line_crm_health);
+  html += renderDashboardRepeatCustomers(data.repeat_customers);
+  html += renderDashboardIncomplete(data.incomplete);
+  html += renderDashboardRecommendations(data.recommendations);
+  body.innerHTML = html;
+  // 商品排行表格在 innerHTML 掛載後才能抓到 DOM，另外呼叫填入
+  renderDashboardProductsTable();
+}
 
-  // ── 第一區：今日總覽 ───────────────────────────────
-  html += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:20px;width:100%">
-    ${_card('今日營收', _nt(d.todayRevenue), date, '#10b981')}
-    ${_card('今日訂單', d.todayOrders + ' 筆', '', '')}
-    ${_card('平均客單', _nt(d.avgOrderValue), '', '')}
-    ${_card('已結帳', d.paidOrders + ' 筆', '', '#818cf8')}
-    ${_card('未結帳', d.unpaidOrders + ' 筆', '', d.unpaidOrders > 0 ? '#f59e0b' : '')}
+// ── V3-0. 📋 今日待處理（首頁最上方）──────────────────────────────
+function renderDashboardTodo(todos) {
+  if (!todos || !todos.length) return '';
+  const levelColor = { red: '#ef4444', yellow: '#f59e0b', green: '#10b981', orange: '#fb923c' };
+  const rows = todos.map(t => `
+    <div class="db-v3-hover" style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;font-size:.85rem">
+      <span style="font-size:1rem">${t.icon}</span>
+      <span style="color:${levelColor[t.level] || 'inherit'}">${escHtml(t.text)}</span>
+    </div>`).join('');
+  return _section('📋 今日待處理', rows);
+}
+
+// ── V3-1. 首頁 Hero（Good Evening 老闆 × 今日營收 × 健康度 × 在線 × 預估 × AI 建議）
+function _timeGreeting() {
+  const h = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Taipei' })).getHours();
+  if (h < 5) return 'Good Night';
+  if (h < 12) return 'Good Morning';
+  if (h < 18) return 'Good Afternoon';
+  return 'Good Evening';
+}
+function renderDashboardHome(data) {
+  if (!data.range || data.range.preset !== 'today') return ''; // 首頁模式只在「今日」視圖顯示
+  const kpi = data.kpi, cmp = data.kpi_comparison, health = data.health_score_v2;
+  const revTrend = cmp && cmp.revenue;
+  const trendColor = { green: '#10b981', red: '#ef4444', gray: 'var(--text-secondary,#64748b)' };
+  const storeName = (typeof getCurrentStoreName === 'function' && getCurrentStoreName()) || '老闆';
+  const healthEmoji = health && health.score !== null ? (health.score >= 80 ? '🟢' : health.score >= 60 ? '🟡' : '🔴') : '⚪';
+
+  return `<div class="db-v3-hover" style="background:linear-gradient(135deg,#1e2130,#181a24);border:1px solid var(--border,#2a2d3e);border-radius:16px;padding:22px 24px;margin-bottom:20px;width:100%;box-sizing:border-box">
+    <div style="font-size:1.1rem;font-weight:700;margin-bottom:2px">${_timeGreeting()}，${escHtml(storeName)}</div>
+    <div style="font-size:.75rem;color:var(--text-secondary,#64748b);margin-bottom:16px">30 秒掌握今天狀況</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:14px">
+      <div>
+        <div style="font-size:.72rem;color:var(--text-secondary,#64748b)">今日營收</div>
+        <div style="font-size:1.5rem;font-weight:700;color:#10b981">${_nt(kpi.revenue)}</div>
+        ${revTrend ? `<div style="font-size:.78rem;color:${trendColor[revTrend.color]}">${revTrend.arrow} ${revTrend.delta_pct !== null ? revTrend.delta_pct + '%' : ''}</div>` : ''}
+      </div>
+      <div>
+        <div style="font-size:.72rem;color:var(--text-secondary,#64748b)">今日健康度</div>
+        <div style="font-size:1.5rem;font-weight:700">${healthEmoji} ${health && health.score !== null ? health.score + ' 分' : '—'}</div>
+      </div>
+      <div>
+        <div style="font-size:.72rem;color:var(--text-secondary,#64748b)">目前在線</div>
+        <div style="font-size:1.5rem;font-weight:700">${data.realtime ? data.realtime.online : 0} 人</div>
+      </div>
+      <div>
+        <div style="font-size:.72rem;color:var(--text-secondary,#64748b)">預估今日</div>
+        <div style="font-size:1.5rem;font-weight:700;color:#818cf8">${data.forecast && data.forecast.applicable ? _nt(data.forecast.forecast_revenue) : '—'}</div>
+      </div>
+    </div>
+    ${data.ai_daily_tip ? `<div style="margin-top:16px;padding:12px 14px;background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.3);border-radius:10px;font-size:.85rem">
+      🤖 <strong>今日經營建議</strong>：${escHtml(data.ai_daily_tip)}
+    </div>` : ''}
+  </div>`;
+}
+
+// ── V3-2. KPI（每張卡片附上一期間比較：▲／▼／—、百分比、顏色）────────
+function _cardTrend(label, value, trend, color) {
+  const trendColor = { green: '#10b981', red: '#ef4444', gray: 'var(--text-secondary,#64748b)' };
+  const sub = trend ? `<span style="color:${trendColor[trend.color]}">${trend.arrow} ${trend.delta_pct !== null ? Math.abs(trend.delta_pct) + '%' : ''}</span>
+    <span style="color:var(--text-secondary,#64748b)"> 比上一期間</span>` : '';
+  return `<div class="db-v3-hover" style="background:var(--bg-card,#1a1d27);border:1px solid var(--border,#2a2d3e);border-radius:12px;padding:16px 20px;min-width:150px">
+    <div style="font-size:.75rem;color:var(--text-secondary,#64748b);margin-bottom:6px">${label}</div>
+    <div style="font-size:1.5rem;font-weight:700;color:${color||'var(--text-primary,#e2e8f0)'}">${value}</div>
+    ${sub ? `<div style="font-size:.72rem;margin-top:4px">${sub}</div>` : ''}
+  </div>`;
+}
+function renderDashboardKpiV3(kpi, cmp, range) {
+  if (!kpi) return '';
+  const isToday = range && range.preset === 'today';
+  const prefix = isToday ? '今日' : '區間';
+  const c = cmp || {};
+  let html = `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-bottom:20px;width:100%">
+    ${_cardTrend(prefix+'營收', _nt(kpi.revenue), c.revenue, '#10b981')}
+    ${_cardTrend(prefix+'訂單', kpi.orders + ' 筆', c.orders, '')}
+    ${_cardTrend(prefix+'平均客單', _nt(kpi.avg_order_value), c.avg_order_value, '')}
+    ${_cardTrend(prefix+'已結帳', kpi.paid_orders + ' 筆', c.paid_orders, '#818cf8')}
+    ${_cardTrend(prefix+'未結帳', kpi.unpaid_orders + ' 筆', c.unpaid_orders, kpi.unpaid_orders > 0 ? '#f59e0b' : '')}
   </div>`;
 
-  // ── 第二區：週月營收 ────────────────────────────────
-  html += _section('📅 週月營收分析',
+  html += _section('📅 週月營收（固定顯示目前本週／本月，不隨上方日期篩選變動）',
     `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-      ${_card('本週營收', _nt(d.weekRevenue), d.weekOrders + ' 筆', '#6366f1')}
-      ${_card('本月營收', _nt(d.monthRevenue), d.monthOrders + ' 筆', '#8b5cf6')}
+      ${_card('本週營收', _nt(kpi.week_revenue), (kpi.week_orders||0) + ' 筆', '#6366f1')}
+      ${_card('本月營收', _nt(kpi.month_revenue), (kpi.month_orders||0) + ' 筆', '#8b5cf6')}
     </div>`
   );
 
-  // ── 第三區：付款方式 ────────────────────────────────
-  const pmNames = {cash:'現金',card:'刷卡',linepay:'LINE Pay',jkopay:'街口支付',transfer:'轉帳',platform:'平台付款'};
-  const pmRows = (d.paymentStats||[]).map(p =>
-    `<tr><td style="padding:6px 0">${pmNames[p.payment_method]||p.payment_method}</td>
+  const pmNames = {cash:'現金',card:'刷卡',linepay:'LINE Pay',jkopay:'街口支付',transfer:'轉帳',platform:'平台付款',credit_card:'信用卡'};
+  const pmRows = (kpi.payment_stats||[]).map(p =>
+    `<tr><td style="padding:6px 0">${pmNames[p.payment_method]||escHtml(p.payment_method)}</td>
       <td style="padding:6px 0;text-align:right">${p.count} 筆</td>
       <td style="padding:6px 0;text-align:right;color:#10b981">${_nt(p.revenue)}</td>
-      <td style="padding:6px 0;text-align:right;color:var(--text-secondary,#64748b)">${_pct(p.revenue,d.todayRevenue)}</td></tr>`
+      <td style="padding:6px 0;text-align:right;color:var(--text-secondary,#64748b)">${_pct(p.revenue,kpi.revenue)}</td></tr>`
   ).join('');
-  html += _section('💳 付款方式分析',
-    pmRows ? `<table style="width:100%;border-collapse:collapse;font-size:.875rem">
+  html += _section('💳 付款方式分析（訂單實收金額）',
+    pmRows ? `<div style="overflow-x:auto"><table style="width:100%;min-width:380px;border-collapse:collapse;font-size:.875rem">
       <thead><tr style="color:var(--text-secondary,#64748b);font-size:.75rem">
         <th style="text-align:left;padding-bottom:8px">方式</th><th style="text-align:right;padding-bottom:8px">筆數</th>
         <th style="text-align:right;padding-bottom:8px">金額</th><th style="text-align:right;padding-bottom:8px">佔比</th></tr></thead>
-      <tbody>${pmRows}</tbody></table>` : '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">今日無資料</div>'
+      <tbody>${pmRows}</tbody></table></div>` : `<div style="color:var(--text-secondary,#64748b);font-size:.875rem">此區間無資料</div>`
   );
 
-  // ── 第四區：訂單來源 ────────────────────────────────
-  const modeNames = {dine_in:'內用',takeout:'外帶',delivery:'外送'};
-  const srcRows = (d.sourceStats||[]).map(s => {
-    const modeName = modeNames[s.mode] || s.mode;
-    const platLabel = s.platform ? ` (${s.platform})` : '';
-    return `<tr><td style="padding:6px 0">${modeName}${platLabel}</td>
-      <td style="padding:6px 0;text-align:right">${s.count} 筆</td>
-      <td style="padding:6px 0;text-align:right;color:#10b981">${_nt(s.revenue)}</td></tr>`;
-  }).join('');
-  html += _section('📦 訂單來源分析',
-    srcRows ? `<table style="width:100%;border-collapse:collapse;font-size:.875rem">
-      <thead><tr style="color:var(--text-secondary,#64748b);font-size:.75rem">
-        <th style="text-align:left;padding-bottom:8px">來源</th>
-        <th style="text-align:right;padding-bottom:8px">筆數</th>
-        <th style="text-align:right;padding-bottom:8px">金額</th></tr></thead>
-      <tbody>${srcRows}</tbody></table>` : '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">今日無資料</div>'
-  );
-
-  // ── 第五區：熱銷商品 TOP10（fix18-09F：支援群組統計）────────
+  // 熱銷商品 TOP10（沿用既有商品群組統計切換，fix18-09F）
   const _dbMode = getProductStatMode();
-  // 從 topProducts（API 返回的原始商品排行）重新用群組合併
   const _rawTopMap = {};
-  (d.topProducts||[]).forEach(p => {
+  (kpi.top_products||[]).forEach(p => {
     const dname = resolveProductDisplayName(p.name, _dbMode);
     if (!_rawTopMap[dname]) _rawTopMap[dname] = { name: dname, qty: 0, revenue: 0 };
-    _rawTopMap[dname].qty     += Number(p.qty     || 0);
+    _rawTopMap[dname].qty += Number(p.qty || 0);
     _rawTopMap[dname].revenue += Number(p.revenue || 0);
   });
   const _mergedTop = Object.values(_rawTopMap).sort((a,b) => b.qty - a.qty).slice(0, 10);
   const _modeToggle = `<div style="display:flex;gap:6px;align-items:center;margin-bottom:12px">
     <span style="font-size:12px;color:var(--text-secondary,#64748b)">統計模式：</span>
-    <button onclick="setProductStatMode('group');_loadDashboard()" style="font-size:12px;padding:3px 10px;border-radius:99px;border:1px solid var(--border,#2a2d3e);background:${_dbMode==='group'?'#6366f1':'transparent'};color:${_dbMode==='group'?'#fff':'var(--text-secondary,#64748b)'};cursor:pointer">商品群組</button>
-    <button onclick="setProductStatMode('raw');_loadDashboard()" style="font-size:12px;padding:3px 10px;border-radius:99px;border:1px solid var(--border,#2a2d3e);background:${_dbMode==='raw'?'#6366f1':'transparent'};color:${_dbMode==='raw'?'#fff':'var(--text-secondary,#64748b)'};cursor:pointer">原始商品</button>
+    <button onclick="setProductStatMode('group');loadDashboardV2()" style="font-size:12px;padding:3px 10px;border-radius:99px;border:1px solid var(--border,#2a2d3e);background:${_dbMode==='group'?'#6366f1':'transparent'};color:${_dbMode==='group'?'#fff':'var(--text-secondary,#64748b)'};cursor:pointer">商品群組</button>
+    <button onclick="setProductStatMode('raw');loadDashboardV2()" style="font-size:12px;padding:3px 10px;border-radius:99px;border:1px solid var(--border,#2a2d3e);background:${_dbMode==='raw'?'#6366f1':'transparent'};color:${_dbMode==='raw'?'#fff':'var(--text-secondary,#64748b)'};cursor:pointer">原始商品</button>
   </div>`;
   const topRows = _mergedTop.map((p,i) =>
     `<tr><td style="padding:5px 0;color:${i<3?'#f59e0b':'inherit'}">${i+1}. ${escHtml(p.name)}</td>
       <td style="padding:5px 0;text-align:right">${p.qty} 份</td>
       <td style="padding:5px 0;text-align:right;color:#10b981">${_nt(p.revenue)}</td></tr>`
   ).join('');
-  html += _section('🏆 熱銷商品排行 TOP10',
-    _modeToggle + (topRows ? `<table style="width:100%;border-collapse:collapse;font-size:.875rem">
+  html += _section(`🏆 熱銷商品排行 TOP10（${prefix}）`,
+    _modeToggle + (topRows ? `<div style="overflow-x:auto"><table style="width:100%;min-width:320px;border-collapse:collapse;font-size:.875rem">
       <thead><tr style="color:var(--text-secondary,#64748b);font-size:.75rem">
         <th style="text-align:left;padding-bottom:8px">商品</th>
         <th style="text-align:right;padding-bottom:8px">數量</th>
         <th style="text-align:right;padding-bottom:8px">營收</th></tr></thead>
-      <tbody>${topRows}</tbody></table>` : '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">今日無資料</div>')
+      <tbody>${topRows}</tbody></table></div>` : '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">此區間無資料</div>')
   );
 
-  // ── fix18-09F：商品群組排行 TOP10 ────────────────────
-  // 只在群組模式且有群組時顯示
-  if (_dbMode === 'group' && allProductAnalysisGroups && allProductAnalysisGroups.length) {
-    const _enabledGroups = allProductAnalysisGroups.filter(g => g.enabled);
-    // 從 topProducts 聚合群組統計（包含折扣）
-    const _grpMap = {};
-    _enabledGroups.forEach(g => {
-      _grpMap[g.group_name] = { name: g.group_name, qty: 0, revenue: 0, discount: 0, actual: 0 };
-    });
-    // 掃原始 topProducts
-    (d.topProducts||[]).forEach(p => {
-      const gname = getAnalysisGroupName(p.name);
-      if (gname && _grpMap[gname]) {
-        _grpMap[gname].qty     += Number(p.qty     || 0);
-        _grpMap[gname].revenue += Number(p.revenue || 0);
-      }
-    });
-    // 折扣資料（從 allOrdersCache 若有）
-    const _grpRowsArr = Object.values(_grpMap)
-      .filter(g => g.qty > 0 || g.revenue > 0)
-      .sort((a,b) => b.qty - a.qty)
-      .slice(0, 10);
-    if (_grpRowsArr.length) {
-      const _grpRows = _grpRowsArr.map((g, i) =>
-        `<tr>
-          <td style="padding:6px 0;color:${i<3?'#f59e0b':'inherit'}">${i+1}. ${escHtml(g.name)}</td>
-          <td style="padding:6px 0;text-align:right">${g.qty} 份</td>
-          <td style="padding:6px 0;text-align:right;color:#10b981">${_nt(g.revenue)}</td>
-        </tr>`
-      ).join('');
-      html += _section('📊 商品群組排行 TOP10',
-        `<table style="width:100%;border-collapse:collapse;font-size:.875rem">
-          <thead><tr style="color:var(--text-secondary,#64748b);font-size:.75rem">
-            <th style="text-align:left;padding-bottom:8px">群組</th>
-            <th style="text-align:right;padding-bottom:8px">銷量</th>
-            <th style="text-align:right;padding-bottom:8px">營收</th>
-          </tr></thead>
-          <tbody>${_grpRows}</tbody>
-        </table>`
-      );
-    }
-  }
+  return html;
+}
 
-  // ── 第六區：外送平台 ────────────────────────────────
-  if (f.delivery !== false) {
-    const delivRows = (d.deliveryStats||[]).map(p =>
-      `<tr><td style="padding:6px 0">${escHtml(p.platform)}</td>
-        <td style="padding:6px 0;text-align:right">${p.count} 筆</td>
-        <td style="padding:6px 0;text-align:right">${_nt(p.revenue)}</td>
-        <td style="padding:6px 0;text-align:right;color:#ef4444">${_nt(p.commission)}</td>
-        <td style="padding:6px 0;text-align:right;color:#10b981">${_nt(p.store_income)}</td></tr>`
-    ).join('');
-    html += _section('🛵 外送平台分析',
-      delivRows ? `<table style="width:100%;border-collapse:collapse;font-size:.875rem">
-        <thead><tr style="color:var(--text-secondary,#64748b);font-size:.75rem">
-          <th style="text-align:left;padding-bottom:8px">平台</th>
-          <th style="text-align:right;padding-bottom:8px">筆數</th>
-          <th style="text-align:right;padding-bottom:8px">營收</th>
-          <th style="text-align:right;padding-bottom:8px">抽成</th>
-          <th style="text-align:right;padding-bottom:8px">實收</th></tr></thead>
-        <tbody>${delivRows}</tbody></table>` : '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">今日無外送訂單</div>'
-    );
-  }
-
-  // ── 第七區：時段分析 ────────────────────────────────
-  const hourBars = (d.hourlyStats||[]).filter(h => h.count > 0).map(h => {
-    const maxCount = Math.max(...(d.hourlyStats||[]).map(x=>x.count), 1);
-    const pct = Math.round(h.count / maxCount * 100);
-    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:.8rem">
-      <span style="width:40px;color:var(--text-secondary,#64748b)">${h.label}</span>
-      <div style="flex:1;background:var(--border,#2a2d3e);border-radius:4px;height:18px;position:relative">
-        <div style="width:${pct}%;background:#6366f1;height:100%;border-radius:4px;transition:width .3s"></div>
-      </div>
-      <span style="width:30px;text-align:right">${h.count}</span>
-      <span style="width:70px;text-align:right;color:#10b981">${_nt(h.revenue)}</span>
-    </div>`;
-  }).join('') || '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">今日無資料</div>';
-  html += _section('⏰ 時段分析', hourBars);
-
-  // ── 第八區：星期分析 ────────────────────────────────
-  const wdBars = (d.weekdayStats||[]).map(w => {
-    const maxRev = Math.max(...(d.weekdayStats||[]).map(x=>x.revenue), 1);
-    const pct = Math.round(w.revenue / maxRev * 100);
-    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:.8rem">
-      <span style="width:32px;color:var(--text-secondary,#64748b)">${w.label}</span>
-      <div style="flex:1;background:var(--border,#2a2d3e);border-radius:4px;height:18px">
-        <div style="width:${pct}%;background:#8b5cf6;height:100%;border-radius:4px"></div>
-      </div>
-      <span style="width:30px;text-align:right">${w.count}</span>
-      <span style="width:80px;text-align:right;color:#10b981">${_nt(w.revenue)}</span>
-    </div>`;
-  }).join('');
-  html += _section('📆 星期分析（最近4週）', wdBars || '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">無資料</div>');
-
-  // ── 第九區：LINE 點餐 ───────────────────────────────
-  if (f.line_order) {
-    const ls = d.lineStats || {};
-    html += _section('📲 LINE 點餐分析',
-      `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-        ${_card('LINE 點餐訂單', (ls.orders||0) + ' 筆', '', '#06C755')}
-        ${_card('LINE 點餐營收', _nt(ls.revenue), '', '#06C755')}
+// ── V3-3. 經營健康度 V2（星級拆解 + 低分警示建議）───────────────────
+function renderDashboardHealthV2(h, range) {
+  if (!h) return '';
+  const isToday = range && range.preset === 'today';
+  const label = isToday ? '今日經營健康度' : '區間經營健康度';
+  const stars = n => n === null ? '—' : '★'.repeat(n) + '☆'.repeat(5 - n);
+  if (h.score === null || h.score === undefined) {
+    return _section('🩺 經營健康度',
+      `<div style="display:flex;align-items:center;gap:10px">
+        <span style="font-size:1.4rem">⚪</span>
+        <span style="font-size:1.05rem;font-weight:700">${label}：資料不足</span>
       </div>`
     );
   }
+  const emoji = h.score >= 80 ? '🟢' : h.score >= 60 ? '🟡' : '🔴';
+  const dimRows = (h.dimensions || []).map(d => `
+    <div style="display:flex;justify-content:space-between;font-size:.85rem;padding:5px 0">
+      <span>${escHtml(d.label)}</span>
+      <span style="color:#f59e0b">${stars(d.stars)}</span>
+    </div>`).join('');
+  const alertHtml = (h.alerts || []).map(a => `
+    <div style="margin-top:10px;padding:10px 12px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);border-radius:8px;font-size:.82rem">
+      <div style="color:#ef4444;font-weight:600;margin-bottom:4px">${escHtml(a.text)}</div>
+      <div style="color:var(--text-secondary,#64748b)">建議：${a.suggestions.map(escHtml).join('、')}</div>
+    </div>`).join('');
+  return _section('🩺 經營健康度',
+    `<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+      <span style="font-size:1.4rem">${emoji}</span>
+      <span style="font-size:1.05rem;font-weight:700">${label}：${h.score} 分</span>
+      <span style="color:#f59e0b">${stars(Math.round(h.score/20))}</span>
+    </div>
+    ${dimRows}
+    ${alertHtml}`
+  );
+}
 
-  // ── 第十區：庫存（預留）───────────────────────────────
-  if (f.inventory) {
-    html += _section('🏪 庫存分析（預留）',
-      '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">庫存分析功能開發中...</div>'
+// ── V3-4. 近 30 天趨勢（沿用簡單 SVG 折線，不新增圖表套件）──────────
+function _sparkline(points, color) {
+  if (!points.length) return '<div style="color:var(--text-secondary,#64748b);font-size:.8rem">尚無資料</div>';
+  const w = 600, h = 120, pad = 8;
+  const max = Math.max(...points, 1), min = Math.min(...points, 0);
+  const range = (max - min) || 1;
+  const stepX = (w - pad * 2) / Math.max(points.length - 1, 1);
+  const coords = points.map((v, i) => {
+    const x = pad + i * stepX;
+    const y = h - pad - ((v - min) / range) * (h - pad * 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:100px;display:block">
+    <polyline points="${coords.join(' ')}" fill="none" stroke="${color}" stroke-width="2"/>
+  </svg>`;
+}
+function renderDashboardTrend30d(trend) {
+  if (!trend || !trend.length) return '';
+  const revenue = trend.map(d => d.revenue);
+  const orders = trend.map(d => d.orders);
+  const aov = trend.map(d => d.avg_order_value);
+  const repeatRate = trend.map(d => d.repeat_rate || 0);
+  const last = trend[trend.length - 1];
+  return _section('📈 近 30 天趨勢',
+    `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px">
+      <div><div style="font-size:.78rem;color:var(--text-secondary,#64748b);margin-bottom:4px">營收（今日 ${_nt(last.revenue)}）</div>${_sparkline(revenue, '#10b981')}</div>
+      <div><div style="font-size:.78rem;color:var(--text-secondary,#64748b);margin-bottom:4px">訂單數（今日 ${last.orders} 筆）</div>${_sparkline(orders, '#6366f1')}</div>
+      <div><div style="font-size:.78rem;color:var(--text-secondary,#64748b);margin-bottom:4px">客單價（今日 ${_nt(last.avg_order_value)}）</div>${_sparkline(aov, '#818cf8')}</div>
+      <div><div style="font-size:.78rem;color:var(--text-secondary,#64748b);margin-bottom:4px">回購率（今日 ${_fmtPct(last.repeat_rate)}）</div>${_sparkline(repeatRate, '#f59e0b')}</div>
+    </div>`
+  );
+}
+
+// ── V3-5. 轉換漏斗 V2（真正梯形 Funnel，資料來源與既有漏斗完全相同）───
+// fix18-10-hotfix24-A3（需求文件三／十四／十五）：修正「送出訂單 3 人・300%」錯誤顯示。
+//   - submit_order／purchase 是「次數／筆數」不是「人數」，改標「次」/「筆」，並在括號
+//     附註不重複人數（unique_users）。
+//   - 條形圖寬度一律 clamp 到 100%（Math.min(rate,100)），避免 300% 撐爆卡片／橫向捲動。
+//     文字仍顯示真實百分比（可能 >100%），並在有此情形時加上一行說明。
+//   - 底部新增 summary（若有）：使用者轉換率／訂單／訪客比／付款率，用正確命名，
+//     不再全部叫「轉換率」。
+function renderDashboardFunnelV2(funnel, summary) {
+  const insufficient = funnel && !Array.isArray(funnel) && funnel.insufficient_data;
+  const stages = insufficient ? funnel.stages : funnel;
+  if (!stages || !stages.length || !(stages.some(s => s.count > 0))) {
+    return _section('📈 轉換漏斗', `<div style="color:var(--text-secondary,#64748b);font-size:.875rem">尚無足夠的轉換事件資料</div>`);
+  }
+  const entryCount = stages[0].count || 1;
+  const orderUnitStages = new Set(['submit_order', 'purchase']);
+  let hasOverRate = false;
+  const rows = stages.map(s => {
+    const rawPct = entryCount > 0 ? (s.count / entryCount) * 100 : 0;
+    if (rawPct > 100) hasOverRate = true;
+    const widthPct = Math.min(100, Math.max(4, Math.round(rawPct))); // bar 寬度 clamp，不得超出容器
+    const displayPct = Math.min(100, Math.round(rawPct)); // bar 內文字跟著 clamp 後寬度走，避免文字被裁切
+    const overall = s.overall_conversion_rate !== null && s.overall_conversion_rate !== undefined ? _fmtPct(s.overall_conversion_rate) : '—'; // 真實整體佔比，可能 >100%
+    const isOrderUnit = orderUnitStages.has(s.key);
+    const countLabel = isOrderUnit ? `${s.count} ${s.key === 'submit_order' ? '次' : '筆'}` : `${s.count} 人`;
+    const peopleNote = isOrderUnit && typeof s.unique_users === 'number'
+      ? ` <span style="opacity:.75">（${s.unique_users} 人）</span>` : '';
+    return `<div style="margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;font-size:.8rem;margin-bottom:4px;flex-wrap:wrap;gap:4px">
+        <span style="font-weight:600">${escHtml(s.label)}</span>
+        <span style="color:var(--text-secondary,#64748b);text-align:right">${countLabel}${peopleNote} · ${overall}</span>
+      </div>
+      <div style="width:100%;background:transparent;overflow:hidden;box-sizing:border-box">
+        <div class="db-v3-hover" style="width:min(${widthPct}%,100%);min-width:60px;max-width:100%;margin:0 auto;background:linear-gradient(90deg,#6366f1,#818cf8);height:22px;border-radius:6px;display:flex;align-items:center;justify-content:center;color:#fff;font-size:.72rem;font-weight:600;box-sizing:border-box;overflow:hidden;white-space:nowrap">${displayPct}%</div>
+      </div>
+    </div>`;
+  }).join('');
+  const warn = hasOverRate
+    ? `<div style="font-size:.72rem;color:var(--text-secondary,#64748b);margin-top:4px">⚠ 事件次數／訂單數高於不重複訪客數，可能因同一人多次送出或多次下單造成。</div>`
+    : '';
+  let summaryHtml = '';
+  if (summary && summary.rates) {
+    const r = summary.rates;
+    summaryHtml = `<div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:14px;padding-top:12px;border-top:1px solid var(--border,#2a2d3e)">
+      <div><div style="font-size:.72rem;color:var(--text-secondary,#64748b)">使用者轉換率</div><div style="font-size:1.05rem;font-weight:700">${_fmtPct(r.user_conversion_rate)}</div></div>
+      <div><div style="font-size:.72rem;color:var(--text-secondary,#64748b)">訂單／訪客比</div><div style="font-size:1.05rem;font-weight:700">${_fmtPct(r.orders_per_visitor_rate)}</div></div>
+      <div><div style="font-size:.72rem;color:var(--text-secondary,#64748b)">付款率</div><div style="font-size:1.05rem;font-weight:700">${_fmtPct(r.payment_rate)}</div></div>
+    </div>`;
+  }
+  return _section('📈 轉換漏斗', rows + warn + summaryHtml);
+}
+
+// ── V3-6. 商品排行 V2（🏆🥈🥉 + 🔥爆款／⭐潛力／⚠低轉換 標籤）────────
+function renderDashboardProductsV2(products, tiers) {
+  _dashboardProductsCache = products || [];
+  tiers = tiers || { hot: [], potential: [], low_conversion: [] };
+  const sortBtns = [['cart','加入最多'],['purchase','成交最多'],['abandon','放棄最多'],['rate_desc','轉換率最高'],['rate_asc','轉換率最低']];
+
+  const byPurchase = [...(products||[])].filter(p => p.purchase_qty > 0).sort((a,b) => b.purchase_qty - a.purchase_qty).slice(0, 3);
+  const medalRows = byPurchase.length ? `<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+    ${byPurchase.map((p, i) => `<div class="db-v3-hover" style="background:var(--bg-card,#1a1d27);border:1px solid var(--border,#2a2d3e);border-radius:10px;padding:10px 14px;min-width:140px">
+      <div style="font-size:.8rem">${['🏆 TOP 1','🥈 TOP 2','🥉 TOP 3'][i]}</div>
+      <div style="font-weight:700;margin-top:4px">${escHtml(p.product_name)}</div>
+      <div style="font-size:.72rem;color:var(--text-secondary,#64748b)">${p.purchase_qty} 件成交</div>
+    </div>`).join('')}
+  </div>` : '';
+
+  window._dashboardProductTiers = tiers;
+  return _section('🏆 商品排行 V2',
+    medalRows +
+    `<div style="margin-bottom:10px;display:flex;gap:6px;flex-wrap:wrap">
+      ${sortBtns.map(([k,l]) => `<button onclick="sortDashboardProducts('${k}')" style="font-size:12px;padding:3px 10px;border-radius:99px;border:1px solid var(--border,#2a2d3e);background:${_dashboardProductSort===k?'#6366f1':'transparent'};color:${_dashboardProductSort===k?'#fff':'var(--text-secondary,#64748b)'};cursor:pointer">${l}</button>`).join('')}
+    </div>
+    <div id="db-products-table" style="overflow-x:auto"></div>`
+  );
+}
+
+// ── C. 經營健康度 ───────────────────────────────────────────────
+function renderDashboardHealth(h, range) {
+  const isToday = range && range.preset === 'today';
+  const label = isToday ? '今日經營健康度' : '區間經營健康度';
+  if (!h || h.score === null || h.score === undefined) {
+    const missing = (h && h.missing) || [];
+    return _section('🩺 經營健康度',
+      `<div style="display:flex;align-items:center;gap:10px;margin-bottom:${missing.length?'8px':'0'}">
+        <span style="font-size:1.4rem">⚪</span>
+        <span style="font-size:1.05rem;font-weight:700">經營健康度：資料不足</span>
+      </div>
+      ${missing.length ? `<div style="font-size:.78rem;color:var(--text-secondary,#64748b)">缺少：${missing.map(escHtml).join('、')}</div>` : ''}`
     );
   }
+  const emoji = h.score >= 80 ? '🟢' : h.score >= 60 ? '🟡' : '🔴';
+  return _section('🩺 經營健康度',
+    `<div style="display:flex;align-items:center;gap:10px">
+      <span style="font-size:1.4rem">${emoji}</span>
+      <span style="font-size:1.05rem;font-weight:700">${label}：${h.score} 分</span>
+    </div>
+    ${h.missing && h.missing.length ? `<div style="font-size:.75rem;color:var(--text-secondary,#64748b);margin-top:8px">部分項目資料不足，未納入計分：${h.missing.map(escHtml).join('、')}</div>` : ''}`
+  );
+}
+
+// ── B. 既有 KPI（依區間動態改標題）───────────────────────────────
+function renderDashboardKpi(kpi, range) {
+  if (!kpi) return '';
+  const isToday = range && range.preset === 'today';
+  const prefix = isToday ? '今日' : '區間';
+  let html = `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-bottom:20px;width:100%">
+    ${_card(prefix+'營收', _nt(kpi.revenue), '', '#10b981')}
+    ${_card(prefix+'訂單', kpi.orders + ' 筆', '', '')}
+    ${_card(prefix+'平均客單', _nt(kpi.avg_order_value), '', '')}
+    ${_card(prefix+'已結帳', kpi.paid_orders + ' 筆', '', '#818cf8')}
+    ${_card(prefix+'未結帳', kpi.unpaid_orders + ' 筆', '', kpi.unpaid_orders > 0 ? '#f59e0b' : '')}
+  </div>`;
+
+  html += _section('📅 週月營收（固定顯示目前本週／本月，不隨上方日期篩選變動）',
+    `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      ${_card('本週營收', _nt(kpi.week_revenue), (kpi.week_orders||0) + ' 筆', '#6366f1')}
+      ${_card('本月營收', _nt(kpi.month_revenue), (kpi.month_orders||0) + ' 筆', '#8b5cf6')}
+    </div>`
+  );
+
+  const pmNames = {cash:'現金',card:'刷卡',linepay:'LINE Pay',jkopay:'街口支付',transfer:'轉帳',platform:'平台付款',credit_card:'信用卡'};
+  const pmRows = (kpi.payment_stats||[]).map(p =>
+    `<tr><td style="padding:6px 0">${pmNames[p.payment_method]||escHtml(p.payment_method)}</td>
+      <td style="padding:6px 0;text-align:right">${p.count} 筆</td>
+      <td style="padding:6px 0;text-align:right;color:#10b981">${_nt(p.revenue)}</td>
+      <td style="padding:6px 0;text-align:right;color:var(--text-secondary,#64748b)">${_pct(p.revenue,kpi.revenue)}</td></tr>`
+  ).join('');
+  html += _section('💳 付款方式分析（訂單實收金額）',
+    pmRows ? `<div style="overflow-x:auto"><table style="width:100%;min-width:380px;border-collapse:collapse;font-size:.875rem">
+      <thead><tr style="color:var(--text-secondary,#64748b);font-size:.75rem">
+        <th style="text-align:left;padding-bottom:8px">方式</th><th style="text-align:right;padding-bottom:8px">筆數</th>
+        <th style="text-align:right;padding-bottom:8px">金額</th><th style="text-align:right;padding-bottom:8px">佔比</th></tr></thead>
+      <tbody>${pmRows}</tbody></table></div>` : `<div style="color:var(--text-secondary,#64748b);font-size:.875rem">此區間無資料</div>`
+  );
+
+  // 熱銷商品 TOP10（沿用既有商品群組統計切換，fix18-09F）
+  const _dbMode = getProductStatMode();
+  const _rawTopMap = {};
+  (kpi.top_products||[]).forEach(p => {
+    const dname = resolveProductDisplayName(p.name, _dbMode);
+    if (!_rawTopMap[dname]) _rawTopMap[dname] = { name: dname, qty: 0, revenue: 0 };
+    _rawTopMap[dname].qty += Number(p.qty || 0);
+    _rawTopMap[dname].revenue += Number(p.revenue || 0);
+  });
+  const _mergedTop = Object.values(_rawTopMap).sort((a,b) => b.qty - a.qty).slice(0, 10);
+  const _modeToggle = `<div style="display:flex;gap:6px;align-items:center;margin-bottom:12px">
+    <span style="font-size:12px;color:var(--text-secondary,#64748b)">統計模式：</span>
+    <button onclick="setProductStatMode('group');loadDashboardV2()" style="font-size:12px;padding:3px 10px;border-radius:99px;border:1px solid var(--border,#2a2d3e);background:${_dbMode==='group'?'#6366f1':'transparent'};color:${_dbMode==='group'?'#fff':'var(--text-secondary,#64748b)'};cursor:pointer">商品群組</button>
+    <button onclick="setProductStatMode('raw');loadDashboardV2()" style="font-size:12px;padding:3px 10px;border-radius:99px;border:1px solid var(--border,#2a2d3e);background:${_dbMode==='raw'?'#6366f1':'transparent'};color:${_dbMode==='raw'?'#fff':'var(--text-secondary,#64748b)'};cursor:pointer">原始商品</button>
+  </div>`;
+  const topRows = _mergedTop.map((p,i) =>
+    `<tr><td style="padding:5px 0;color:${i<3?'#f59e0b':'inherit'}">${i+1}. ${escHtml(p.name)}</td>
+      <td style="padding:5px 0;text-align:right">${p.qty} 份</td>
+      <td style="padding:5px 0;text-align:right;color:#10b981">${_nt(p.revenue)}</td></tr>`
+  ).join('');
+  html += _section(`🏆 熱銷商品排行 TOP10（${prefix}）`,
+    _modeToggle + (topRows ? `<div style="overflow-x:auto"><table style="width:100%;min-width:320px;border-collapse:collapse;font-size:.875rem">
+      <thead><tr style="color:var(--text-secondary,#64748b);font-size:.75rem">
+        <th style="text-align:left;padding-bottom:8px">商品</th>
+        <th style="text-align:right;padding-bottom:8px">數量</th>
+        <th style="text-align:right;padding-bottom:8px">營收</th></tr></thead>
+      <tbody>${topRows}</tbody></table></div>` : '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">此區間無資料</div>')
+  );
 
   return html;
+}
+
+// ── D. 轉換漏斗 ─────────────────────────────────────────────────
+function renderDashboardFunnel(funnel) {
+  const insufficient = funnel && !Array.isArray(funnel) && funnel.insufficient_data;
+  const stages = insufficient ? funnel.stages : funnel;
+  if (!stages || !stages.length || !(stages.some(s => s.count > 0))) {
+    return _section('📈 轉換分析', `<div style="color:var(--text-secondary,#64748b);font-size:.875rem">尚無足夠的轉換事件資料</div>`);
+  }
+  const orderUnitStages = new Set(['submit_order', 'purchase']);
+  const maxCount = Math.max(...stages.map(s => s.count), 1);
+  const rows = stages.map(s => {
+    const pct = maxCount > 0 ? Math.round(s.count / maxCount * 100) : 0;
+    const detail = [
+      s.step_conversion_rate !== null && s.step_conversion_rate !== undefined ? `前一步 ${_fmtPct(s.step_conversion_rate)}` : null,
+      `整體 ${_fmtPct(s.overall_conversion_rate)}`,
+    ].filter(Boolean).join(' · ');
+    const countLabel = orderUnitStages.has(s.key) ? `${s.count} ${s.key === 'submit_order' ? '次' : '筆'}` : `${s.count} 人`;
+    return `<div style="margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;font-size:.85rem;margin-bottom:4px;flex-wrap:wrap;gap:4px">
+        <span style="font-weight:600">${escHtml(s.label)}</span>
+        <span style="color:var(--text-secondary,#64748b)">${countLabel} · ${detail}</span>
+      </div>
+      <div style="background:var(--border,#2a2d3e);border-radius:4px;height:16px;overflow:hidden">
+        <div style="width:${pct}%;background:#6366f1;height:100%;border-radius:4px;transition:width .3s"></div>
+      </div>
+    </div>`;
+  }).join('');
+  return _section('📈 轉換分析', rows);
+}
+
+// ── E. 近 5 分鐘狀態 ────────────────────────────────────────────
+function renderDashboardRealtime(rt) {
+  if (!rt) return '';
+  return _section(`⚡ ${escHtml(rt.window || '近 5 分鐘')}狀態`,
+    `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:12px">
+      ${_card('目前在線', (rt.online||0) + ' 人', '近 5 分鐘', '#10b981')}
+      ${_card('正在瀏覽商品', (rt.browsing_product||0) + ' 人', '', '')}
+      ${_card('正在購物車', (rt.in_cart||0) + ' 人', '', '')}
+      ${_card('正在付款', (rt.paying||0) + ' 人', '', '#f59e0b')}
+    </div>`
+  );
+}
+
+// ── F. 購物車分析 ───────────────────────────────────────────────
+function renderDashboardCart(cart) {
+  if (!cart || cart.insufficient_data) {
+    return _section('🛒 購物車分析', `<div style="color:var(--text-secondary,#64748b);font-size:.875rem">${cart && cart.message ? escHtml(cart.message) : '尚無足夠的轉換事件資料'}</div>`);
+  }
+  const buckets = cart.abandon_time_buckets || {};
+  const bucketMax = Math.max(...Object.values(buckets), 1);
+  const bucketHtml = Object.entries(buckets).map(([label, count]) => {
+    const pct = bucketMax > 0 ? Math.round(count / bucketMax * 100) : 0;
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:.8rem">
+      <span style="width:110px;color:var(--text-secondary,#64748b)">${escHtml(label)}</span>
+      <div style="flex:1;background:var(--border,#2a2d3e);border-radius:4px;height:14px;overflow:hidden">
+        <div style="width:${pct}%;background:#f59e0b;height:100%;border-radius:4px"></div>
+      </div>
+      <span style="width:26px;text-align:right">${count}</span>
+    </div>`;
+  }).join('');
+  return _section('🛒 購物車分析',
+    `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px;margin-bottom:16px">
+      ${_card('加入購物車人數', cart.add_to_cart_visitors + ' 人', '', '')}
+      ${_card('已完成購買', cart.completed_carts + ' 個', '', '#10b981')}
+      ${_card('未完成購物車', cart.incomplete_carts + ' 個', '', '#f59e0b')}
+      ${_card('放棄率', _fmtPct(cart.abandonment_rate), '', '#ef4444')}
+      ${_card('未完成估計金額', _nt(cart.estimated_abandoned_amount), '', '')}
+      ${_card('平均停留時間', cart.avg_dwell_seconds !== null && cart.avg_dwell_seconds !== undefined ? Math.round(cart.avg_dwell_seconds/60) + ' 分' : '—', '', '')}
+    </div>
+    <div style="font-size:.8rem;color:var(--text-secondary,#64748b);margin-bottom:8px;font-weight:600">放棄時間分布（購物車永久保留，但不代表永遠算活躍——僅分類，不刪除資料）</div>
+    ${bucketHtml}`
+  );
+}
+
+// ── G. 商品轉換排行 ─────────────────────────────────────────────
+function renderDashboardProducts(products) {
+  _dashboardProductsCache = products || [];
+  const sortBtns = [['cart','加入最多'],['purchase','成交最多'],['abandon','放棄最多'],['rate_desc','轉換率最高'],['rate_asc','轉換率最低']];
+  return _section('🏆 商品轉換排行',
+    `<div style="margin-bottom:10px;display:flex;gap:6px;flex-wrap:wrap">
+      ${sortBtns.map(([k,l]) => `<button onclick="sortDashboardProducts('${k}')" style="font-size:12px;padding:3px 10px;border-radius:99px;border:1px solid var(--border,#2a2d3e);background:${_dashboardProductSort===k?'#6366f1':'transparent'};color:${_dashboardProductSort===k?'#fff':'var(--text-secondary,#64748b)'};cursor:pointer">${l}</button>`).join('')}
+    </div>
+    <div id="db-products-table" style="overflow-x:auto"></div>`
+  );
+}
+function sortDashboardProducts(mode) {
+  _dashboardProductSort = mode;
+  document.querySelectorAll('#db-body-v2 button[onclick^="sortDashboardProducts"]').forEach(b => {
+    const m = (b.getAttribute('onclick')||'').match(/sortDashboardProducts\('(\w+)'\)/);
+    const active = m && m[1] === mode;
+    b.style.background = active ? '#6366f1' : 'transparent';
+    b.style.color = active ? '#fff' : 'var(--text-secondary,#64748b)';
+  });
+  renderDashboardProductsTable();
+}
+function renderDashboardProductsTable() {
+  const el = document.getElementById('db-products-table');
+  if (!el) return;
+  const list = [..._dashboardProductsCache];
+  if (_dashboardProductSort === 'cart') list.sort((a,b) => b.cart_people - a.cart_people);
+  else if (_dashboardProductSort === 'purchase') list.sort((a,b) => b.purchase_people - a.purchase_people);
+  else if (_dashboardProductSort === 'abandon') list.sort((a,b) => b.not_purchased_people - a.not_purchased_people);
+  else if (_dashboardProductSort === 'rate_desc') list.sort((a,b) => (b.cart_to_purchase_rate ?? -1) - (a.cart_to_purchase_rate ?? -1));
+  else if (_dashboardProductSort === 'rate_asc') list.sort((a,b) => (a.cart_to_purchase_rate ?? 999) - (b.cart_to_purchase_rate ?? 999));
+
+  if (!list.length) { el.innerHTML = '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">此區間尚無商品轉換資料</div>'; return; }
+
+  // fix18-10-hotfix23-C：🔥爆款／⭐潛力／⚠低轉換 標籤（來自 API 附加的 product_tiers，不重算）
+  const tiers = window._dashboardProductTiers || { hot: [], potential: [], low_conversion: [] };
+  const tierBadge = (pid) => {
+    if (tiers.hot.includes(pid)) return '<span style="color:#ef4444">🔥爆款</span>';
+    if (tiers.potential.includes(pid)) return '<span style="color:#f59e0b">⭐潛力</span>';
+    if (tiers.low_conversion.includes(pid)) return '<span style="color:var(--text-secondary,#64748b)">⚠低轉換</span>';
+    return '';
+  };
+
+  el.innerHTML = `<table style="width:100%;min-width:680px;border-collapse:collapse;font-size:.8rem">
+    <thead><tr style="color:var(--text-secondary,#64748b);font-size:.72rem">
+      <th style="text-align:left;padding-bottom:6px">商品</th><th style="text-align:left;padding-bottom:6px">分級</th>
+      <th style="text-align:right;padding-bottom:6px">瀏覽人數</th><th style="text-align:right;padding-bottom:6px">加購人數</th><th style="text-align:right;padding-bottom:6px">加購數量</th>
+      <th style="text-align:right;padding-bottom:6px">成交人數</th><th style="text-align:right;padding-bottom:6px">成交數量</th><th style="text-align:right;padding-bottom:6px">未成交人數</th>
+      <th style="text-align:right;padding-bottom:6px">加入→成交率</th>
+    </tr></thead>
+    <tbody>${list.map(p => `<tr class="db-v3-hover">
+      <td style="padding:5px 0">${p.is_delisted ? `已下架商品 #${p.product_id}` : escHtml(p.product_name)}</td>
+      <td style="padding:5px 0;font-size:.72rem">${tierBadge(p.product_id)}</td>
+      <td style="text-align:right">${p.view_people}</td><td style="text-align:right">${p.cart_people}</td><td style="text-align:right">${p.cart_qty}</td>
+      <td style="text-align:right">${p.purchase_people}</td><td style="text-align:right">${p.purchase_qty}</td><td style="text-align:right">${p.not_purchased_people}</td>
+      <td style="text-align:right">${_fmtPct(p.cart_to_purchase_rate)}</td>
+    </tr>`).join('')}</tbody></table>`;
+}
+
+// ── H. 付款流程分析 ─────────────────────────────────────────────
+function renderDashboardPayments(payments) {
+  const pmLabel = {cash:'現金',linepay:'LINE Pay',transfer:'轉帳',credit_card:'信用卡',platform:'平台付款'};
+  const rows = (payments && payments.rows) || [];
+  if (!rows.length) {
+    return _section('💳 付款流程分析（開始付款 → 成功）', `<div style="color:var(--text-secondary,#64748b);font-size:.875rem">${payments && payments.note ? escHtml(payments.note) : '尚無足夠的轉換事件資料'}</div>`);
+  }
+  const body = rows.map(r => `<tr>
+    <td style="padding:6px 0">${pmLabel[r.payment_method] || escHtml(r.payment_method)}</td>
+    <td style="padding:6px 0;text-align:right">${r.started}</td>
+    <td style="padding:6px 0;text-align:right;color:#10b981">${r.succeeded}</td>
+    <td style="padding:6px 0;text-align:right;color:${r.failed_or_interrupted > 0 ? '#ef4444' : 'inherit'}">${Math.max(0, r.failed_or_interrupted)}</td>
+    <td style="padding:6px 0;text-align:right">${_fmtPct(r.success_rate)}</td>
+  </tr>`).join('');
+  return _section('💳 付款流程分析（開始付款 → 成功）',
+    `<div style="overflow-x:auto"><table style="width:100%;min-width:420px;border-collapse:collapse;font-size:.85rem">
+      <thead><tr style="color:var(--text-secondary,#64748b);font-size:.75rem">
+        <th style="text-align:left">付款方式</th><th style="text-align:right">開始付款</th><th style="text-align:right">付款成功</th><th style="text-align:right">失敗／中斷</th><th style="text-align:right">成功率</th>
+      </tr></thead><tbody>${body}</tbody></table></div>
+    <div style="font-size:.72rem;color:var(--text-secondary,#64748b);margin-top:8px">LINE Pay 成功只依 purchase 事件認定，不以前端 payment_started 當成交。</div>`
+  );
+}
+
+// ── I. 訂單來源與廣告來源 ───────────────────────────────────────
+function renderDashboardSources(sources) {
+  if (!sources) return '';
+  const modeNames = {dine_in:'內用',takeout:'外帶',delivery:'外送',shipping:'冷藏宅配'};
+  const orderRows = (sources.order_sources||[]).map(s => {
+    const modeName = modeNames[s.mode] || s.mode;
+    const platLabel = s.platform ? ` (${escHtml(s.platform)})` : '';
+    return `<tr><td style="padding:6px 0">${escHtml(modeName)}${platLabel}</td>
+      <td style="padding:6px 0;text-align:right">${s.count} 筆</td>
+      <td style="padding:6px 0;text-align:right;color:#10b981">${_nt(s.revenue)}</td></tr>`;
+  }).join('');
+  return _section('📦 訂單來源分析',
+    orderRows ? `<div style="overflow-x:auto"><table style="width:100%;min-width:320px;border-collapse:collapse;font-size:.875rem">
+      <thead><tr style="color:var(--text-secondary,#64748b);font-size:.75rem"><th style="text-align:left">來源</th><th style="text-align:right">筆數</th><th style="text-align:right">金額</th></tr></thead>
+      <tbody>${orderRows}</tbody></table></div>` : '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">此區間無訂單資料</div>'
+  );
+}
+
+// ── V3-7. fix18-10-hotfix23-D：📣 廣告來源分析（Last Touch／First Touch）───
+const SRC_LABEL = {
+  facebook:'Facebook', instagram:'Instagram', threads:'Threads', google:'Google',
+  line_oa:'LINE OA', direct:'直接進站', referral:'站外連結', unknown:'未知',
+};
+let _adsAttributionMode = 'last_touch';
+
+function _adsSourceTableHtml(rows) {
+  if (!rows || !rows.length) {
+    return '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">此區間無進站資料</div>';
+  }
+  const body = rows.map(r => `<tr class="db-v3-hover">
+    <td style="padding:6px 0">${SRC_LABEL[r.source] || escHtml(r.source)}</td>
+    <td style="text-align:right">${r.entry || '—'}</td>
+    <td style="text-align:right">${r.view_product || '—'}</td>
+    <td style="text-align:right">${r.add_to_cart || '—'}</td>
+    <td style="text-align:right">${r.begin_checkout || '—'}</td>
+    <td style="text-align:right">${r.submit_order || '—'}</td>
+    <td style="text-align:right">${r.purchase || '—'}</td>
+    <td style="text-align:right">${r.conversion_rate === null || r.conversion_rate === undefined ? '—' : _fmtPct(r.conversion_rate)}</td>
+    <td style="text-align:right;color:#10b981">${_nt(r.ad_revenue || 0)}</td>
+  </tr>`).join('');
+  return `<div style="overflow-x:auto"><table style="width:100%;min-width:640px;border-collapse:collapse;font-size:.8rem">
+    <thead><tr style="color:var(--text-secondary,#64748b);font-size:.7rem">
+      <th style="text-align:left">來源</th><th style="text-align:right">進站</th><th style="text-align:right">商品瀏覽</th>
+      <th style="text-align:right">加入購物車</th><th style="text-align:right">開始結帳</th><th style="text-align:right">送出訂單</th>
+      <th style="text-align:right">完成付款</th><th style="text-align:right">進站→付款</th><th style="text-align:right">廣告營收</th>
+    </tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function _adsCampaignTableHtml(rows) {
+  if (!rows || !rows.length) {
+    return '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">此區間無活動資料</div>';
+  }
+  const body = rows.map(r => `<tr class="db-v3-hover">
+    <td style="padding:6px 0">${escHtml(r.campaign)}</td>
+    <td>${SRC_LABEL[r.source] || escHtml(r.source)}</td>
+    <td style="text-align:right">${r.entry || '—'}</td>
+    <td style="text-align:right">${r.view_product || '—'}</td>
+    <td style="text-align:right">${r.add_to_cart || '—'}</td>
+    <td style="text-align:right">${r.begin_checkout || '—'}</td>
+    <td style="text-align:right">${r.submit_order || '—'}</td>
+    <td style="text-align:right">${r.purchase || '—'}</td>
+    <td style="text-align:right">${r.conversion_rate === null || r.conversion_rate === undefined ? '—' : _fmtPct(r.conversion_rate)}</td>
+    <td style="text-align:right;color:#10b981">${_nt(r.ad_revenue || 0)}</td>
+  </tr>`).join('');
+  return `<div style="overflow-x:auto"><table style="width:100%;min-width:720px;border-collapse:collapse;font-size:.8rem">
+    <thead><tr style="color:var(--text-secondary,#64748b);font-size:.7rem">
+      <th style="text-align:left">活動名稱</th><th style="text-align:left">來源</th><th style="text-align:right">進站</th>
+      <th style="text-align:right">商品瀏覽</th><th style="text-align:right">加購</th><th style="text-align:right">開始結帳</th>
+      <th style="text-align:right">送出訂單</th><th style="text-align:right">完成付款</th><th style="text-align:right">轉換率</th>
+      <th style="text-align:right">廣告營收</th>
+    </tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function _renderAdsAttributionBody(ads) {
+  const modeData = (ads.by_mode && ads.by_mode[_adsAttributionMode]) || { sources: [], campaigns: [], revenue: 0 };
+  if (_adsAttributionMode === 'first_touch' && modeData.insufficient_data) {
+    return `<div style="color:var(--text-secondary,#64748b);font-size:.875rem;margin-bottom:14px">${escHtml(modeData.message || 'First Touch 資料自 Hotfix23-D 上線後開始累積')}</div>`;
+  }
+  return `
+    <div style="font-size:.85rem;font-weight:600;margin:14px 0 8px">來源漏斗</div>
+    ${_adsSourceTableHtml(modeData.sources)}
+    <div style="font-size:.85rem;font-weight:600;margin:18px 0 8px">Campaign 明細</div>
+    ${_adsCampaignTableHtml(modeData.campaigns)}
+  `;
+}
+
+function setAdsAttributionMode(mode) {
+  _adsAttributionMode = mode;
+  const ads = window._dashboardAdsAttribution;
+  if (!ads) return;
+  document.querySelectorAll('.ads-touch-toggle-btn').forEach(b => {
+    const active = b.dataset.mode === mode;
+    b.style.background = active ? '#6366f1' : 'transparent';
+    b.style.color = active ? '#fff' : 'var(--text-secondary,#64748b)';
+  });
+  const body = document.getElementById('db-ads-attribution-body');
+  if (body) body.innerHTML = _renderAdsAttributionBody(ads);
+}
+
+function renderDashboardAdsAttribution(ads) {
+  if (!ads) return '';
+  window._dashboardAdsAttribution = ads;
+  _adsAttributionMode = 'last_touch'; // 每次重新載入 Dashboard（換日期區間）都重置回預設模式
+
+  const toggle = `<div style="display:flex;gap:6px;margin-bottom:10px">
+    <button class="ads-touch-toggle-btn" data-mode="last_touch" onclick="setAdsAttributionMode('last_touch')"
+      style="font-size:12px;padding:4px 12px;border-radius:99px;border:1px solid var(--border,#2a2d3e);background:#6366f1;color:#fff;cursor:pointer">最終來源 Last Touch</button>
+    <button class="ads-touch-toggle-btn" data-mode="first_touch" onclick="setAdsAttributionMode('first_touch')"
+      style="font-size:12px;padding:4px 12px;border-radius:99px;border:1px solid var(--border,#2a2d3e);background:transparent;color:var(--text-secondary,#64748b);cursor:pointer">首次來源 First Touch</button>
+  </div>`;
+
+  const roasCard = _section('💰 廣告成效',
+    `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px">
+      ${_card('廣告花費', '尚未串接', '', '')}
+      ${_card('廣告營收（Last Touch）', _nt(ads.revenue.last_touch), '', '#10b981')}
+      ${_card('廣告營收（First Touch）', ads.first_touch_available ? _nt(ads.revenue.first_touch) : '—', '', '#10b981')}
+      ${_card('ROAS', '尚未串接廣告花費', '', '')}
+    </div>
+    <div style="font-size:.72rem;color:var(--text-secondary,#64748b);margin-top:10px">廣告營收只計算 purchase 事件對應的真實訂單金額，不包含預估營收或購物車估算金額。</div>`
+  );
+
+  return _section('📣 廣告來源分析',
+    toggle + `<div id="db-ads-attribution-body">${_renderAdsAttributionBody(ads)}</div>`
+  ) + roasCard;
+}
+
+// ── fix18-10-hotfix23-E：👤 LINE 會員轉換 × 🧭 顧客旅程漏斗 ─────────────────
+function renderDashboardLineMemberFunnel(f) {
+  if (!f || f.insufficient_data || !f.stages || !f.stages.length) {
+    return _section('🧭 顧客旅程（LINE 會員轉換）', `<div style="color:var(--text-secondary,#64748b);font-size:.875rem">${(f && f.message) || '尚無足夠的 LINE 會員轉換資料'}</div>`);
+  }
+  const rows = f.stages.map(s => `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <div style="width:100px;font-size:.78rem;color:var(--text-secondary,#64748b)">${s.label}</div>
+      <div style="flex:1;background:var(--bg-hover,#232734);border-radius:6px;overflow:hidden;height:20px">
+        <div style="height:100%;background:#06C755;width:${Math.max(2, s.overall_conversion_rate || 0)}%"></div>
+      </div>
+      <div style="width:110px;text-align:right;font-size:.8rem">${s.count}${s.step_conversion_rate!=null?` <span style="color:var(--text-secondary,#64748b)">(${s.step_conversion_rate}%)</span>`:''}</div>
+    </div>`).join('');
+  const rev = f.revenue || {};
+  return _section('🧭 顧客旅程（LINE 會員轉換）',
+    rows + `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px;margin-top:14px">
+      ${_card('LINE 會員營收', _nt(rev.member_revenue), '', '#06C755')}
+      ${_card('非會員營收', _nt(rev.non_member_revenue), '', '')}
+      ${_card('首購營收', _nt(rev.first_purchase_revenue), '', '#10b981')}
+      ${_card('回購營收', _nt(rev.repeat_purchase_revenue), '', '#10b981')}
+    </div>`);
+}
+
+// ── fix18-10-hotfix23-E：會員生命週期 KPI ───────────────────────────────
+function renderDashboardLineCrmKpi(k) {
+  if (!k || k.insufficient_data) {
+    return _section('👤 LINE 會員轉換', `<div style="color:var(--text-secondary,#64748b);font-size:.875rem">尚無足夠的 LINE 會員資料</div>`);
+  }
+  return _section('👤 LINE 會員轉換',
+    `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:12px">
+      ${_card('會員總數', k.total_members, '', '')}
+      ${_card('好友數', k.friends, '', '#06C755')}
+      ${_card('封鎖數', k.blocked, '', '#ef4444')}
+      ${_card('登入會員', k.logged_in_members, '', '')}
+      ${_card('首次購買會員', k.first_buyers, '', '#10b981')}
+      ${_card('回購會員', k.repeat_buyers, '', '#10b981')}
+      ${_card('會員營收', _nt(k.member_revenue), '', '#06C755')}
+      ${_card('平均會員客單', _nt(k.avg_member_order_value), '', '')}
+      ${_card('平均回購天數', k.avg_repeat_days != null ? k.avg_repeat_days + ' 天' : '資料不足', '', '')}
+      ${_card('平均 LTV', _nt(k.avg_ltv), '', '')}
+    </div>`);
+}
+
+// ── fix18-10-hotfix23-E：💚 LINE CRM 健康度（純規則式，不呼叫 AI）────────────
+function renderDashboardLineCrmHealth(h) {
+  if (!h || h.insufficient_data) {
+    return _section('💚 LINE CRM 健康度', `<div style="color:var(--text-secondary,#64748b);font-size:.875rem">${(h && h.message) || '資料不足'}</div>`);
+  }
+  const stars = '★★★★★'.slice(0, h.stars) + '☆☆☆☆☆'.slice(0, 5 - h.stars);
+  const breakdown = (h.breakdown || []).map(b => `
+    <div style="display:flex;justify-content:space-between;font-size:.8rem;padding:4px 0;border-bottom:1px solid var(--border,#2a2d3e)">
+      <span>${b.label}（${b.value}%）</span><span>${b.score} / ${b.max}</span>
+    </div>`).join('');
+  const suggestions = (h.suggestions || []).map(s => `<li style="margin-bottom:4px">${s}</li>`).join('');
+  return _section('💚 LINE CRM 健康度',
+    `<div style="font-size:1.6rem;font-weight:700;margin-bottom:4px">${h.score} 分　<span style="color:#f59e0b">${stars}</span></div>
+     ${breakdown}
+     ${suggestions ? `<h4 style="margin:14px 0 6px;font-size:.85rem">📋 LINE CRM 建議</h4><ul style="margin:0;padding-left:18px;font-size:.8rem">${suggestions}</ul>` : ''}`);
+}
+
+function renderDashboardRepeatCustomers(rc) {
+  if (!rc || !rc.identifiable_customers) {
+    return _section('🔁 回購分析', '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">此區間尚無可辨識顧客資料（需有電話的已完成訂單）</div>');
+  }
+  return _section('🔁 回購分析',
+    `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:12px">
+      ${_card('新客人數', rc.new_customers + ' 人', '', '')}
+      ${_card('回購客人數', rc.repeat_customers + ' 人', '', '#10b981')}
+      ${_card('新客占比', _fmtPct(rc.new_ratio), '', '')}
+      ${_card('回購占比', _fmtPct(rc.repeat_ratio), '', '#6366f1')}
+      ${_card('平均回購天數', rc.avg_repeat_days !== null && rc.avg_repeat_days !== undefined ? rc.avg_repeat_days + ' 天' : '—', '', '')}
+      ${_card('可辨識顧客數', rc.identifiable_customers + ' 人', '', '')}
+    </div>
+    <div style="font-size:.72rem;color:var(--text-secondary,#64748b);margin-top:10px">同一天多筆訂單視為「同日加購」，已從回購天數計算中排除，避免高估回購頻率；沒有電話的訂單不納入分母。</div>`
+  );
+}
+
+// ── K. 未完成訂單分析 ───────────────────────────────────────────
+function renderDashboardIncomplete(inc) {
+  if (!inc) return '';
+  return _section('⏳ 未完成訂單分析',
+    `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px">
+      ${_card('購物車未結帳', inc.cart_not_checked_out + ' 個', '', '#f59e0b')}
+      ${_card('填單未送出', inc.checkout_not_submitted + ' 個', '', '#f59e0b')}
+      ${_card('已送單等待付款', inc.awaiting_payment + ' 筆', '', '#f59e0b')}
+      ${_card('LINE Pay 中斷', inc.linepay_interrupted + ' 筆', '', '#ef4444')}
+      ${_card('待確認宅配訂單', inc.pending_shipping_confirmation + ' 筆', '', '#8b5cf6')}
+    </div>`
+  );
+}
+
+// ── L. 規則式經營建議 ───────────────────────────────────────────
+function renderDashboardRecommendations(recs) {
+  if (!recs || !recs.length) {
+    return _section('🤖 經營建議', '<div style="color:var(--text-secondary,#64748b);font-size:.875rem">目前資料不足，累積更多訪客與訂單後將提供建議。</div>');
+  }
+  const items = recs.map(r => `<li style="margin-bottom:10px;font-size:.85rem;line-height:1.5"><b>${escHtml(r.metric)}。</b>${escHtml(r.text)}</li>`).join('');
+  return _section('🤖 經營建議', `<ul style="margin:0;padding-left:18px">${items}</ul>`);
 }
 
 /** 載入目前店家資訊 + 授權，呼叫 /api/store-me */
@@ -550,6 +1229,12 @@ function applyFeatureGateUI() {
   // fix16: 報表分析（主選單）
   const reportsNav = document.getElementById('nav-btn-reports');
   if (reportsNav) reportsNav.style.display = f.reports !== false ? '' : 'none';
+
+  // fix18-10-hotfix24-A：POS Analytics V2（營運分析）—— 沿用既有 reports 權限，
+  // 不新增第二套權限旗標；未授權時左側入口直接隱藏（不能靠切 hash/page name 繞過，
+  // 真正的資料保護仍在後端 requireStore + /api/analytics/dashboard，這裡只是 UX）。
+  const analyticsV2Nav = document.getElementById('nav-btn-analytics_v2');
+  if (analyticsV2Nav) analyticsV2Nav.style.display = f.reports !== false ? '' : 'none';
 
   // ── 設定 Tab ────────────────────────────────────────────
   // LINE 營業
@@ -1116,6 +1801,16 @@ function showPage(name) {
       name = 'pos'; // 導回點餐頁
     }
   }
+  // fix18-10-hotfix24-A：POS Analytics V2 沿用 reports 權限，攔截未授權的頁面切換
+  // （即使使用者手動改 hash / 直接呼叫 showPage('analytics_v2') 也擋下；真正的資料
+  // 保護仍在後端 requireStore，這裡防止空白頁與不必要的 API 呼叫）
+  if (name === 'analytics_v2') {
+    const f = window.currentFeatures || {};
+    if (f.reports === false) {
+      showToast('此功能未授權，請聯絡系統管理員', 'error');
+      name = 'pos';
+    }
+  }
 
   // fix16f: 強制用 style 切換，確保只有一個 page 顯示
   // classList 操作不夠——某些 page 有獨立 CSS 規則（如 #page-reports）需 style 覆蓋
@@ -1190,6 +1885,7 @@ function showPage(name) {
   if (name === 'categories') loadCategoriesPage();
   if (name === 'inventory')  loadInventoryPage();
   if (name === 'reports')    loadReportsPage();
+  if (name === 'analytics_v2' && typeof loadAnalyticsV2Page === 'function') loadAnalyticsV2Page(); // fix18-10-hotfix24-A
   // 舊版內嵌 AI 行銷中心（#page-ai_marketing）已於 V3 移除，
   // 入口統一改為 openAIMarketingCenter() 開啟獨立 Workspace（/ai-marketing/）。
 }
@@ -1282,6 +1978,9 @@ function switchSettingsTab(tab) {
   if (tab === 'discount_campaigns') loadDiscountCampaignsTab(); // fix18-09C
   if (tab === 'delivery_fee')     loadDeliveryFeeTab();     // fix18-06
   if (tab === 'product_analysis_groups') loadProductAnalysisGroupsTab(); // fix18-09F
+  if (tab === 'ads_attribution')  loadAdsTrackingSettings(); // fix18-10-hotfix23-D
+  if (tab === 'line_member')      loadLineMemberGateSettings(); // fix18-10-hotfix23-E
+  if (tab === 'line_members_list') loadLineMembersList(); // fix18-10-hotfix23-E
 }
 
 // ===== 設定 =====
@@ -1360,6 +2059,207 @@ async function saveCommissionRates() {
       showToast('抽成率設定已儲存', 'success');
     } else { showToast(json.message || '儲存失敗', 'error'); }
   } catch { showToast('網路錯誤', 'error'); }
+}
+
+// ===== fix18-10-hotfix23-D：廣告追蹤設定（Meta Pixel／GA4）=====
+// 沿用既有 /api/settings GET/PUT 與白名單，不建立第二套設定 API。
+async function loadAdsTrackingSettings() {
+  await loadSettings();
+  const enMeta = document.getElementById('set-analytics_meta_pixel_enabled');
+  const idMeta = document.getElementById('set-analytics_meta_pixel_id');
+  const enGa4  = document.getElementById('set-analytics_ga4_enabled');
+  const idGa4  = document.getElementById('set-analytics_ga4_measurement_id');
+  if (enMeta) enMeta.checked = settings.analytics_meta_pixel_enabled === '1';
+  if (idMeta) idMeta.value = settings.analytics_meta_pixel_id || '';
+  if (enGa4)  enGa4.checked = settings.analytics_ga4_enabled === '1';
+  if (idGa4)  idGa4.value = settings.analytics_ga4_measurement_id || '';
+  const metaHint = document.getElementById('adsMetaHint');
+  const ga4Hint  = document.getElementById('adsGa4Hint');
+  if (metaHint) metaHint.style.display = 'none';
+  if (ga4Hint)  ga4Hint.style.display = 'none';
+}
+
+async function saveAdsTrackingSettings() {
+  const metaId = (document.getElementById('set-analytics_meta_pixel_id')?.value || '').trim();
+  const ga4Id  = (document.getElementById('set-analytics_ga4_measurement_id')?.value || '').trim();
+  const metaHint = document.getElementById('adsMetaHint');
+  const ga4Hint  = document.getElementById('adsGa4Hint');
+  // 前端先做一次基本格式檢查（友善提示），後端 PUT /api/settings 仍會再驗一次擋下不合法的值
+  let hasError = false;
+  if (metaId && !/^\d{6,20}$/.test(metaId)) { if (metaHint) metaHint.style.display = 'block'; hasError = true; }
+  else if (metaHint) metaHint.style.display = 'none';
+  if (ga4Id && !/^G-[A-Za-z0-9]{6,12}$/.test(ga4Id)) { if (ga4Hint) ga4Hint.style.display = 'block'; hasError = true; }
+  else if (ga4Hint) ga4Hint.style.display = 'none';
+  if (hasError) { showToast('請修正格式錯誤的欄位', 'error'); return; }
+
+  const body = {
+    analytics_meta_pixel_enabled: document.getElementById('set-analytics_meta_pixel_enabled')?.checked ? '1' : '0',
+    analytics_meta_pixel_id: metaId,
+    analytics_ga4_enabled: document.getElementById('set-analytics_ga4_enabled')?.checked ? '1' : '0',
+    analytics_ga4_measurement_id: ga4Id,
+  };
+  try {
+    const res = await apiFetch('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const json = await res.json();
+    if (json.success) {
+      settings = json.data;
+      showToast('廣告追蹤設定已儲存', 'success');
+    } else {
+      showToast(json.message || '儲存失敗', 'error');
+    }
+  } catch { showToast('網路錯誤', 'error'); }
+}
+
+// ===== fix18-10-hotfix23-E：LINE 會員入口設定 =====
+// 沿用既有 /api/settings GET/PUT 與白名單，不建立第二套設定 API。
+const LINE_MEMBER_GATE_KEYS = [
+  'line_member_gate_enabled', 'line_member_gate_mode', 'line_member_require_friend',
+  'line_member_allow_skip', 'line_member_add_friend_url', 'line_member_basic_id',
+  'line_member_login_channel_id', 'line_member_liff_id', 'line_member_return_url',
+  'line_member_title', 'line_member_description', 'line_member_friend_button_text',
+  'line_member_login_button_text', 'line_member_skip_button_text',
+];
+async function loadLineMemberGateSettings() {
+  await loadSettings();
+  const enEl = document.getElementById('set-line_member_gate_enabled');
+  if (enEl) enEl.checked = settings.line_member_gate_enabled === '1';
+  const modeEl = document.getElementById('set-line_member_gate_mode');
+  if (modeEl) modeEl.value = settings.line_member_gate_mode || 'disabled';
+  const reqEl = document.getElementById('set-line_member_require_friend');
+  if (reqEl) reqEl.checked = settings.line_member_require_friend === '1';
+  const skipEl = document.getElementById('set-line_member_allow_skip');
+  if (skipEl) skipEl.checked = settings.line_member_allow_skip === '1';
+  ['line_member_liff_id','line_member_login_channel_id','line_member_basic_id',
+   'line_member_add_friend_url','line_member_return_url','line_member_title',
+   'line_member_description','line_member_login_button_text','line_member_friend_button_text',
+   'line_member_skip_button_text'].forEach(k => {
+    const el = document.getElementById('set-' + k);
+    if (el) el.value = settings[k] || '';
+  });
+  updateLineMemberTestUrlHint();
+}
+function updateLineMemberTestUrlHint() {
+  const hint = document.getElementById('lmgTestUrlHint');
+  if (!hint) return;
+  const sid = (window.currentStore && window.currentStore.store_id) || (JSON.parse(localStorage.getItem('pos_store_info')||'{}').store_id) || '';
+  hint.textContent = sid ? `測試網址：/line-order.html?store_id=${sid}&member_gate_test=1` : '尚未取得 store_id';
+}
+function _lineMemberTestUrl() {
+  const sid = (window.currentStore && window.currentStore.store_id) || (JSON.parse(localStorage.getItem('pos_store_info')||'{}').store_id) || '';
+  return `${location.origin}/line-order.html?store_id=${encodeURIComponent(sid)}&member_gate_test=1`;
+}
+function copyLineMemberTestUrl() {
+  const url = _lineMemberTestUrl();
+  navigator.clipboard?.writeText(url).then(() => showToast('測試網址已複製', 'success')).catch(() => showToast('複製失敗', 'error'));
+}
+function openLineMemberTestUrl() { window.open(_lineMemberTestUrl(), '_blank'); }
+
+async function saveLineMemberGateSettings() {
+  const body = {};
+  LINE_MEMBER_GATE_KEYS.forEach(k => {
+    const el = document.getElementById('set-' + k);
+    if (!el) return;
+    body[k] = el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value;
+  });
+  try {
+    const res = await apiFetch('/api/settings', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    const json = await res.json();
+    if (json.success) {
+      settings = json.data;
+      showToast('LINE 會員入口設定已儲存', 'success');
+      updateLineMemberTestUrlHint();
+    } else {
+      showToast(json.message || '儲存失敗', 'error');
+    }
+  } catch { showToast('網路錯誤', 'error'); }
+}
+
+// ===== fix18-10-hotfix23-E：LINE 會員管理（列表 / CSV 匯出 / 詳情） =====
+async function loadLineMembersList() {
+  const tbody = document.getElementById('lmTableBody');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="13">載入中…</td></tr>';
+  const q = document.getElementById('lmSearchInput')?.value || '';
+  const filter = document.getElementById('lmFilterSelect')?.value || '';
+  const sort = document.getElementById('lmSortSelect')?.value || '';
+  try {
+    const params = new URLSearchParams();
+    if (q) params.set('q', q);
+    if (filter) params.set('filter', filter);
+    if (sort) params.set('sort', sort);
+    const res = await apiFetch('/api/line-member/members?' + params.toString());
+    const json = await res.json();
+    if (!json.success) { tbody.innerHTML = `<tr><td colspan="13">${json.message || '載入失敗'}</td></tr>`; return; }
+    if (!json.data.length) { tbody.innerHTML = '<tr><td colspan="13">尚無資料</td></tr>'; return; }
+    tbody.innerHTML = json.data.map(m => `
+      <tr>
+        <td>${(m.display_name || '').replace(/</g,'&lt;')}</td>
+        <td>${m.line_user_id_masked}</td>
+        <td>${m.is_friend === 1 ? '✅' : (m.is_friend === 0 ? '❌' : '❓')}</td>
+        <td>${m.is_blocked ? '🚫' : ''}</td>
+        <td>${m.lifecycle_stage}</td>
+        <td>${m.first_touch_source || ''}</td>
+        <td>${m.last_touch_source || ''}</td>
+        <td>${m.first_order_at || ''}</td>
+        <td>${m.last_order_at || ''}</td>
+        <td>${m.order_count || 0}</td>
+        <td>NT$${Math.round(m.total_spent || 0)}</td>
+        <td>NT$${Math.round(m.lifetime_value || 0)}</td>
+        <td><button class="btn-secondary" onclick="openLineMemberDetail(${m.line_user_id_ref})">詳情</button></td>
+      </tr>`).join('');
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="13">網路錯誤</td></tr>';
+  }
+}
+// fix18-10-hotfix23-E1：後台會員管理 API 強制 staff JWT，CSV 匯出改用
+// downloadWithAuth()（apiFetch 帶 Authorization header → blob 下載），
+// 不再用 window.open()（無法附加 Authorization header，且會把 token
+// 暴露在 query string / 瀏覽器歷史紀錄中）。
+function downloadLineMembersCsv() {
+  downloadWithAuth('/api/line-member/members/export', 'line-members.csv');
+}
+// 保留舊名稱相容既有呼叫端（HTML 上可能還有 onclick="exportLineMembersCsv()"）
+function exportLineMembersCsv() {
+  downloadLineMembersCsv();
+}
+async function openLineMemberDetail(id) {
+  const modal = document.getElementById('lmDetailModal');
+  const body = document.getElementById('lmDetailBody');
+  if (!modal || !body) return;
+  modal.style.display = 'flex';
+  body.innerHTML = '載入中…';
+  try {
+    const res = await apiFetch('/api/line-member/members/' + id);
+    const json = await res.json();
+    if (!json.success) { body.innerHTML = json.message || '載入失敗'; return; }
+    const d = json.data;
+    body.innerHTML = `
+      <h3>${(d.display_name || '').replace(/</g,'&lt;')} <small style="color:#999">${d.line_user_id_masked}</small></h3>
+      <p>好友：${d.is_friend === 1 ? '是' : (d.is_friend === 0 ? '否' : '未知')}　封鎖：${d.is_blocked ? '是' : '否'}</p>
+      <p>加入好友：${d.friend_since || '—'}　最後登入：${d.last_login_at || '—'}　最後好友確認：${d.last_friend_check || '—'}</p>
+      <p>首次來源：${d.first_touch_source || '—'} / ${d.first_touch_campaign || '—'}</p>
+      <p>最後來源：${d.last_touch_source || '—'} / ${d.last_touch_campaign || '—'}</p>
+      <p>首次加購商品 ID：${d.first_product_id ?? '—'}　首次加購：${d.first_cart_at || '—'}</p>
+      <p>首購：${d.first_purchase_at || '—'}　最後購買：${d.last_purchase_at || '—'}</p>
+      <p>訂單數：${d.order_count}　累積消費：NT$${Math.round(d.total_spent)}　平均客單：NT$${Math.round(d.avg_order_value)}　LTV：NT$${Math.round(d.lifetime_value)}</p>
+      <p>生命週期階段：${d.lifecycle_stage}${d.inactive ? '（' + d.inactive + '）' : ''}</p>
+      <h4>CRM Timeline</h4>
+      <div style="max-height:200px;overflow:auto;font-size:12px">
+        ${(d.timeline || []).map(t => `<div style="padding:4px 0;border-bottom:1px solid #eee">${t.created_at} — ${t.event_name}</div>`).join('') || '尚無紀錄'}
+      </div>`;
+  } catch (e) {
+    body.innerHTML = '網路錯誤';
+  }
+}
+function closeLineMemberDetail() {
+  const modal = document.getElementById('lmDetailModal');
+  if (modal) modal.style.display = 'none';
 }
 
 async function loadProducts() {

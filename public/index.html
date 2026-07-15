@@ -6,7 +6,7 @@
   <title>餐車 POS</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/css/main.css?v=fix18-09F-h2">
+  <link rel="stylesheet" href="/css/main.css?v=fix18-10-hotfix24-UI">
 </head>
 <body>
 
@@ -34,6 +34,9 @@
     </button>
     <button class="nav-btn" id="nav-btn-reports" data-page="reports" onclick="showPage('reports')">
       <span class="nav-icon">📊</span><span>報表分析</span>
+    </button>
+    <button class="nav-btn" id="nav-btn-analytics_v2" data-page="analytics_v2" onclick="showPage('analytics_v2')">
+      <span class="nav-icon">📊</span><span>營運分析</span>
     </button>
     <button class="nav-btn" data-page="line_products" id="nav-btn-line_products" onclick="showPage('line_products')" style="display:none">
       <span class="nav-icon">📲</span><span>LINE商品</span>
@@ -714,6 +717,12 @@
   <div id="reports-container"></div>
 </div>
 
+<!-- fix18-10-hotfix24-A：📊 POS Analytics V2｜營運分析中心
+     未來所有經營分析功能唯一入口，全部沿用 GET /api/analytics/dashboard，不新增第二套 Analytics API -->
+<div id="page-analytics_v2" class="page">
+  <div id="analytics-v2-container"></div>
+</div>
+
 <!-- 設定頁 -->
 <div id="page-settings" class="page">
   <div class="page-inner">
@@ -732,6 +741,9 @@
       <button class="settings-tab-btn"        data-stab="android_features" onclick="switchSettingsTab('android_features')">📱 Android 平板</button>
       <button class="settings-tab-btn"        data-stab="discount_campaigns" onclick="switchSettingsTab('discount_campaigns')">💸 折扣活動</button>
       <button class="settings-tab-btn"        data-stab="product_analysis_groups" onclick="switchSettingsTab('product_analysis_groups')">📊 商品分析群組</button>
+      <button class="settings-tab-btn"        data-stab="ads_attribution" onclick="switchSettingsTab('ads_attribution')">📣 廣告追蹤</button>
+      <button class="settings-tab-btn"        data-stab="line_member" onclick="switchSettingsTab('line_member')">👤 LINE 會員入口</button>
+      <button class="settings-tab-btn"        data-stab="line_members_list" onclick="switchSettingsTab('line_members_list')">👥 LINE 會員</button>
       <button class="settings-tab-btn"        data-stab="migration" onclick="switchSettingsTab('migration')">📦 資料備份/搬家</button>
       <!-- fix10: 店家授權 Tab 已移至 /system-admin，一般店家不可存取 -->
     </div>
@@ -1776,6 +1788,140 @@
           <div id="analysisGroupList" style="display:flex;flex-direction:column;gap:8px">
             <div style="color:var(--text-muted);font-size:13px">載入中...</div>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- fix18-10-hotfix23-D：廣告追蹤設定（Meta Pixel／GA4）-->
+    <div class="settings-tab-panel" id="stab-ads_attribution" style="display:none">
+      <div class="settings-grid">
+        <div class="settings-card">
+          <h3>📣 Meta Pixel</h3>
+          <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+            <input type="checkbox" id="set-analytics_meta_pixel_enabled" style="width:auto">
+            <span>啟用 Meta Pixel</span>
+          </label>
+          <label>Meta Pixel ID
+            <input type="text" id="set-analytics_meta_pixel_id" placeholder="例如：1234567890123456" inputmode="numeric">
+          </label>
+          <p class="settings-hint" id="adsMetaHint" style="display:none;color:#e65100">⚠ Meta Pixel ID 格式錯誤，應為 6~20 位數字</p>
+        </div>
+        <div class="settings-card">
+          <h3>📊 Google Analytics 4</h3>
+          <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+            <input type="checkbox" id="set-analytics_ga4_enabled" style="width:auto">
+            <span>啟用 GA4</span>
+          </label>
+          <label>GA4 Measurement ID
+            <input type="text" id="set-analytics_ga4_measurement_id" placeholder="例如：G-XXXXXXXXXX">
+          </label>
+          <p class="settings-hint" id="adsGa4Hint" style="display:none;color:#e65100">⚠ GA4 Measurement ID 格式錯誤，應為 G- 開頭</p>
+        </div>
+        <div class="settings-card full">
+          <p class="settings-hint">
+            💡 本版本（fix18-10-hotfix23-D）只完成前端 Pixel／GA4 事件追蹤（PageView／ViewContent／
+            AddToCart／InitiateCheckout／AddPaymentInfo／Purchase）。Meta Conversion API（伺服器對伺服器
+            回傳）尚未實作，所以這裡沒有 Access Token／Test Event Code 欄位，避免誤以為已經完成串接。
+            廣告花費／ROAS 也尚未串接，Dashboard 會如實顯示「尚未串接」。
+          </p>
+        </div>
+      </div>
+      <button class="btn-primary" onclick="saveAdsTrackingSettings()">💾 儲存廣告追蹤設定</button>
+    </div>
+
+    <!-- fix18-10-hotfix23-E：LINE 會員入口設定（LIFF 登入 × 好友狀態） -->
+    <div class="settings-tab-panel" id="stab-line_member" style="display:none">
+      <div class="settings-grid">
+        <div class="settings-card">
+          <h3>👤 LINE 會員入口</h3>
+          <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+            <input type="checkbox" id="set-line_member_gate_enabled" style="width:auto">
+            <span>啟用 LINE 會員入口</span>
+          </label>
+          <label>入口模式
+            <select id="set-line_member_gate_mode">
+              <option value="disabled">不限制（disabled）</option>
+              <option value="checkout">結帳前要求登入（checkout）</option>
+              <option value="entry">進站即要求登入（entry）</option>
+            </select>
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;margin:10px 0">
+            <input type="checkbox" id="set-line_member_require_friend" style="width:auto">
+            <span>要求加入官方帳號</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+            <input type="checkbox" id="set-line_member_allow_skip" style="width:auto">
+            <span>允許略過（僅 entry 模式生效）</span>
+          </label>
+        </div>
+        <div class="settings-card">
+          <h3>🔑 LINE 串接設定</h3>
+          <label>LIFF ID<input type="text" id="set-line_member_liff_id" placeholder="例如：1234567890-abcdefgh"></label>
+          <label>LINE Login Channel ID<input type="text" id="set-line_member_login_channel_id"></label>
+          <label>LINE 官方帳號 Basic ID<input type="text" id="set-line_member_basic_id" placeholder="@yourshop"></label>
+          <label>加好友網址<input type="text" id="set-line_member_add_friend_url" placeholder="https://lin.ee/xxxxx"></label>
+          <label>登入成功返回網址<input type="text" id="set-line_member_return_url" placeholder="https://your-domain.com/line-order.html"></label>
+        </div>
+        <div class="settings-card">
+          <h3>✏️ 顯示文字</h3>
+          <label>提示標題<input type="text" id="set-line_member_title" placeholder="LINE 會員登入"></label>
+          <label>提示說明<input type="text" id="set-line_member_description" placeholder="登入 LINE 會員即可享有專屬服務"></label>
+          <label>登入按鈕文字<input type="text" id="set-line_member_login_button_text" placeholder="使用 LINE 登入"></label>
+          <label>加好友按鈕文字<input type="text" id="set-line_member_friend_button_text" placeholder="加入官方帳號"></label>
+          <label>略過按鈕文字<input type="text" id="set-line_member_skip_button_text" placeholder="略過"></label>
+        </div>
+        <div class="settings-card full">
+          <h3>🧪 測試工具</h3>
+          <p class="settings-hint" id="lmgTestUrlHint">尚未儲存設定</p>
+          <button class="btn-secondary" onclick="copyLineMemberTestUrl()">📋 複製測試網址</button>
+          <button class="btn-secondary" onclick="openLineMemberTestUrl()">🔗 開啟測試網址</button>
+        </div>
+      </div>
+      <button class="btn-primary" onclick="saveLineMemberGateSettings()">💾 儲存 LINE 會員入口設定</button>
+    </div>
+
+    <!-- fix18-10-hotfix23-E：LINE 會員管理（列表 / 篩選 / CSV 匯出 / 詳情） -->
+    <div class="settings-tab-panel" id="stab-line_members_list" style="display:none">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center">
+        <input type="text" id="lmSearchInput" placeholder="搜尋顯示名稱" style="flex:1;min-width:160px">
+        <select id="lmFilterSelect" onchange="loadLineMembersList()">
+          <option value="">全部</option>
+          <option value="friend">好友</option>
+          <option value="not_friend">非好友</option>
+          <option value="blocked">已封鎖</option>
+          <option value="unblocked">已解除封鎖</option>
+          <option value="logged_in_no_purchase">已登入未購買</option>
+          <option value="first_buyer">首購會員</option>
+          <option value="repeat_buyer">回購會員</option>
+          <option value="inactive_30d">30 天未購買</option>
+          <option value="inactive_90d">90 天未購買</option>
+          <option value="high_ltv">高 LTV</option>
+        </select>
+        <select id="lmSortSelect" onchange="loadLineMembersList()">
+          <option value="last_login">最近登入</option>
+          <option value="last_order">最近購買</option>
+          <option value="total_spent">累積消費</option>
+          <option value="order_count">訂單數</option>
+          <option value="ltv">LTV</option>
+        </select>
+        <button class="btn-secondary" onclick="loadLineMembersList()">🔍 查詢</button>
+        <button class="btn-secondary" onclick="exportLineMembersCsv()">⬇️ CSV 匯出</button>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="data-table" id="lmTable">
+          <thead>
+            <tr>
+              <th>顯示名稱</th><th>LINE User ID</th><th>好友</th><th>封鎖</th><th>階段</th>
+              <th>首次來源</th><th>最後來源</th><th>首購</th><th>最後購買</th><th>訂單數</th><th>累積消費</th><th>LTV</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="lmTableBody"><tr><td colspan="13">尚未查詢</td></tr></tbody>
+        </table>
+      </div>
+      <div id="lmDetailModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;align-items:center;justify-content:center">
+        <div style="background:#fff;border-radius:12px;max-width:480px;width:92%;max-height:80vh;overflow:auto;padding:20px">
+          <div id="lmDetailBody">載入中…</div>
+          <button class="btn-secondary" onclick="closeLineMemberDetail()" style="margin-top:12px;width:100%">關閉</button>
         </div>
       </div>
     </div>
@@ -2874,6 +3020,7 @@
 <div class="toast-container" id="toastContainer"></div>
 
 <script src="/js/app.js?v=fix18-10-hotfix22"></script>
+<script src="/js/analytics-v2.js?v=fix18-10-hotfix24-UI"></script>
 <script src="/js/coupons.js?v=fix18-06"></script>
 <script src="/js/qrcode.min.js?v=fix18-09F-h2"></script>
 <script src="/license.js?v=fix18-06"></script>

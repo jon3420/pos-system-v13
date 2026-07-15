@@ -11,6 +11,8 @@ const fetch    = require('node-fetch');
 const { v4: uuidv4 } = require('uuid');
 const { getDb }      = require('../utils/db');
 const { broadcastToStore } = require('../utils/wssBroadcast');
+const { logServerEvent, getOrderTrackingContext } = require('../utils/analyticsLog'); // fix18-10-hotfix23-A
+const { recordMemberPurchase } = require('../utils/lineMemberStats'); // fix18-10-hotfix23-E：LINE 會員入口
 
 // ── API endpoint（依 mode 決定）──────────────────────────
 function getApiBase(mode) {
@@ -507,6 +509,71 @@ router.get('/confirm', async (req, res) => {
         }
       }
     });
+    }
+
+    // ── fix18-10-hotfix23-A：Analytics Foundation ──────────────────────
+    // LINE Pay 的 purchase 事件只在 Confirm 真正成功時才寫入（不信任前端 redirect 就代表付款
+    // 成功）。同一 order_id 只能有一筆 purchase（logServerEvent 內部已查重）。追蹤欄位取自
+    // 訂單建立當下寫入的 submit_order 事件（/request 與 /confirm 都收不到 visitor/session）。
+    try {
+      const ctx = getOrderTrackingContext(db, storeId, order.uuid) || {};
+      logServerEvent(db, {
+        store_id: storeId,
+        visitor_id: ctx.visitor_id || `unknown_${order.uuid}`,
+        session_id: ctx.session_id || `unknown_${order.uuid}`,
+        cart_id: ctx.cart_id || null,
+        order_id: order.uuid,
+        event_name: 'purchase',
+        order_mode: ctx.order_mode || order.order_mode || null,
+        source: ctx.source || null,
+        medium: ctx.medium || null,
+        campaign: ctx.campaign || null,
+        referrer: ctx.referrer || null,
+        landing_page: ctx.landing_page || null,
+        fbclid: ctx.fbclid || null,
+        gclid: ctx.gclid || null,
+        // fix18-10-hotfix23-D：LINE Pay callback URL 本身沒有 UTM，purchase 必須沿用
+        // submit_order 當下存下的 first_touch/last_touch metadata，不能因為 callback
+        // 網址乾淨就變成 direct（需求文件七第 5 點）。metadata_json 已是 JSON 字串，
+        // insertEvent()/normalizeMetadata() 支援字串直接寫入。
+        metadata: ctx.metadata_json || null,
+        // fix18-10-hotfix24-A3：Identity × Channel（需求文件四／六）—— order.line_user_id
+        // 是訂單建立當下已驗證過寫入 orders 表的值（非本次請求才臨時信任的前端輸入）；
+        // LINE Pay 訂單一律來自 LINE 點餐／宅配頁面，channel_source 固定為 'line'，
+        // 宅配訂單則沿用 orders 表既有的 fulfillment_type／order_source 欄位判斷。
+        line_user_id: order.line_user_id || null,
+        channel_source: 'line',
+        fulfillment_type: order.fulfillment_type || null,
+        order_source: order.order_source || null,
+      });
+    } catch (evtErr) {
+      console.warn('[linepay/confirm] analytics event write failed:', evtErr.message);
+    }
+
+    // ── fix18-10-hotfix23-E：LINE Pay 付款成功才更新會員 total_spent/LTV/首購/回購 ──
+    // 用 line_member_order_links 的 UNIQUE(store_id, order_id) 防止 webhook／使用者
+    // 重新整理 confirm 頁面／重複 callback 造成重複累加（recordMemberPurchase 內部保證）。
+    try {
+      if (order.line_user_id) {
+        const purchaseEvent = recordMemberPurchase(db, storeId, order.line_user_id, order.uuid, Number(order.total || 0));
+        if (purchaseEvent) {
+          logServerEvent(db, {
+            store_id: storeId,
+            visitor_id: `member_${order.line_user_id}`,
+            session_id: `member_${order.line_user_id}`,
+            order_id: order.uuid,
+            event_name: purchaseEvent === 'first_purchase' ? 'member_first_purchase' : 'member_repeat_purchase',
+            order_mode: order.order_mode || null,
+            // fix18-10-hotfix24-A3：Identity × Channel（需求文件四／六）
+            line_user_id: order.line_user_id || null,
+            channel_source: 'line',
+            fulfillment_type: order.fulfillment_type || null,
+            order_source: order.order_source || null,
+          });
+        }
+      }
+    } catch (memErr) {
+      console.warn('[linepay/confirm] member purchase update failed:', memErr.message);
     }
 
     // 廣播付款成功通知（後台列表刷新）

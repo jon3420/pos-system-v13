@@ -6,6 +6,8 @@ const router  = express.Router();
 const { getDb } = require('../utils/db');
 const { broadcastToStore } = require('../utils/wssBroadcast');
 const { getStoreLicense }  = require('../middleware/featureGate');
+// fix18-10-hotfix23-E1：line_member_return_url allowlist 驗證
+const { validateLineMemberReturnUrl } = require('../utils/returnUrlValidator');
 
 // LINE 相關設定 key — line_order=false 時不可修改
 const LINE_KEYS = new Set([
@@ -95,6 +97,24 @@ const COMMISSION_KEYS = [
   'unknown_commission_rate',
 ];
 
+// fix18-10-hotfix23-D：廣告追蹤設定（Meta Pixel／GA4）。刻意不放 CAPI Access Token／
+// Test Event Code——本版沒有實作 Conversion API，避免店家誤以為已經完成串接
+// （需求文件五／需求文件八）。Pixel ID、Measurement ID 本身不是密鑰，前端本來就會明碼
+// 嵌入頁面，GET /api/settings 照既有行為原樣回傳沒有額外風險。
+const ANALYTICS_KEYS = [
+  'analytics_meta_pixel_enabled', 'analytics_meta_pixel_id',
+  'analytics_ga4_enabled', 'analytics_ga4_measurement_id',
+];
+
+// fix18-10-hotfix23-E：LINE 會員入口設定 key
+const LINE_MEMBER_KEYS = [
+  'line_member_gate_enabled', 'line_member_gate_mode', 'line_member_require_friend',
+  'line_member_allow_skip', 'line_member_add_friend_url', 'line_member_basic_id',
+  'line_member_login_channel_id', 'line_member_liff_id', 'line_member_return_url',
+  'line_member_title', 'line_member_description', 'line_member_friend_button_text',
+  'line_member_login_button_text', 'line_member_skip_button_text',
+];
+
 // 所有允許修改的 key（包含 LINE key）
 const ALL_ALLOWED = [
   'shop_name', 'n8n_webhook_url', 'line_channel_token', 'tax_rate', 'receipt_footer',
@@ -114,6 +134,8 @@ const ALL_ALLOWED = [
   ...SHIPPING_KEYS,
   ...SHIPPING_API_KEYS,
   ...SHIPPING_ANNOUNCEMENT_KEYS,
+  ...ANALYTICS_KEYS,
+  ...LINE_MEMBER_KEYS,
 ];
 
 // GET /api/settings
@@ -136,7 +158,7 @@ router.put('/', (req, res) => {
 
     // ── fix14：檢查是否修改 LINE key ───────────────────────
     const requestedKeys = Object.keys(req.body);
-    const hasLineKey    = requestedKeys.some(k => LINE_KEYS.has(k) || SHIPPING_KEYS.includes(k) || SHIPPING_API_KEYS.includes(k) || SHIPPING_ANNOUNCEMENT_KEYS.includes(k));
+    const hasLineKey    = requestedKeys.some(k => LINE_KEYS.has(k) || SHIPPING_KEYS.includes(k) || SHIPPING_API_KEYS.includes(k) || SHIPPING_ANNOUNCEMENT_KEYS.includes(k) || LINE_MEMBER_KEYS.includes(k));
 
     if (hasLineKey) {
       // 查授權
@@ -153,6 +175,75 @@ router.put('/', (req, res) => {
           feature: 'line_order',
           message: '此功能未授權，請聯絡系統管理員升級方案（LINE 點餐設定需 line_order 授權）'
         });
+      }
+    }
+
+    // ── fix18-10-hotfix23-D：廣告追蹤 ID 基本格式驗證（需求文件五第 2 點）──
+    // 只在有實際送值時才驗證；空字串（清空設定）永遠允許。
+    if (req.body.analytics_meta_pixel_id !== undefined && String(req.body.analytics_meta_pixel_id).trim() !== '') {
+      if (!/^\d{6,20}$/.test(String(req.body.analytics_meta_pixel_id).trim())) {
+        return res.status(400).json({ success: false, message: 'Meta Pixel ID 格式錯誤（應為 6~20 位數字）' });
+      }
+    }
+    if (req.body.analytics_ga4_measurement_id !== undefined && String(req.body.analytics_ga4_measurement_id).trim() !== '') {
+      if (!/^G-[A-Z0-9]{6,12}$/i.test(String(req.body.analytics_ga4_measurement_id).trim())) {
+        return res.status(400).json({ success: false, message: 'GA4 Measurement ID 格式錯誤（應為 G- 開頭，例如 G-XXXXXXXXXX）' });
+      }
+    }
+
+    // ── fix18-10-hotfix23-E：LINE 會員入口設定驗證（需求文件四）───────────
+    // 只在有實際送值 / 有啟用時才擋，未啟用時允許欄位保留舊值不清除。
+    if (Object.keys(req.body).some(k => LINE_MEMBER_KEYS.includes(k))) {
+      const existingRows = db.all('SELECT key, value FROM settings WHERE store_id=?', [storeId]);
+      const existing = {}; existingRows.forEach(r => { existing[r.key] = r.value; });
+      const merged = { ...existing, ...req.body };
+
+      const gateEnabled = String(merged.line_member_gate_enabled) === '1' || merged.line_member_gate_enabled === true;
+      if (gateEnabled) {
+        if (!merged.line_member_liff_id || !String(merged.line_member_liff_id).trim()) {
+          return res.status(400).json({ success: false, message: '啟用 LINE 會員入口時，LIFF ID 不可空白' });
+        }
+        if (!merged.line_member_login_channel_id || !String(merged.line_member_login_channel_id).trim()) {
+          return res.status(400).json({ success: false, message: '啟用 LINE 會員入口時，LINE Login Channel ID 不可空白' });
+        }
+      }
+      const friendUrl = merged.line_member_add_friend_url ? String(merged.line_member_add_friend_url).trim() : '';
+      if (friendUrl && !/^https:\/\/(lin\.ee\/|line\.me\/)/i.test(friendUrl)) {
+        return res.status(400).json({ success: false, message: '加好友網址格式錯誤（必須是 https://lin.ee/ 或 https://line.me/ 開頭）' });
+      }
+      const basicId = merged.line_member_basic_id ? String(merged.line_member_basic_id).trim() : '';
+      if (basicId && !/^@?[A-Za-z0-9_-]{2,30}$/.test(basicId)) {
+        return res.status(400).json({ success: false, message: 'LINE 官方帳號 Basic ID 格式錯誤' });
+      }
+      // fix18-10-hotfix23-E1：只在這次請求「實際有送值」修改 return_url 時才驗證，
+      // 未啟用 Gate／未修改此欄位時，允許保留既有（可能是舊規則儲存的）合法舊值，
+      // 不因為舊值而擋下這次請求裡其他欄位的儲存；但非法的舊值不會被「重新儲存」。
+      if (req.body.line_member_return_url !== undefined) {
+        const returnUrl = String(req.body.line_member_return_url).trim();
+        if (returnUrl) {
+          const check = validateLineMemberReturnUrl(returnUrl, { req });
+          if (!check.ok) {
+            // line_member_return_url_rejected（server-only 安全記錄）：
+            // 只記 hostname／reason，不記完整網址（可能含 query 敏感資料）。
+            let rejectedHostname = '';
+            try { rejectedHostname = new URL(returnUrl).hostname; } catch (e) { rejectedHostname = '(unparseable)'; }
+            console.warn(`[settings] line_member_return_url_rejected store_id=${storeId} hostname=${rejectedHostname} reason=${check.reason}`);
+            return res.status(400).json({
+              success: false,
+              message: '登入返回網址不在允許的網域內，請使用目前 POS 系統網域的 HTTPS 網址。',
+            });
+          }
+        }
+      }
+      const mode = merged.line_member_gate_mode ? String(merged.line_member_gate_mode).trim() : '';
+      if (mode && !['disabled', 'checkout', 'entry'].includes(mode)) {
+        return res.status(400).json({ success: false, message: '入口模式必須是 disabled / checkout / entry 其中之一' });
+      }
+      const textFields = ['line_member_title', 'line_member_description', 'line_member_friend_button_text', 'line_member_login_button_text', 'line_member_skip_button_text'];
+      for (const f of textFields) {
+        if (merged[f] !== undefined && String(merged[f]).length > 200) {
+          return res.status(400).json({ success: false, message: `${f} 文字過長（上限 200 字）` });
+        }
       }
     }
 

@@ -20,6 +20,9 @@ const { validateCoupon } = require('./coupons'); // fix18-05
 const { getStoreFeatures } = require('../middleware/featureGate'); // fix18-05 coupon gate
 const { applyOrderStatusChange } = require('../utils/orderStatusFlow'); // hotfix13-BUG7：統一狀態機（單一來源，orders.js / online-orders.js 共用）
 const { computeTodayStatus: computeCalendarStatus } = require('./business-calendar'); // Business Calendar V2：營業行事曆覆蓋層
+const { logServerEvent, buildTrackingMetadata } = require('../utils/analyticsLog'); // fix18-10-hotfix23-A/D：Analytics Foundation + Ads Attribution
+const { touchMemberOnOrder, recordMemberPurchase } = require('../utils/lineMemberStats'); // fix18-10-hotfix23-E：LINE 會員入口
+const { verifyMemberSession } = require('../utils/lineMemberSession'); // fix18-10-hotfix23-E：安全 Member Session
 
 // ── fix18-06：外送費後端重算 helper ──────────────────
 const SERVER_KEY = () => process.env.GOOGLE_MAPS_SERVER_KEY || '';
@@ -458,6 +461,17 @@ router.get('/shop', (req, res) => {
       'line_announcement_start_date','line_announcement_end_date','line_announcement_closable',
       'line_announcement_display_mode','line_announcement_frequency','line_announcement_version',
       'line_announcement_auto_holiday',
+      // fix18-10-hotfix23-D：廣告追蹤設定（Pixel ID／Measurement ID 本身非密鑰，
+      // 前台本來就需要明碼載入才能初始化 Meta Pixel／GA4）
+      'analytics_meta_pixel_enabled', 'analytics_meta_pixel_id',
+      'analytics_ga4_enabled', 'analytics_ga4_measurement_id',
+      // fix18-10-hotfix23-E：LINE 會員入口 —— LIFF ID／Channel ID／文字/網址設定
+      // 皆為前端初始化 LIFF SDK 必需的公開值，不含 Channel Secret（那個只在後端使用）。
+      'line_member_gate_enabled', 'line_member_gate_mode', 'line_member_require_friend',
+      'line_member_allow_skip', 'line_member_add_friend_url', 'line_member_basic_id',
+      'line_member_login_channel_id', 'line_member_liff_id', 'line_member_return_url',
+      'line_member_title', 'line_member_description', 'line_member_friend_button_text',
+      'line_member_login_button_text', 'line_member_skip_button_text',
     ];
     const settings = {};
     keys.forEach(k => { settings[k] = getSetting(db, storeId, k, ''); });
@@ -1019,7 +1033,14 @@ router.post('/', async (req, res) => {
       order_type, pickup_time, pickup_date, delivery_address,
       delivery_address_note, delivery_lat, delivery_lng,
       note, payment_method, items, subtotal, discount_amount, total,
-      coupon_code
+      coupon_code,
+      // fix18-10-hotfix23-A：Analytics Foundation — 前端隨訂單一併送出的追蹤欄位（僅供
+      // submit_order / purchase 事件關聯使用，不影響訂單金額 / 付款狀態等信任邊界）
+      analytics: analyticsPayload,
+      // fix18-10-hotfix23-E：LINE 會員入口 —— 前端改帶「後端登入時簽發的短效
+      // member_session」，不再直接信任前端傳入的 line_user_id（見
+      // utils/lineMemberSession.js）。舊欄位名稱不再被信任，僅接受 member_session。
+      member_session,
     } = req.body;
 
     if (!items || !Array.isArray(items) || items.length === 0)
@@ -1219,6 +1240,10 @@ router.post('/', async (req, res) => {
       pickupTimeVal = `${orderDate} ${pickupTimeVal}`;
     }
 
+    // fix18-10-hotfix23-E：line_user_id 只信任伺服器簽章過的 member_session；
+    // 驗證失敗（過期／簽章錯誤／store_id 不符）一律視為未登入，不阻擋下單。
+    const knownLineUserId = member_session ? verifyMemberSession(member_session, storeId) : null;
+
     db.run(
       `INSERT INTO orders (
         id, uuid, order_number, store_id, order_mode, order_status, kitchen_status,
@@ -1229,8 +1254,8 @@ router.post('/', async (req, res) => {
         delivery_fee,
         items, payment_method, payment_category, payment_status,
         subtotal, discount_type, discount_amount, original_total, coupon_code, total,
-        note, sync_status, device_id, source, created_at, updated_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        note, sync_status, device_id, source, created_at, updated_at, line_user_id
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         uuid, uuid, orderNo, storeId, orderMode, 'pending', 'pending',
         customer_name, customer_phone, customer_line_id||'',
@@ -1242,7 +1267,7 @@ router.post('/', async (req, res) => {
         calcDelivFee,
         itemsJson, payment_method||'cash', payment_category, 'pending',
         sub, 'none', discAmt, sub, appliedCouponCode, finalTotal,
-        note||'', 'synced', 'LINE', 'line', nowStr, nowStr
+        note||'', 'synced', 'LINE', 'line', nowStr, nowStr, knownLineUserId||''
       ]
     );
 
@@ -1313,6 +1338,53 @@ router.post('/', async (req, res) => {
       customer_line_id: customer_line_id||'', order_type, total: finalTotal,
       payment_method: payment_method||'cash', items
     });
+
+    // ── fix18-10-hotfix23-A：Analytics Foundation ──────────────────────
+    // submit_order：訂單後端建立成功時寫入（無論付款方式）。
+    // purchase：非 LINE Pay 訂單在此視為成交立即寫入；LINE Pay 訂單的 purchase
+    // 改由 routes/linepay.js 的 /confirm 成功時才寫入（此處不寫，避免顧客未完成
+    // 付款卻被算入成交）。事件寫入失敗絕不影響訂單本身（analyticsLog 內部已 try/catch）。
+    try {
+      const ap = (analyticsPayload && typeof analyticsPayload === 'object') ? analyticsPayload : {};
+      const evtBase = {
+        store_id: storeId,
+        visitor_id: ap.visitor_id || `unknown_${uuid}`,
+        session_id: ap.session_id || `unknown_${uuid}`,
+        cart_id: ap.cart_id || null,
+        order_id: uuid,
+        order_mode: orderMode,
+        source: ap.source || null,
+        medium: ap.medium || null,
+        campaign: ap.campaign || null,
+        referrer: ap.referrer || null,
+        landing_page: ap.landing_page || null,
+        fbclid: ap.fbclid || null,
+        gclid: ap.gclid || null,
+        // fix18-10-hotfix23-D：first_touch／last_touch／utm_content／utm_term 一律走白名單
+        // 組裝（buildTrackingMetadata 只挑追蹤欄位，前端塞入其他資料不會被寫入）
+        metadata: buildTrackingMetadata(ap),
+        // fix18-10-hotfix24-A3：Identity × Channel（需求文件四／六）—— knownLineUserId
+        // 是本檔案已用 verifyMemberSession() 驗證過的 line_user_id（見上方下單流程），
+        // 這裡的訂單一律來自 LINE 點餐頁面，channel_source 固定為 'line'。
+        line_user_id: knownLineUserId || null,
+        channel_source: 'line',
+      };
+      logServerEvent(db, { ...evtBase, event_name: 'submit_order' });
+      // fix18-10-hotfix23-E：訂單成立就更新 order_count/first_order_at/last_order_at
+      // （無論付款方式）；total_spent/LTV/首購回購只在「真正成交」時才累加。
+      if (knownLineUserId) touchMemberOnOrder(db, storeId, knownLineUserId);
+      if (payment_method !== 'linepay') {
+        const purchaseWritten = logServerEvent(db, { ...evtBase, event_name: 'purchase' });
+        if (purchaseWritten && knownLineUserId) {
+          const purchaseEvent = recordMemberPurchase(db, storeId, knownLineUserId, uuid, finalTotal);
+          if (purchaseEvent) logServerEvent(db, { ...evtBase, event_name: purchaseEvent === 'first_purchase' ? 'member_first_purchase' : 'member_repeat_purchase' });
+        }
+      }
+      // LINE Pay：這裡只寫 submit_order，total_spent/LTV 改由 routes/linepay.js
+      // 的 /confirm 成功時呼叫 recordMemberPurchase()，避免顧客未完成付款卻被計入。
+    } catch (evtErr) {
+      console.warn('[line-orders] analytics event write failed:', evtErr.message);
+    }
 
     res.json({ success: true, data: {
       order_number: orderNo, uuid, total: finalTotal,
