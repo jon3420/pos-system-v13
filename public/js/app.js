@@ -2621,30 +2621,64 @@ async function loadLineAnalyticsOverview() {
 
     const health = json.health;
     const s = json.summary;
+    // fix18-10-hotfix26-G1（需求文件八）：session_health 是新欄位，向下相容——
+    // 若後端還沒提供（舊版），一律 fallback 回原本的 s.success_rate／
+    // s.failure_rate，不可造成 undefined 或頁面錯誤。
+    const sh = json.session_health || {};
+    const systemHealthRate = Number.isFinite(Number(sh.system_health_rate))
+      ? Number(sh.system_health_rate) : (s.success_rate != null ? s.success_rate : null);
+    const systemFaultCount = Number.isFinite(Number(sh.system_fault_count))
+      ? Number(sh.system_fault_count) : s.failed;
+    const sessionExpiredCount = Number.isFinite(Number(sh.session_expired_count))
+      ? Number(sh.session_expired_count) : 0;
+    const configErrorCount = Number.isFinite(Number(sh.config_error_count)) ? Number(sh.config_error_count) : 0;
+    const duplicateExpiredTokenSuspected = sh.duplicate_expired_token_suspected === true;
+
     const healthClass = health.status === 'healthy' ? 'line-diag-health--green' : (health.status === 'warning' ? 'line-diag-health--yellow' : (health.status === 'critical' ? 'line-diag-health--red' : ''));
     healthSummaryEl.className = `line-diag-health ${healthClass}`;
-    healthSummaryEl.innerHTML = `Verify Status：${health.icon} ${health.text}　（期間內 ${s.total} 筆，成功率 ${s.success_rate != null ? s.success_rate + '%' : '—'}）`;
+    // fix18-10-hotfix26-G1（需求文件二）：標題優先顯示「系統健康度」，不再只顯示
+    // 原始成功率——原始成功率會把 EXPIRED_ID_TOKEN 這類可恢復事件也算進失敗，
+    // 誤導成「成功率 50%」。
+    healthSummaryEl.innerHTML = `Verify Status：${health.icon} ${health.text}　（系統健康度 ${systemHealthRate != null ? systemHealthRate + '%' : '—'}${sessionExpiredCount > 0 ? '，登入狀態過期 ' + sessionExpiredCount + ' 次' : ''}）`;
 
     healthDetailEl.innerHTML = `
       ${_lineDiagRow('最後成功時間', { level: s.last_success_at ? 'ok' : 'untested', text: s.last_success_at ? formatTaipeiDateTime(s.last_success_at, true) : '尚無紀錄' })}
       ${_lineDiagRow('最後失敗時間', { level: s.last_failure_at ? 'warn' : 'ok', text: s.last_failure_at ? formatTaipeiDateTime(s.last_failure_at, true) : '尚無紀錄' })}
       ${_lineDiagRow('最近 HTTP Status', { level: s.last_http_status == null ? 'untested' : (String(s.last_http_status).startsWith('2') ? 'ok' : 'warn'), text: s.last_http_status != null ? String(s.last_http_status) : '尚無資料' })}
-      ${_lineDiagRow('Verify Success Rate', { level: s.success_rate == null ? 'untested' : (s.success_rate >= 95 ? 'ok' : 'warn'), text: s.success_rate != null ? s.success_rate + '%' : '尚無資料' })}
-      ${_lineDiagRow('Verify Failure Rate', { level: s.failure_rate == null ? 'untested' : (s.failure_rate <= 5 ? 'ok' : 'warn'), text: s.failure_rate != null ? s.failure_rate + '%' : '尚無資料' })}
+      ${_lineDiagRow('系統 Verify 健康度', { level: systemHealthRate == null ? 'untested' : (systemHealthRate >= 95 ? 'ok' : 'warn'), text: systemHealthRate != null ? systemHealthRate + '%' : '尚無資料' })}
+      ${_lineDiagRow('系統性失敗', { level: systemFaultCount > 0 ? 'warn' : 'ok', text: String(systemFaultCount) + ' 次' })}
+      ${_lineDiagRow('使用者登入狀態過期', { level: sessionExpiredCount > 0 ? 'warn' : 'ok', text: String(sessionExpiredCount) + ' 次' })}
+      ${_lineDiagRow('全部驗證成功率（含使用者 Token 過期）', { level: s.success_rate == null ? 'untested' : (s.success_rate >= 95 ? 'ok' : 'warn'), text: s.success_rate != null ? s.success_rate + '%' : '尚無資料' })}
+      ${_lineDiagRow('全部驗證失敗率（含使用者 Token 過期）', { level: s.failure_rate == null ? 'untested' : (s.failure_rate <= 5 ? 'ok' : 'warn'), text: s.failure_rate != null ? s.failure_rate + '%' : '尚無資料' })}
+      ${duplicateExpiredTokenSuspected ? `<div class="line-diag-detail">🟡 疑似重複提交同一枚過期 ID Token，可能存在前端 Token 重用問題。</div>` : ''}
       ${(health.reasons || []).map(r => `<div class="line-diag-detail">⚠️ ${r.replace(/</g,'&lt;')}</div>`).join('')}
     `;
 
-    errorStatsEl.innerHTML = (json.error_breakdown || []).length
-      ? json.error_breakdown.map(e => _lineDiagRow(e.label, { level: e.count > 0 ? 'warn' : 'ok', text: e.count + ' 次' })).join('')
-      : '<div class="line-diag-row"><span class="line-diag-row__label">目前期間內沒有任何 Verify 失敗紀錄</span></div>';
+    // fix18-10-hotfix26-G1（需求文件四）：把「系統錯誤」與「可恢復登入狀態事件」
+    // 分開顯示，避免只有 Expired Token 時被誤讀成一般系統性 Verify Error。
+    const RECOVERABLE_ERROR_LABELS = new Set(['Expired Token', 'Missing ID Token', 'Access Token Expired', 'LINE Relogin Required']);
+    const breakdown = json.error_breakdown || [];
+    const systemErrors = breakdown.filter(e => !RECOVERABLE_ERROR_LABELS.has(e.label));
+    const sessionErrors = breakdown.filter(e => RECOVERABLE_ERROR_LABELS.has(e.label));
+    errorStatsEl.innerHTML = breakdown.length ? `
+      <div style="font-weight:600;margin-bottom:4px">系統錯誤統計</div>
+      ${systemErrors.length ? systemErrors.map(e => _lineDiagRow(e.label, { level: e.count > 0 ? 'warn' : 'ok', text: e.count + ' 次' })).join('') : '<div class="line-diag-detail">目前期間內沒有系統錯誤</div>'}
+      <div style="font-weight:600;margin:10px 0 4px">登入狀態事件（可恢復，非系統故障）</div>
+      ${sessionErrors.length ? sessionErrors.map(e => _lineDiagRow(e.label, { level: 'warn', text: e.count + ' 次' })).join('') : '<div class="line-diag-detail">目前期間內沒有登入狀態過期事件</div>'}
+      ${duplicateExpiredTokenSuspected ? `<div class="line-diag-detail">🟡 疑似重複提交同一枚過期 ID Token，可能存在前端 Token 重用問題。</div>` : ''}
+    ` : '<div class="line-diag-row"><span class="line-diag-row__label">目前期間內沒有任何 Verify 失敗紀錄</span></div>';
 
+    // fix18-10-hotfix26-G1（需求文件五）：摘要區欄位改為系統健康度導向，不再只
+    // 顯示容易誤導的「成功率」。
     summaryEl.innerHTML = `
-      ${_lineDiagRow('登入總次數', { level: 'ok', text: String(s.total) })}
+      ${_lineDiagRow('驗證總次數', { level: 'ok', text: String(s.total) })}
       ${_lineDiagRow('成功', { level: 'ok', text: String(s.success) })}
-      ${_lineDiagRow('失敗', { level: s.failed > 0 ? 'warn' : 'ok', text: String(s.failed) })}
-      ${_lineDiagRow('成功率', { level: s.success_rate == null ? 'untested' : (s.success_rate >= 95 ? 'ok' : 'warn'), text: s.success_rate != null ? s.success_rate + '%' : '—' })}
+      ${_lineDiagRow('系統性失敗', { level: systemFaultCount > 0 ? 'warn' : 'ok', text: String(systemFaultCount) })}
+      ${_lineDiagRow('登入狀態過期', { level: sessionExpiredCount > 0 ? 'warn' : 'ok', text: String(sessionExpiredCount) })}
+      ${_lineDiagRow('系統健康度', { level: systemHealthRate == null ? 'untested' : (systemHealthRate >= 95 ? 'ok' : 'warn'), text: systemHealthRate != null ? systemHealthRate + '%' : '—' })}
+      ${_lineDiagRow('全部驗證成功率', { level: s.success_rate == null ? 'untested' : (s.success_rate >= 95 ? 'ok' : 'warn'), text: s.success_rate != null ? s.success_rate + '%' : '—' })}
       <div style="font-weight:600;margin:8px 0 4px">主要失敗原因</div>
-      ${(json.error_breakdown || []).slice(0, 5).map(f => _lineDiagRow(f.label, { level: 'warn', text: f.count + ' 次' })).join('') || '<div class="line-diag-detail">尚無失敗紀錄</div>'}
+      ${breakdown.slice(0, 5).map(f => _lineDiagRow(f.label, { level: 'warn', text: f.count + ' 次' })).join('') || '<div class="line-diag-detail">尚無失敗紀錄</div>'}
     `;
 
     const funnelItems = (json.analytics && json.analytics.funnel) || [];
@@ -2754,6 +2788,22 @@ const LINE_MEMBER_EVENT_LABELS = {
 };
 function friendEventLabel(eventName) {
   return LINE_MEMBER_EVENT_LABELS[eventName] || eventName;
+}
+
+// fix18-10-hotfix26-F1（需求文件十三）：好友狀態最後一次成功查核的來源，
+// 供 CRM 會員詳情頁顯示（不影響既有 CRM Layout，只是文字說明）。
+const LINE_MEMBER_FRIEND_SOURCE_LABELS = {
+  liff_friendship: 'LIFF 好友狀態查詢',
+  login_verify: 'LINE 登入驗證',
+  checkout_recheck: '結帳重新確認',
+  manual_recheck: '手動重新確認',
+  webhook_follow: 'LINE Webhook（加入好友）',
+  webhook_unfollow: 'LINE Webhook（取消/封鎖）',
+  unknown: '未知',
+};
+function friendSourceLabel(source) {
+  if (!source) return '—';
+  return LINE_MEMBER_FRIEND_SOURCE_LABELS[source] || source;
 }
 
 // ===== fix18-10-hotfix23-E：LINE 會員管理（列表 / CSV 匯出 / 詳情） =====
@@ -2875,7 +2925,7 @@ async function openLineMemberDetail(id) {
         <div class="member-detail-modal__section">
           <h4>好友與官方帳號</h4>
           <div class="member-detail-modal__row"><span class="member-detail-modal__label">好友狀態</span><span class="member-detail-modal__value">${friendStatusHtml(d.friend_status !== undefined ? d.friend_status : d.is_friend)}</span></div>
-          <div class="member-detail-modal__row"><span class="member-detail-modal__label">最後確認</span><span class="member-detail-modal__value">${formatTaipeiDateTime(lastFriendCheckAt)}</span></div>
+          <div class="member-detail-modal__row"><span class="member-detail-modal__label">最後確認</span><span class="member-detail-modal__value">${formatTaipeiDateTime(lastFriendCheckAt)}（${friendSourceLabel(d.friend_source)}）</span></div>
           <div class="member-detail-modal__row"><span class="member-detail-modal__label">官方帳號要求</span><span class="member-detail-modal__value">${requireFollow ? '已啟用' : '未啟用'}</span></div>
           <div class="member-detail-modal__row"><span class="member-detail-modal__label">符合要求</span><span class="member-detail-modal__value">${meetsText}</span></div>
           <div class="member-detail-modal__row"><span class="member-detail-modal__label">加入好友</span><span class="member-detail-modal__value">${formatTaipeiDateTime(d.friend_since)}</span></div>
@@ -10878,6 +10928,27 @@ async function loadDeliveryFeeTab() {
   setChk('set-delivery_distance_fee_enabled', 'delivery_distance_fee_enabled', true);
   setChk('set-coupon_apply_to_delivery_fee',  'coupon_apply_to_delivery_fee',  false);
 
+  // fix18-10-hotfix26-F5：取餐地點設定載入。same_as_store 的「有效值」交給後端算好
+  // （GET /api/settings 只回傳原始字串，這裡沿用跟 GET /shop 同一套「未設定過 key 時
+  // 用是否已有 pickup_address 推斷預設值」規則，避免前端自己另兜一份判斷邏輯）。
+  const rawSameAsStore = settings['pickup_address_same_as_store'];
+  const legacyPickupAddr = String(settings['pickup_address'] || '').trim();
+  const sameAsStore = (rawSameAsStore === undefined || rawSameAsStore === null || rawSameAsStore === '')
+    ? !legacyPickupAddr
+    : (String(rawSameAsStore) === '1' || String(rawSameAsStore).toLowerCase() === 'true');
+  const el_sameAsStore = document.getElementById('set-pickup_address_same_as_store');
+  if (el_sameAsStore) el_sameAsStore.checked = sameAsStore;
+  setVal('set-pickup_address',      'pickup_address');
+  setVal('set-pickup_address_note', 'pickup_address_note');
+  setVal('set-pickup_lat',          'pickup_lat');
+  setVal('set-pickup_lng',          'pickup_lng');
+  setChk('set-pickup_sync_delivery_origin', 'pickup_sync_delivery_origin', false);
+  // _pickupCoordinateMode 是「目前已儲存」的定位模式，供 geocodePickupAddress() 判斷
+  // 是否需要跳出「將取代手動座標」確認對話框；預設 auto。
+  _pickupCoordinateMode = (String(settings['pickup_coordinate_mode'] || 'auto') === 'manual') ? 'manual' : 'auto';
+  togglePickupSameAsStore();
+  renderPickupCoordinateModeLabel();
+
   // 級距規則
   try {
     const raw = settings['delivery_distance_fee_rules'] || '';
@@ -10943,6 +11014,7 @@ async function geocodeStoreAddress() {
 async function saveDeliveryFeeSettings() {
   // 讀取規則並排序
   _deliveryRules.sort((a, b) => a.max_km - b.max_km);
+  const sameAsStoreChecked = document.getElementById('set-pickup_address_same_as_store')?.checked ? '1' : '0';
   const body = {
     store_address:                 document.getElementById('set-store_address')?.value || '',
     store_lat:                     document.getElementById('set-store_lat')?.value     || '',
@@ -10953,12 +11025,26 @@ async function saveDeliveryFeeSettings() {
     delivery_free_threshold:       document.getElementById('set-delivery_free_threshold')?.value    || '1000',
     coupon_apply_to_delivery_fee:  document.getElementById('set-coupon_apply_to_delivery_fee')?.checked ? '1' : '0',
     delivery_distance_fee_rules:   JSON.stringify(_deliveryRules),
+    // fix18-10-hotfix26-F5：取餐地點設定。pickup_coordinate_verified_at 不在這裡送出——
+    // 後端會依「這次是否有動到 pickup_lat/pickup_lng/pickup_coordinate_mode」自動用伺服器
+    // 時間蓋章，前端傳了也會被後端覆寫，這裡乾脆不送，避免誤導。
+    pickup_address_same_as_store:  sameAsStoreChecked,
+    pickup_address:                document.getElementById('set-pickup_address')?.value || '',
+    pickup_address_note:           document.getElementById('set-pickup_address_note')?.value || '',
+    pickup_lat:                    document.getElementById('set-pickup_lat')?.value || '',
+    pickup_lng:                    document.getElementById('set-pickup_lng')?.value || '',
+    pickup_coordinate_mode:        _pickupCoordinateMode || 'auto',
+    pickup_sync_delivery_origin:   document.getElementById('set-pickup_sync_delivery_origin')?.checked ? '1' : '0',
   };
   try {
     const res  = await apiFetch('/api/settings', { method: 'PUT', body: JSON.stringify(body) });
     const json = await res.json();
     if (json.success) {
       settings = { ...settings, ...json.data };
+      // 伺服器蓋章後的 verified_at／實際生效的 coordinate_mode 回寫回本地狀態，
+      // 讓下一次「從地址取得座標」判斷 manual 防覆蓋時用的是伺服器端的真實結果。
+      _pickupCoordinateMode = (String(settings['pickup_coordinate_mode'] || 'auto') === 'manual') ? 'manual' : 'auto';
+      renderPickupCoordinateModeLabel();
       showToast('✅ 外送費設定已儲存', 'success');
     } else {
       showToast('❌ 儲存失敗：' + (json.message || ''), 'error');
@@ -10967,6 +11053,270 @@ async function saveDeliveryFeeSettings() {
     showToast('❌ ' + e.message, 'error');
   }
 }
+
+// ═══════════════════════════════════════════════════════
+// fix18-10-hotfix26-F5：取餐地點設定（取餐地址與店家不同時的手動校正）
+// ═══════════════════════════════════════════════════════
+
+// _pickupCoordinateMode：目前「已生效／已儲存」的定位模式（auto｜manual），供
+// geocodePickupAddress() 判斷是否需要跳出「將取代手動座標」確認對話框。
+// 每次儲存成功後，會用後端實際回傳值回寫（見 saveDeliveryFeeSettings()）。
+let _pickupCoordinateMode = 'auto';
+// 地圖 Modal 內部狀態（google.maps 相關物件與「這次開啟 modal 期間」的暫定模式）。
+let _pickupMap = null, _pickupMarker = null, _pickupMapsReady = false;
+let _pickupModalMode = 'auto'; // 這次 modal 開啟期間，若使用者拖曳 marker 或使用目前位置，會被設為 manual
+
+function togglePickupSameAsStore() {
+  const checked = document.getElementById('set-pickup_address_same_as_store')?.checked;
+  const summary = document.getElementById('pickup-same-as-store-summary');
+  const fields  = document.getElementById('pickup-independent-fields');
+  if (checked) {
+    if (summary) {
+      summary.style.display = '';
+      const addrEl = document.getElementById('pickup-same-as-store-summary-addr');
+      const storeAddr = document.getElementById('set-store_address')?.value || '（尚未設定店家地址）';
+      if (addrEl) addrEl.textContent = `店家地址：${storeAddr}`;
+    }
+    if (fields) fields.style.display = 'none';
+  } else {
+    if (summary) summary.style.display = 'none';
+    if (fields) fields.style.display = '';
+  }
+}
+
+function renderPickupCoordinateModeLabel() {
+  const el = document.getElementById('pickup-coordinate-mode-label');
+  if (!el) return;
+  el.textContent = _pickupCoordinateMode === 'manual' ? '● 已手動校正' : '○ 地址自動定位';
+}
+
+// 📍 從取餐地址取得座標（主頁面按鈕）。若目前是 manual 模式，先確認是否要取代。
+async function geocodePickupAddress() {
+  const addr = (document.getElementById('set-pickup_address')?.value || '').trim();
+  const statusEl = document.getElementById('pickup-geocode-status');
+  if (!addr) { if (statusEl) statusEl.textContent = '請先填寫取餐地址'; return; }
+
+  if (_pickupCoordinateMode === 'manual') {
+    const proceed = confirm('目前已使用手動校正座標。\n\n重新依地址定位後，原本手動座標將被取代。');
+    if (!proceed) return; // 取消：不得背景自動覆蓋 manual 座標
+  }
+
+  if (statusEl) statusEl.textContent = '座標取得中…';
+  try {
+    const res  = await apiFetch('/api/maps/geocode', { method: 'POST', body: JSON.stringify({ address: addr }) });
+    const json = await res.json();
+    if (json.success) {
+      // 重新定位後 mode 改為 auto（尚未寫入 DB，等按「儲存外送費設定」才真正保存）
+      _pickupCoordinateMode = 'auto';
+      renderPickupCoordinateModeLabel();
+      const latEl = document.getElementById('set-pickup_lat');
+      const lngEl = document.getElementById('set-pickup_lng');
+      if (latEl) latEl.value = json.lat;
+      if (lngEl) lngEl.value = json.lng;
+      if (statusEl) {
+        statusEl.textContent = `✅ ${json.formatted_address}（${json.lat}, ${json.lng}）`;
+        statusEl.style.color = '#2e7d32';
+      }
+      // 同步更新地圖 modal（若目前開著）方便使用者視覺確認後再按「使用此座標」
+      if (_pickupMap && _pickupMarker) {
+        _setPickupMarkerPosition(json.lat, json.lng);
+        _pickupModalMode = 'auto';
+      }
+    } else {
+      if (statusEl) { statusEl.textContent = '❌ ' + (json.message || '無法取得座標'); statusEl.style.color = '#e53935'; }
+    }
+  } catch (e) {
+    if (statusEl) { statusEl.textContent = '❌ ' + e.message; statusEl.style.color = '#e53935'; }
+  }
+}
+
+// ── 📡 使用目前位置（主頁面按鈕：直接更新表單欄位，不開地圖 modal）─────────
+function usePickupCurrentLocation() {
+  const statusEl = document.getElementById('pickup-geocode-status');
+  _geolocateFriendly(
+    (lat, lng) => {
+      const latEl = document.getElementById('set-pickup_lat');
+      const lngEl = document.getElementById('set-pickup_lng');
+      if (latEl) latEl.value = lat;
+      if (lngEl) lngEl.value = lng;
+      _pickupCoordinateMode = 'manual'; // 尚未寫入 DB，等按「儲存外送費設定」才真正保存
+      renderPickupCoordinateModeLabel();
+      if (statusEl) { statusEl.textContent = `✅ 已取得目前位置（${lat}, ${lng}）`; statusEl.style.color = '#2e7d32'; }
+      if (_pickupMap && _pickupMarker) _setPickupMarkerPosition(lat, lng);
+    },
+    (msg) => { if (statusEl) { statusEl.textContent = '❌ ' + msg; statusEl.style.color = '#e53935'; } }
+  );
+}
+
+// 共用 geolocation wrapper：處理 success / permission denied / unavailable / timeout /
+// unsupported 五種情況，一律走 callback，絕不 throw、絕不讓頁面報錯。
+function _geolocateFriendly(onSuccess, onError) {
+  if (!navigator.geolocation) { onError('您的瀏覽器不支援定位功能'); return; }
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      try { onSuccess(pos.coords.latitude, pos.coords.longitude); }
+      catch (e) { onError('定位資料處理失敗：' + e.message); }
+    },
+    (err) => {
+      let msg = '定位失敗，請手動輸入座標';
+      if (err && err.code === 1) msg = '您拒絕了定位權限，請手動輸入座標或至瀏覽器設定開啟定位權限';
+      else if (err && err.code === 2) msg = '目前裝置無法取得定位（訊號不佳或裝置不支援）';
+      else if (err && err.code === 3) msg = '定位逾時，請重試或手動輸入座標';
+      onError(msg);
+    },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+  );
+}
+
+// ── 🗺 在地圖上手動校正（Modal）────────────────────────────────────────
+async function openPickupMapModal() {
+  const modal = document.getElementById('pickupMapModal');
+  if (!modal) return;
+  modal.style.display = 'flex';
+  const statusEl = document.getElementById('pickup-map-status');
+  if (statusEl) statusEl.textContent = '';
+
+  // 起始座標：目前表單的 pickup_lat/lng → fallback 店家 store_lat/lng → 桃園市中心
+  const curLat = parseFloat(document.getElementById('set-pickup_lat')?.value);
+  const curLng = parseFloat(document.getElementById('set-pickup_lng')?.value);
+  const storeLat = parseFloat(document.getElementById('set-store_lat')?.value);
+  const storeLng = parseFloat(document.getElementById('set-store_lng')?.value);
+  const startLat = Number.isFinite(curLat) ? curLat : (Number.isFinite(storeLat) ? storeLat : 24.9639);
+  const startLng = Number.isFinite(curLng) ? curLng : (Number.isFinite(storeLng) ? storeLng : 121.2248);
+  // 這次 modal 開啟時，本來就是「手動校正」入口，暫定模式先設為 manual；
+  // 若接下來使用者按「重新定位取餐地址」改用地址 Geocode，會再改回 auto。
+  _pickupModalMode = 'manual';
+
+  await _ensurePickupMapsLoaded();
+  if (!_pickupMapsReady) {
+    if (statusEl) statusEl.textContent = '❌ Google 地圖載入失敗，請確認網路連線或稍後再試';
+    return;
+  }
+  _initPickupMap(startLat, startLng);
+}
+
+function closePickupMapModal() {
+  const modal = document.getElementById('pickupMapModal');
+  if (modal) modal.style.display = 'none';
+  // 關閉／取消不得修改原設定：不動 set-pickup_lat/lng，不動 _pickupCoordinateMode。
+}
+
+async function _ensurePickupMapsLoaded() {
+  if (window.google && window.google.maps) { _pickupMapsReady = true; return; }
+  try {
+    const res  = await apiFetch('/api/config/maps-browser-key');
+    const json = await res.json();
+    if (!json.success || !json.key) { _pickupMapsReady = false; return; }
+    await new Promise((resolve) => {
+      if (window.google && window.google.maps) { resolve(); return; }
+      window._initPickupMapsCallback = resolve;
+      const s = document.createElement('script');
+      s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(json.key)}&language=zh-TW&callback=_initPickupMapsCallback`;
+      s.async = true; s.defer = true;
+      s.onerror = () => resolve();
+      document.head.appendChild(s);
+    });
+    _pickupMapsReady = !!(window.google && window.google.maps);
+  } catch (e) {
+    console.warn('[pickup-map] Google Maps 載入失敗:', e.message);
+    _pickupMapsReady = false;
+  }
+}
+
+function _initPickupMap(lat, lng) {
+  const canvas = document.getElementById('pickupMapCanvas');
+  if (!canvas || !window.google || !window.google.maps) return;
+  _pickupMap = new google.maps.Map(canvas, {
+    center: { lat, lng }, zoom: 18, mapTypeId: 'roadmap',
+  });
+  _pickupMarker = new google.maps.Marker({
+    position: { lat, lng }, map: _pickupMap, draggable: true,
+  });
+  _pickupMarker.addListener('dragend', () => {
+    const pos = _pickupMarker.getPosition();
+    _updatePickupMapLatLngDisplay(pos.lat(), pos.lng());
+    _pickupModalMode = 'manual'; // 使用者主動拖曳過，確定是手動校正
+  });
+  _updatePickupMapLatLngDisplay(lat, lng);
+}
+
+function _setPickupMarkerPosition(lat, lng) {
+  if (!_pickupMap || !_pickupMarker) return;
+  const pos = new google.maps.LatLng(Number(lat), Number(lng));
+  _pickupMarker.setPosition(pos);
+  _pickupMap.panTo(pos);
+  _updatePickupMapLatLngDisplay(Number(lat), Number(lng));
+}
+
+function _updatePickupMapLatLngDisplay(lat, lng) {
+  const latEl = document.getElementById('pickupMapLatDisplay');
+  const lngEl = document.getElementById('pickupMapLngDisplay');
+  if (latEl) latEl.textContent = Number(lat).toFixed(6);
+  if (lngEl) lngEl.textContent = Number(lng).toFixed(6);
+}
+
+function setPickupMapType(type) {
+  if (!_pickupMap) return;
+  _pickupMap.setMapTypeId(type === 'satellite' ? 'satellite' : 'roadmap');
+}
+
+// Modal 內「重新定位取餐地址」：跟主頁面按鈕邏輯相同（manual 時先確認），只是直接
+// 更新 modal 內的 marker，不影響表單欄位（表單欄位要等「使用此座標」才更新）。
+async function pickupMapRelocateFromAddress() {
+  const addr = (document.getElementById('set-pickup_address')?.value || '').trim();
+  const statusEl = document.getElementById('pickup-map-status');
+  if (!addr) { if (statusEl) statusEl.textContent = '請先在上方填寫取餐地址'; return; }
+
+  if (_pickupModalMode === 'manual') {
+    const proceed = confirm('目前已使用手動校正座標。\n\n重新依地址定位後，原本手動座標將被取代。');
+    if (!proceed) return;
+  }
+  if (statusEl) statusEl.textContent = '座標取得中…';
+  try {
+    const res  = await apiFetch('/api/maps/geocode', { method: 'POST', body: JSON.stringify({ address: addr }) });
+    const json = await res.json();
+    if (json.success) {
+      _pickupModalMode = 'auto';
+      _setPickupMarkerPosition(json.lat, json.lng);
+      if (statusEl) { statusEl.textContent = `✅ ${json.formatted_address}`; statusEl.style.color = '#2e7d32'; }
+    } else {
+      if (statusEl) { statusEl.textContent = '❌ ' + (json.message || '無法取得座標'); statusEl.style.color = '#e53935'; }
+    }
+  } catch (e) {
+    if (statusEl) { statusEl.textContent = '❌ ' + e.message; statusEl.style.color = '#e53935'; }
+  }
+}
+
+// Modal 內「使用目前位置」：更新 marker，mode 改 manual（真實定位視為手動校正的一種）。
+function pickupMapUseCurrentLocation() {
+  const statusEl = document.getElementById('pickup-map-status');
+  _geolocateFriendly(
+    (lat, lng) => {
+      _pickupModalMode = 'manual';
+      _setPickupMarkerPosition(lat, lng);
+      if (statusEl) { statusEl.textContent = `✅ 已取得目前位置（${lat.toFixed(6)}, ${lng.toFixed(6)}）`; statusEl.style.color = '#2e7d32'; }
+    },
+    (msg) => { if (statusEl) { statusEl.textContent = '❌ ' + msg; statusEl.style.color = '#e53935'; } }
+  );
+}
+
+// 「使用此座標」：唯一會把 modal 內 marker 座標寫回表單欄位的地方（未按這顆按鈕，
+// 拖曳／重新定位／目前位置都只影響 modal 內部狀態，不動表單、不寫 DB）。
+function confirmPickupMapPin() {
+  if (!_pickupMarker) { closePickupMapModal(); return; }
+  const pos = _pickupMarker.getPosition();
+  const lat = pos.lat(), lng = pos.lng();
+  const latEl = document.getElementById('set-pickup_lat');
+  const lngEl = document.getElementById('set-pickup_lng');
+  if (latEl) latEl.value = lat;
+  if (lngEl) lngEl.value = lng;
+  _pickupCoordinateMode = _pickupModalMode === 'manual' ? 'manual' : 'auto';
+  renderPickupCoordinateModeLabel();
+  const statusEl = document.getElementById('pickup-geocode-status');
+  if (statusEl) { statusEl.textContent = `✅ 已套用地圖校正座標（${lat.toFixed(6)}, ${lng.toFixed(6)}），請記得按下方「儲存外送費設定」`; statusEl.style.color = '#2e7d32'; }
+  closePickupMapModal();
+}
+
 
 // ── fix18-05: window 全域函式匯出 ─────────────────────────────────────────
 // 確保 onclick 屬性與外部 JS（coupons.js 等）可直接呼叫這些函式
@@ -10984,6 +11334,16 @@ async function saveDeliveryFeeSettings() {
   window.addDeliveryRule       = addDeliveryRule;
   window.saveDeliveryFeeSettings = saveDeliveryFeeSettings;
   window.renderDeliveryRules   = renderDeliveryRules;
+  // fix18-10-hotfix26-F5：取餐地點設定
+  window.togglePickupSameAsStore     = togglePickupSameAsStore;
+  window.geocodePickupAddress        = geocodePickupAddress;
+  window.usePickupCurrentLocation    = usePickupCurrentLocation;
+  window.openPickupMapModal          = openPickupMapModal;
+  window.closePickupMapModal         = closePickupMapModal;
+  window.setPickupMapType            = setPickupMapType;
+  window.pickupMapRelocateFromAddress = pickupMapRelocateFromAddress;
+  window.pickupMapUseCurrentLocation  = pickupMapUseCurrentLocation;
+  window.confirmPickupMapPin          = confirmPickupMapPin;
 })();
 
 // ═══════════════════════════════════════════════════════════

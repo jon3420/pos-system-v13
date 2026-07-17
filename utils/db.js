@@ -1572,6 +1572,13 @@ function initTables(w) {
     "ALTER TABLE line_members ADD COLUMN first_purchase_at TEXT DEFAULT ''",
     "ALTER TABLE line_members ADD COLUMN last_purchase_at TEXT DEFAULT ''",
     "ALTER TABLE line_members ADD COLUMN lifetime_value REAL DEFAULT 0",
+    // fix18-10-hotfix26-F1（需求文件七）：好友狀態同步來源與「真正轉換時間」。
+    // friend_source 只記錄「最後一次成功查到好友狀態」的來源（liff_friendship／
+    // login_verify／checkout_recheck／manual_recheck／webhook_follow／
+    // webhook_unfollow／unknown），friend_status_changed_at 只在 is_friend 真的
+    // 從 true↔false 轉換時才更新（狀態不變時只更新 last_friend_check，不動這欄）。
+    "ALTER TABLE line_members ADD COLUMN friend_source TEXT DEFAULT ''",
+    "ALTER TABLE line_members ADD COLUMN friend_status_changed_at TEXT DEFAULT ''",
   ];
   lineMemberCrmMigrations.forEach(sql => { try { w._db.run(sql); w._save(); } catch {} });
 
@@ -1633,6 +1640,23 @@ function initTables(w) {
     w._db.run('CREATE INDEX IF NOT EXISTS idx_lm_order_links_store_user ON line_member_order_links(store_id, line_user_id)');
     w._save();
   } catch(e) { console.warn('[DB] line_member_order_links index:', e.message); }
+
+  // ── fix18-10-hotfix26-F4：訂單「取餐門市 / 取餐地址」快照 ──────────────
+  // 目的：訂單建立當下把門市名稱／取餐地址／座標寫死存進訂單本身，避免日後
+  // 店家修改地址設定後，舊訂單的完成頁／查詢訂單／我的訂單跟著顯示錯誤地址。
+  // 沿用既有「try/catch ALTER TABLE」safe migration 慣例：可重複執行、不破壞
+  // 舊資料、舊訂單允許為 NULL（顯示時由 utils/pickupLocation.js fallback 處理）。
+  // 只新增欄位，不重建 orders 表、不新增新資料表。
+  const pickupSnapshotMigrations = [
+    'ALTER TABLE orders ADD COLUMN pickup_store_name_snapshot TEXT DEFAULT NULL',
+    'ALTER TABLE orders ADD COLUMN pickup_address_snapshot TEXT DEFAULT NULL',
+    'ALTER TABLE orders ADD COLUMN pickup_lat_snapshot TEXT DEFAULT NULL',
+    'ALTER TABLE orders ADD COLUMN pickup_lng_snapshot TEXT DEFAULT NULL',
+    // fix18-10-hotfix26-F5：取餐說明快照（獨立取餐地址時的補充說明，例如「請從騎樓
+    // 入口取餐」）。只在外帶訂單建立當下由後端從 settings 寫入，不信任前端傳入。
+    'ALTER TABLE orders ADD COLUMN pickup_address_note_snapshot TEXT DEFAULT NULL',
+  ];
+  pickupSnapshotMigrations.forEach(sql => { try { w._db.run(sql); w._save(); } catch {} });
 
   // ── line_member_tags：本版只預留 schema，不做自動標籤／推播／AI 分群 ──────
   w._db.run(`CREATE TABLE IF NOT EXISTS line_member_tags (
