@@ -13080,6 +13080,72 @@ function renderMigrationExportSummaryHtml(s) {
     </div>`;
 }
 
+// ── E-0. 搬家上傳上限設定（fix18-10-hotfix29-C2）────────────────────────
+// 上限數字改由後端 /api/migration/config 提供，前端不再把 25MB 寫死。
+// 快取在記憶體即可，取得失敗則退回保守預設值 25MB（僅影響前端「提早
+// 提示」的體驗，實際限制仍以後端為準，不影響安全性）。
+let _migrationConfigCache = null;
+async function getMigrationConfig() {
+  if (_migrationConfigCache) return _migrationConfigCache;
+  try {
+    const res  = await apiFetch('/api/migration/config');
+    const json = await parseMigrationApiResponse(res);
+    if (json && json.success) {
+      _migrationConfigCache = {
+        uploadLimitMb: Number(json.upload_limit_mb) || 25,
+        supportedExtensions: json.supported_extensions || ['.json'],
+      };
+      return _migrationConfigCache;
+    }
+  } catch (e) { /* 取得失敗，使用預設值 */ }
+  return { uploadLimitMb: 25, supportedExtensions: ['.json'] };
+}
+
+// ── 選檔當下先做大小 / 副檔名預檢，避免明知會被 413 擋掉還是送出一次請求 ──
+function validateMigrationFile(file, uploadLimitMb) {
+  if (!file) return { ok: false, message: '請先選擇搬家 JSON 檔案' };
+  if (!String(file.name || '').toLowerCase().endsWith('.json')) {
+    return { ok: false, message: '僅允許選擇 JSON 搬家檔' };
+  }
+  const limitBytes = uploadLimitMb * 1024 * 1024;
+  if (file.size > limitBytes) {
+    return {
+      ok: false,
+      message: `搬家檔案為 ${(file.size / 1024 / 1024).toFixed(2)}MB，`
+        + `目前系統上限為 ${uploadLimitMb}MB，請改用精簡備份或分批搬家。`,
+    };
+  }
+  return { ok: true };
+}
+
+// ── 安全解析 API 回應（fix18-10-hotfix29-C2）─────────────────────────────
+// 問題：後端／中介層（例如 Zeabur Proxy）在 413 或其他錯誤情況下可能回傳
+// HTML 錯誤頁而不是 JSON。直接 response.json() 會丟出：
+//   Unexpected token '<', "<!DOCTYPE "... is not valid JSON
+// 這裡改成先讀 text，再嘗試 JSON.parse，非 JSON 內容一律轉成清楚的中文
+// 錯誤訊息，不讓原始例外訊息透出給使用者。
+async function parseMigrationApiResponse(response) {
+  const rawText = await response.text();
+  let data = null;
+  if (rawText) {
+    try { data = JSON.parse(rawText); } catch { data = null; }
+  }
+
+  // 呼叫端（preview / import）本來就會依 json.success / json.cross_store
+  // 自行分流處理各種「非 2xx 但仍是合法錯誤回應」的情況，所以這裡不對
+  // !response.ok 拋例外，只在「完全不是 JSON」（例如 Proxy 回傳的 HTML
+  // 413 錯誤頁）時，合成一個帶清楚中文訊息的 success:false 物件，
+  // 避免呼叫端因為 data 是 null 而直接對 undefined 欄位炸掉。
+  if (!data) {
+    return {
+      success: false,
+      code: response.ok ? 'MIGRATION_EMPTY_RESPONSE' : 'MIGRATION_NON_JSON_RESPONSE',
+      message: `伺服器未回傳有效 JSON，HTTP ${response.status}`,
+    };
+  }
+  return data;
+}
+
 async function exportMigrationFile() {
   const statusEl  = document.getElementById('migrationExportStatus');
   const previewEl = document.getElementById('migrationExportPreview');
@@ -13149,6 +13215,20 @@ async function onMigrationFileSelected(input) {
   if (statusEl)    statusEl.textContent      = '';
 
   try {
+    // fix18-10-hotfix29-C2：選檔當下先做大小 / 副檔名預檢，超過上限就不送出
+    // preview 請求（避免明知會被 413 擋掉還是打一次 API）。
+    const migCfg = await getMigrationConfig();
+    const fileCheck = validateMigrationFile(file, migCfg.uploadLimitMb);
+    if (!fileCheck.ok) {
+      previewBox.style.display = 'block';
+      previewSum.innerHTML = `<span style="color:#f87171">❌ ${escHtml(fileCheck.message)}</span>
+        <div style="margin-top:6px;font-size:12px;color:var(--text-muted,#64748b)">
+          檔案大小：${(file.size/1024/1024).toFixed(2)}MB ／ 系統上限：${migCfg.uploadLimitMb}MB
+        </div>`;
+      crossWarn.style.display  = 'none';
+      return;
+    }
+
     const json = await readJsonFile(file);
     if (!json || json.type !== 'pos_migration_backup') {
       previewBox.style.display = 'block';
@@ -13164,7 +13244,9 @@ async function onMigrationFileSelected(input) {
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(json)
     });
-    const prev = await res.json();
+    // fix18-10-hotfix29-C2：改用安全解析，避免後端／Proxy 回傳 HTML 錯誤頁
+    // 時出現「Unexpected token '<'」，改顯示清楚的中文錯誤訊息。
+    const prev = await parseMigrationApiResponse(res);
     if (!prev.success) throw new Error(prev.message || 'preview 失敗');
     _migrationPreviewData = prev;
 
@@ -13198,6 +13280,9 @@ async function onMigrationFileSelected(input) {
         備份店家：${escHtml(prev.store_name || prev.file_store_id || '—')} ／
         版本：${escHtml(prev.version||'—')} ／
         匯出時間：${escHtml((prev.exported_at||'').slice(0,19).replace('T',' '))}
+      </div>
+      <div style="margin-top:4px;font-size:12px;color:var(--text-muted,#64748b)">
+        檔案大小：${(file.size/1024/1024).toFixed(2)}MB ／ 系統上限：${migCfg.uploadLimitMb}MB
       </div>`;
 
     // 跨店警告：顯示勾選框，預設不允許
@@ -13305,7 +13390,9 @@ async function executeMigrationImport() {
         allowCrossStoreImport: allowCrossStore
       })
     });
-    const json = await res.json();
+    // fix18-10-hotfix29-C2：改用安全解析，避免 HTML 錯誤頁造成
+    // 「Unexpected token '<'」，且不影響下方既有的 cross_store 分流邏輯。
+    const json = await parseMigrationApiResponse(res);
 
     if (json.success) {
       const r = json.results || {};
