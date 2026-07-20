@@ -13,6 +13,7 @@ const router  = express.Router();
 const { getDb } = require('../utils/db');
 const { toGrams, fromGrams } = require('../utils/unitConvert');
 const { getProductInventoryStatus } = require('../utils/inventoryHelper');
+const { resolveAddFriendUrl } = require('../utils/lineCheckoutHandoff');
 const { broadcastToStore } = require('../utils/wssBroadcast');
 const { v4: uuidv4 } = require('uuid');
 const fetch = require('node-fetch');
@@ -473,6 +474,9 @@ router.get('/shop', (req, res) => {
       'line_member_login_channel_id', 'line_member_liff_id', 'line_member_return_url',
       'line_member_title', 'line_member_description', 'line_member_friend_button_text',
       'line_member_login_button_text', 'line_member_skip_button_text',
+      // fix18-10-hotfix29-C（需求文件三）：LINE 整合中心的正式加好友網址欄位，
+      // 之前這裡完全沒有讀取，導致結帳頁 config 永遠讀不到（見下方 resolveAddFriendUrl()）。
+      'line_add_friend_url',
       // fix18-10-hotfix26-F3：取餐地址（外帶模式顯示用）。store_address／store_lat／
       // store_lng 本來就已存在於既有外送距離費率設定，這裡純粹「額外」讓 GET /shop
       // 一併回傳，不新增資料表、不影響既有外送費率計算邏輯；pickup_address 為新增
@@ -486,6 +490,9 @@ router.get('/shop', (req, res) => {
       // 前台只有外帶模式會用到這些欄位。
       'pickup_address_note', 'pickup_lat', 'pickup_lng',
       'pickup_coordinate_mode', 'pickup_coordinate_verified_at',
+      // fix18-10-hotfix26-F7：向下相容新增（需求文件廿六）。搜尋到明確商家後自動填入
+      // 的商家名稱/Place ID；不移除任何既有欄位。
+      'pickup_place_name', 'pickup_place_id', 'store_place_name', 'store_place_id',
     ];
     const settings = {};
     keys.forEach(k => { settings[k] = getSetting(db, storeId, k, ''); });
@@ -493,6 +500,15 @@ router.get('/shop', (req, res) => {
     // Hotfix16 BUG-003：今日休假狀態改用單一函式判斷，優先序 Business Calendar > 今日臨時休息 > 固定公休
     const todayClosedStatus = getDateClosedStatus(db, storeId, todayStr);
     settings.is_open = settings.line_ordering_enabled === '1' && !todayClosedStatus.closed;
+
+    // fix18-10-hotfix29-C（需求文件三／四）：統一解析加好友網址，回傳一個
+    // 「保證是正式來源」的 add_friend_url 欄位，供前端 _buildLineMemberGateConfig()
+    // 優先使用；同時保留 line_add_friend_url／line_member_add_friend_url 兩個
+    // 原始欄位供相容，但三者永遠是同一個 resolveAddFriendUrl() 結果，不會互相矛盾。
+    settings.add_friend_url = resolveAddFriendUrl({
+      line_add_friend_url: settings.line_add_friend_url,
+      line_member_add_friend_url: settings.line_member_add_friend_url,
+    });
 
     // fix18-10-hotfix26-F5：pickup_address_same_as_store／pickup_sync_delivery_origin
     // 覆寫成真正的 boolean（跟上面 is_open 同樣寫法），且 same_as_store 的預設值推斷
@@ -1063,6 +1079,9 @@ router.post('/', async (req, res) => {
       // member_session」，不再直接信任前端傳入的 line_user_id（見
       // utils/lineMemberSession.js）。舊欄位名稱不再被信任，僅接受 member_session。
       member_session,
+      // fix18-10-hotfix26-F8-B（需求文件十五）：Messenger →「到 LINE 完成結帳」的
+      // cart handoff token；訂單成立後標記 consumed，避免同一 token 重複下單。
+      cart_token,
     } = req.body;
 
     if (!items || !Array.isArray(items) || items.length === 0)
@@ -1271,7 +1290,7 @@ router.post('/', async (req, res) => {
     // 外送訂單不寫 snapshot（維持既有顧客配送地址欄位，避免誤寫成配送地址）。
     const pickupSnapshot = !isDelivery
       ? buildPickupSnapshot(db, storeId)
-      : { pickup_store_name_snapshot: '', pickup_address_snapshot: '', pickup_address_note_snapshot: '', pickup_lat_snapshot: '', pickup_lng_snapshot: '' };
+      : { pickup_store_name_snapshot: '', pickup_place_name_snapshot: '', pickup_place_id_snapshot: '', pickup_address_snapshot: '', pickup_address_note_snapshot: '', pickup_lat_snapshot: '', pickup_lng_snapshot: '' };
 
     db.run(
       `INSERT INTO orders (
@@ -1281,12 +1300,13 @@ router.post('/', async (req, res) => {
         delivery_platform, platform_order_no,
         delivery_lat, delivery_lng, delivery_distance_km, delivery_maps_url,
         delivery_fee,
-        pickup_store_name_snapshot, pickup_address_snapshot, pickup_address_note_snapshot,
+        pickup_store_name_snapshot, pickup_place_name_snapshot, pickup_place_id_snapshot,
+        pickup_address_snapshot, pickup_address_note_snapshot,
         pickup_lat_snapshot, pickup_lng_snapshot,
         items, payment_method, payment_category, payment_status,
         subtotal, discount_type, discount_amount, original_total, coupon_code, total,
         note, sync_status, device_id, source, created_at, updated_at, line_user_id
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         uuid, uuid, orderNo, storeId, orderMode, 'pending', 'pending',
         customer_name, customer_phone, customer_line_id||'',
@@ -1296,7 +1316,8 @@ router.post('/', async (req, res) => {
         isDelivery ? String(parseFloat(delivery_lng)||'') : '',
         calcDistKm, calcMapsUrl,
         calcDelivFee,
-        pickupSnapshot.pickup_store_name_snapshot, pickupSnapshot.pickup_address_snapshot, pickupSnapshot.pickup_address_note_snapshot,
+        pickupSnapshot.pickup_store_name_snapshot, pickupSnapshot.pickup_place_name_snapshot, pickupSnapshot.pickup_place_id_snapshot,
+        pickupSnapshot.pickup_address_snapshot, pickupSnapshot.pickup_address_note_snapshot,
         pickupSnapshot.pickup_lat_snapshot, pickupSnapshot.pickup_lng_snapshot,
         itemsJson, payment_method||'cash', payment_category, 'pending',
         sub, 'none', discAmt, sub, appliedCouponCode, finalTotal,
@@ -1425,6 +1446,27 @@ router.post('/', async (req, res) => {
     // order_mode==='delivery' 回傳 null）。
     const pickupLocation = resolvePickupLocation(newOrder, db, storeId);
 
+    // fix18-10-hotfix26-F8-B（需求文件十五）：token 消費是「盡力而為」的收尾動作，
+    // 失敗（token 不存在/已過期/已用過）不得影響訂單本身已經成立這件事，只記 log。
+    if (cart_token) {
+      try {
+        const { consumeCartToken } = require('../utils/lineCheckoutHandoff');
+        const consumeResult = consumeCartToken(db, storeId, String(cart_token), uuid);
+        if (consumeResult && consumeResult.ok) {
+          try {
+            logServerEvent(db, {
+              store_id: storeId,
+              visitor_id: `order_${uuid}`, session_id: `order_${uuid}`,
+              order_id: uuid, event_name: 'line_checkout_handoff_consumed',
+              line_user_id: knownLineUserId || null, metadata: {},
+            });
+          } catch (analyticsErr) { /* Analytics 失敗不影響訂單已成立 */ }
+        }
+      } catch (tokErr) {
+        console.warn('[line-orders] cart_token consume failed:', tokErr.message);
+      }
+    }
+
     res.json({ success: true, data: {
       order_number: orderNo, uuid, total: finalTotal,
       delivery_fee: calcDelivFee, distance_km: calcDistKm,
@@ -1539,8 +1581,10 @@ function safeOrder(order, db, storeId) {
     note: order.note||'', created_at: order.created_at, source: order.source,
     pickup_location: pickupLocation,
     pickup_store_name: pickupLocation ? pickupLocation.store_name : '',
+    pickup_place_name: pickupLocation ? (pickupLocation.place_name || '') : '',
     pickup_address: pickupLocation ? pickupLocation.address : '',
     pickup_address_note: pickupLocation ? (pickupLocation.address_note || '') : '',
+    pickup_coords_only: pickupLocation ? !!pickupLocation.coords_only : false,
     pickup_lat: pickupLocation ? pickupLocation.lat : null,
     pickup_lng: pickupLocation ? pickupLocation.lng : null,
     pickup_maps_url: pickupLocation ? pickupLocation.maps_url : '',

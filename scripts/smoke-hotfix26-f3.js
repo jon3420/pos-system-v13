@@ -31,9 +31,15 @@ function makeFakeElement(idRegistry) {
   const listeners = {};
   const el = {
     style: {}, disabled: false, textContent: '', _html: '', children: {}, parentNode: null,
+    attrs: {},
     addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
     dispatchClick() { (listeners.click || []).forEach((fn) => fn()); },
     querySelector(sel) { if (sel[0] === '#') return el.children[sel.slice(1)] || null; return null; },
+    // fix18-10-hotfix29-C：openOaBtn 的 aria-disabled 切換需要這三個方法
+    // （其他較新的 smoke test 已經有，這個較舊、獨立的 mock 補上同一套實作）。
+    setAttribute(k, v) { el.attrs[k] = v; },
+    getAttribute(k) { return el.attrs[k]; },
+    removeAttribute(k) { delete el.attrs[k]; },
   };
   Object.defineProperty(el, 'innerHTML', {
     get() { return el._html; },
@@ -129,21 +135,36 @@ const UA = {
   });
 
   const html = guideEl._html;
-  if (html.includes('請改用外部瀏覽器完成 LINE 登入')) pass('iOS 標題＝「請改用外部瀏覽器完成 LINE 登入」');
+  // fix18-10-hotfix26-F8-B（需求文件三）：標題／主按鈕改為「LINE 完成結帳」／
+  // 「到 LINE 完成結帳」，取代 hotfix26-F2/F3 原本的「請改用外部瀏覽器完成
+  // LINE 登入」版型；Chrome／Safari 降為次要、收合在「其他登入方式」內。
+  if (html.includes('LINE 完成結帳')) pass('iOS 標題／文案＝「LINE 完成結帳」（F8-B 改版）');
   else fail('iOS 標題文字不符');
 
-  if (html.includes('目前 Facebook／Messenger／Instagram 內建瀏覽器限制') && html.includes('建議改用 Chrome 或 Safari 開啟') && html.includes('購物車內容會保留')) {
-    pass('iOS 說明文字包含限制說明／建議改用 Chrome 或 Safari／購物車保留');
+  // fix18-10-hotfix27（需求文件九收尾）：文案再次調整——強調「購物車已保留，
+  // 不需要重新選購」，取代 F8-B 版的「購物車內容會自動保留」。
+  if (html.includes('目前使用 Facebook／Messenger 內建瀏覽器') && html.includes('請到 LINE 繼續完成結帳') && html.includes('您的購物車已保留，不需要重新選購')) {
+    pass('iOS 說明文字包含內建瀏覽器提示／請到 LINE 繼續完成結帳／購物車已保留（hotfix27 改版）');
   } else fail('iOS 說明文字缺漏', html);
 
-  if (html.includes('id="lmgChromeBtn"') && html.includes('使用 Chrome 開啟')) pass('iOS 版有「使用 Chrome 開啟」按鈕');
+  if (html.includes('id="lmgGoLineCheckoutBtn"') && html.includes('到 LINE 完成結帳')) pass('iOS 版有「到 LINE 完成結帳」主按鈕（F8-B 新增）');
+  else fail('iOS 版缺少「到 LINE 完成結帳」主按鈕');
+  if (html.includes('id="lmgOtherLoginDetails"') && html.includes('其他登入方式')) pass('iOS 版有收合的「其他登入方式」區塊（F8-B 新增）');
+  else fail('iOS 版缺少「其他登入方式」收合區塊');
+  if (html.includes('id="lmgChromeBtn"') && html.includes('使用 Chrome 開啟')) pass('iOS 版「其他登入方式」內有「使用 Chrome 開啟」按鈕');
   else fail('iOS 版缺少「使用 Chrome 開啟」按鈕');
-  if (html.includes('id="lmgSafariBtn"') && html.includes('如何使用 Safari 開啟')) pass('iOS 版有「如何使用 Safari 開啟」按鈕');
+  if (html.includes('id="lmgSafariBtn"') && html.includes('如何使用 Safari 開啟')) pass('iOS 版「其他登入方式」內有「如何使用 Safari 開啟」按鈕');
   else fail('iOS 版缺少「如何使用 Safari 開啟」按鈕');
   if (html.includes('若 Chrome 仍無法完成登入，請使用 Safari')) pass('iOS 版包含「若 Chrome 仍無法完成登入，請使用 Safari」提示');
   else fail('iOS 版缺少 Chrome→Safari 銜接提示');
-  if (html.includes('id="lmgCopyLinkBtn"') && html.includes('複製點餐連結')) pass('iOS 版保留「複製點餐連結」按鈕');
-  else fail('iOS 版缺少「複製點餐連結」按鈕');
+  // fix18-10-hotfix27-CD（需求文件十七）：「複製結帳連結」按鈕已移除，改為
+  // 「複製結帳代碼」（在 Cart Code 區塊內，且永遠可用，不限 iOS）。
+  if (html.includes('id="lmgCopyCartCodeBtn"') && html.includes('複製結帳代碼') && !html.includes('複製結帳連結')) {
+    pass('iOS 版「複製結帳代碼」按鈕存在，舊版「複製結帳連結」已移除（hotfix27-CD）');
+  } else fail('iOS 版「複製結帳代碼」按鈕缺漏或仍殘留舊版「複製結帳連結」');
+  if (html.includes('id="lmgGoLineCheckoutBtn"') && /<a\s[^>]*id="lmgGoLineCheckoutBtn"/.test(html)) {
+    pass('主按鈕是真正的 <a href>（hotfix27-CD 需求文件十二：保留使用者手勢）');
+  } else fail('主按鈕不是 <a> 元素');
   if (html.includes('id="lmgExternalBackBtn"') && html.includes('返回購物車')) pass('iOS 版保留「返回購物車」按鈕');
   else fail('iOS 版缺少「返回購物車」按鈕');
   if (!html.includes('id="lmgOpenLineBtn"')) pass('iOS 版不再顯示「嘗試使用 LINE 開啟」主按鈕（避免宣稱官方限制下仍會成功）');
@@ -179,7 +200,9 @@ const UA = {
   else fail('「如何使用 Safari 開啟」不應觸發導轉');
 }
 
-// Android／其他瀏覽器分支必須與 hotfix26-F2 完全一致（byte-identical 版型）
+// fix18-10-hotfix26-F8-B（需求文件三／四）：Android／其他瀏覽器分支改用與 iOS
+// 相同的「到 LINE 完成結帳」主按鈕版型，「嘗試使用 LINE 開啟」／「使用 Chrome
+// 開啟」等原本的 hotfix26-F2 四顆按鈕不再是主畫面，而是收合進「其他登入方式」。
 {
   const testUrl = 'https://example.com/line-order.html?store_id=store_001&mode=takeout&fbclid=abc123';
   const { LineMemberGate, doc } = loadGateModule(testUrl, UA.facebookAndroidOld);
@@ -188,13 +211,15 @@ const UA = {
     storeId: 'store_001', gateStage: 'checkout', environment, onEvent: () => {},
   });
   const html = guideEl._html;
-  if (html.includes('請使用 LINE 完成會員登入') && html.includes('id="lmgOpenLineBtn"') && html.includes('嘗試使用 LINE 開啟')
+  if (html.includes('LINE 完成結帳') && html.includes('id="lmgGoLineCheckoutBtn"') && html.includes('到 LINE 完成結帳')
+    && html.includes('id="lmgOtherLoginDetails"')
+    && html.includes('id="lmgOpenLineBtn"') && html.includes('嘗試使用 LINE 開啟')
     && html.includes('id="lmgOsHintBtn"') && html.includes('使用 Chrome 開啟')
-    && html.includes('id="lmgCopyLinkBtn"') && html.includes('id="lmgExternalBackBtn"')
+    && html.includes('id="lmgCopyCartCodeBtn"') && html.includes('id="lmgExternalBackBtn"')
     && !html.includes('id="lmgChromeBtn"') && !html.includes('id="lmgSafariBtn"')) {
-    pass('Android 版維持 hotfix26-F2 原始版型（標題／四顆按鈕）完全不變，未套用 iOS 版型');
+    pass('Android 版採用統一版型：主按鈕「到 LINE 完成結帳」（<a>）＋「複製結帳代碼」＋收合的「嘗試使用 LINE 開啟／使用 Chrome 開啟」，未誤用 iOS 專屬的 lmgChromeBtn/lmgSafariBtn（hotfix27-CD）');
   } else {
-    fail('Android 版型被誤改', html);
+    fail('Android 版型與預期不符', html);
   }
 }
 manual('真實 Android 裝置 Messenger→Chrome→LINE Login 完整流程', '需要真實 Android 裝置與 Messenger/LINE App 才能驗證');

@@ -744,6 +744,7 @@
       <button class="settings-tab-btn"        data-stab="ads_attribution" onclick="switchSettingsTab('ads_attribution')">📣 廣告追蹤</button>
       <button class="settings-tab-btn"        data-stab="line_member" onclick="switchSettingsTab('line_member')">👤 LINE 會員登入設定</button>
       <button class="settings-tab-btn"        data-stab="line_analytics" onclick="switchSettingsTab('line_analytics')">📡 LINE 管理</button>
+      <button class="settings-tab-btn"        data-stab="line_integration" onclick="switchSettingsTab('line_integration')">🔌 LINE 整合中心</button>
       <button class="settings-tab-btn"        data-stab="line_members_list" onclick="switchSettingsTab('line_members_list')">👥 LINE 會員</button>
       <button class="settings-tab-btn"        data-stab="migration" onclick="switchSettingsTab('migration')">📦 資料備份/搬家</button>
       <!-- fix10: 店家授權 Tab 已移至 /system-admin，一般店家不可存取 -->
@@ -874,8 +875,14 @@
     <div class="settings-tab-panel" id="stab-delivery_fee" style="display:none">
       <div class="settings-grid">
         <div class="settings-card">
-          <h3>📍 店家座標設定</h3>
+          <h3>📍 店家地址與外送計算起點</h3>
           <p style="color:#888;font-size:13px;margin-bottom:12px">計算外送距離的起點，需設定正確座標。</p>
+          <div class="settings-row">
+            <label>店家商家／地標</label>
+            <input type="text" id="set-store_place_name" placeholder="例：脆豬腰｜冷拌麻油腰子" style="flex:1">
+          </div>
+          <!-- fix18-10-hotfix26-F7：store_place_id 隱藏保存，不讓店家直接編輯 -->
+          <input type="hidden" id="set-store_place_id">
           <div class="settings-row">
             <label>店家地址</label>
             <input type="text" id="set-store_address" placeholder="例：桃園市中壢區○○路○號" style="flex:1">
@@ -886,8 +893,19 @@
             <label style="min-width:80px">經度 (lng)</label>
             <input type="text" id="set-store_lng" placeholder="例：121.2248" style="flex:1;min-width:120px">
           </div>
+          <div class="settings-row" style="font-size:13px;color:#888">
+            <label>定位模式</label>
+            <span id="store-coordinate-mode-label">○ 地址自動定位</span>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+            <input type="text" id="storeSearchInline" placeholder="搜尋店家、地址或地標" style="flex:1;min-width:140px;padding:8px;border:1px solid #ddd;border-radius:6px" onkeydown="if(event.key==='Enter'){event.preventDefault();openStoreMapModal();}">
+            <button class="btn-secondary" onclick="openStoreMapModal()" style="min-width:120px">🔍 搜尋店家、地址或地標</button>
+          </div>
           <button class="btn-secondary" onclick="geocodeStoreAddress()" style="margin-top:8px;width:100%">📍 從店家地址取得座標</button>
+          <button class="btn-secondary" onclick="openStoreMapModal()" style="margin-top:8px;width:100%">🗺 在地圖上手動校正</button>
+          <button class="btn-secondary" onclick="useStoreCurrentLocation()" style="margin-top:8px;width:100%">📡 使用目前位置</button>
           <div id="geocode-status" style="font-size:12px;color:#888;margin-top:6px;min-height:18px"></div>
+          <button class="btn-primary" onclick="saveStoreLocationSettings()" style="margin-top:12px;width:100%">💾 儲存店家座標設定</button>
         </div>
 
         <!-- fix18-10-hotfix26-F5：取餐地點設定（可與店家地址不同，例如騎樓/市場/後門入口） -->
@@ -906,6 +924,12 @@
             <span id="pickup-same-as-store-summary-addr" style="color:#888"></span>
           </div>
           <div id="pickup-independent-fields" style="display:none">
+            <div class="settings-row">
+              <label>取餐商家／地標</label>
+              <input type="text" id="set-pickup_place_name" placeholder="例：熊熊可麗餅" style="flex:1">
+            </div>
+            <!-- fix18-10-hotfix26-F7：pickup_place_id 隱藏保存，不讓店家直接編輯 -->
+            <input type="hidden" id="set-pickup_place_id">
             <div class="settings-row">
               <label>取餐地址</label>
               <input type="text" id="set-pickup_address" placeholder="例：桃園市中壢區龍東路128號騎樓" style="flex:1">
@@ -934,6 +958,7 @@
             </div>
             <p style="color:#888;font-size:12px;margin-top:-4px">同步後，外送距離與外送費將從此座標開始計算。</p>
           </div>
+          <button class="btn-primary" onclick="savePickupLocationSettings()" style="margin-top:12px;width:100%">💾 儲存取餐地點設定</button>
         </div>
         <!-- end fix18-10-hotfix26-F5 取餐地點設定 -->
 
@@ -2018,6 +2043,122 @@
     </div>
 
 
+    <!-- fix18-10-hotfix27：LINE Integration Center（設定中心 → 第三方整合 → LINE 整合中心） -->
+    <div class="settings-tab-panel" id="stab-line_integration" style="display:none">
+      <div class="settings-grid">
+
+        <!-- 需求文件三：LINE Setup Wizard -->
+        <div class="settings-card full">
+          <h3>🧭 LINE 整合精靈</h3>
+          <p class="settings-hint">依序完成以下步驟即可完成 LINE 串接，不需要另外閱讀教學文件。</p>
+          <div id="liWizardSteps" class="line-diag-panel">尚未載入</div>
+        </div>
+
+        <!-- 需求文件四：LINE Official Account -->
+        <div class="settings-card">
+          <h3>🏢 LINE Official Account</h3>
+          <label>官方帳號名稱<input type="text" id="li-line_official_name" placeholder="例如：阿義餐車"></label>
+          <label>Official Account Basic ID<input type="text" id="li-line_official_basic_id" placeholder="@abc1234"></label>
+          <label>加入好友網址<input type="text" id="li-line_add_friend_url" placeholder="https://lin.ee/xxxx"></label>
+          <label>官方首頁<input type="text" id="li-line_official_home_url" placeholder="https://page.line.me/abc1234"></label>
+          <div style="margin-top:8px">
+            <button class="btn-secondary" onclick="liTestAction('official_account')">🔍 測試加入好友</button>
+          </div>
+        </div>
+
+        <!-- 需求文件五：Messaging API -->
+        <div class="settings-card">
+          <h3>💬 Messaging API</h3>
+          <label>Channel ID<input type="text" id="li-line_messaging_channel_id" placeholder="例如：1234567890"></label>
+          <label>Channel Secret
+            <div style="display:flex;gap:6px;align-items:center">
+              <input type="password" id="li-line_channel_secret" placeholder="輸入以更新（留白＝不變更）" style="flex:1">
+              <button type="button" class="btn-secondary" style="padding:6px 10px" onclick="liToggleSecretVisibility('li-line_channel_secret')">👁️</button>
+            </div>
+            <div class="settings-hint" id="liChannelSecretStatus">尚未載入</div>
+          </label>
+          <label>Channel Access Token
+            <div style="display:flex;gap:6px;align-items:center">
+              <input type="password" id="li-line_channel_token" placeholder="輸入以更新（留白＝不變更）" style="flex:1">
+              <button type="button" class="btn-secondary" style="padding:6px 10px" onclick="liToggleSecretVisibility('li-line_channel_token')">👁️</button>
+            </div>
+            <div class="settings-hint" id="liChannelTokenStatus">尚未載入</div>
+          </label>
+          <p class="settings-hint">⚠️ 基於安全考量，已設定的 Secret／Token 不會顯示完整內容、不會匯出、不會出現在 Log 中。</p>
+          <div style="margin-top:8px">
+            <button class="btn-secondary" onclick="liTestAction('messaging_api')">🔍 測試 Channel Access Token</button>
+          </div>
+        </div>
+
+        <!-- 需求文件六：LIFF -->
+        <div class="settings-card">
+          <h3>🖼️ LIFF</h3>
+          <label>LIFF ID<input type="text" id="li-line_member_liff_id" placeholder="例如：1234567890-abcdefgh"></label>
+          <label>LIFF URL<input type="text" id="liLiffUrl" readonly></label>
+          <label>Checkout Callback URL（範例，實際會用真正的 cart_token）<input type="text" id="liLiffCallbackUrl" readonly></label>
+          <p class="settings-hint" id="liLiffEndpointHint">尚未載入</p>
+          <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn-secondary" onclick="liCopyField('liLiffUrl')">📋 複製 LIFF URL</button>
+            <button class="btn-secondary" onclick="liCopyField('liLiffCallbackUrl')">📋 複製 Callback URL</button>
+            <button class="btn-secondary" onclick="liTestAction('liff')">🔍 測試 LIFF</button>
+          </div>
+        </div>
+
+        <!-- 需求文件七：Webhook -->
+        <div class="settings-card">
+          <h3>🔗 Webhook</h3>
+          <label>Webhook URL<input type="text" id="liWebhookUrl" readonly></label>
+          <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn-secondary" onclick="liCopyField('liWebhookUrl')">📋 複製</button>
+            <a class="btn-secondary" href="https://developers.line.biz/console/" target="_blank" rel="noopener" style="text-decoration:none;display:inline-flex;align-items:center;padding:8px 14px">↗️ 開啟 LINE Developers Verify</a>
+            <button class="btn-secondary" onclick="liTestAction('webhook')">🔍 檢查 Webhook 設定</button>
+          </div>
+          <p class="settings-hint">ℹ️ 系統可確認網址、Secret 與最近事件；LINE Developers 的「Verify」結果仍需在 LINE 後台操作確認，本系統無法代為完成。</p>
+          <p class="settings-hint" id="liAutoReplyHint" style="display:none">⚠️ 偵測到 Webhook 已啟用。建議至 LINE Official Account Manager 關閉「自動回應訊息」，避免顧客收到重複回覆（「加入好友歡迎訊息」可以保留）。本系統不會、也不能代為關閉 LINE 後台設定，請自行至 <a href="https://manager.line.biz/" target="_blank" rel="noopener">LINE Official Account Manager</a> 設定。</p>
+        </div>
+
+        <!-- 需求文件八：Checkout Handoff -->
+        <div class="settings-card">
+          <h3>💬 Checkout Handoff</h3>
+          <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+            <input type="checkbox" id="li-line_checkout_handoff_enabled" style="width:auto">
+            <span>啟用 LINE 一鍵結帳</span>
+          </label>
+          <p class="settings-hint" id="liCheckoutHandoffHint">尚未載入</p>
+          <div style="margin-top:8px">
+            <button class="btn-secondary" onclick="liTestAction('checkout_handoff')">🔍 建立測試 Cart Token</button>
+          </div>
+        </div>
+
+        <!-- 需求文件十一：LINE Integration Health -->
+        <div class="settings-card full">
+          <h3>🩺 LINE Integration Health</h3>
+          <div id="liHealthOverall" class="line-diag-health">尚未測試</div>
+          <div id="liHealthGrid" class="line-diag-panel"></div>
+          <div style="margin-top:8px">
+            <button class="btn-primary" onclick="loadLineIntegrationHealth()">🔄 重新檢查</button>
+          </div>
+        </div>
+
+        <!-- fix18-10-hotfix28（需求文件十九）：好友同步診斷 -->
+        <div class="settings-card full">
+          <h3>🤝 好友同步診斷</h3>
+          <div id="liFriendSyncDiag" class="line-diag-panel">尚未載入</div>
+        </div>
+
+        <!-- fix18-10-hotfix29-B（需求文件十六）：Messenger Handoff 診斷 -->
+        <div class="settings-card full">
+          <h3>📲 Messenger Handoff 診斷</h3>
+          <div id="liHandoffDiag" class="line-diag-panel">尚未載入</div>
+          <div style="margin-top:8px">
+            <button class="btn-secondary" onclick="loadHandoffDiagnostics()">🔄 重新載入</button>
+          </div>
+        </div>
+
+      </div>
+      <button class="btn-primary" onclick="saveLineIntegrationSettings()">💾 儲存 LINE 整合設定</button>
+    </div>
+
     <!-- fix18-10-hotfix23-E：LINE 會員管理（列表 / 篩選 / CSV 匯出 / 詳情） -->
     <div class="settings-tab-panel" id="stab-line_members_list" style="display:none">
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center">
@@ -2040,7 +2181,7 @@
           <option value="all">好友狀態：全部</option>
           <option value="friend">🟢 好友</option>
           <option value="non_friend">🔴 非好友</option>
-          <option value="unknown">⚪ 未知</option>
+          <option value="unknown">⚪ 尚未確認</option>
         </select>
         <select id="lmSortSelect">
           <option value="last_login">最近登入</option>
@@ -2079,15 +2220,32 @@
      fix18-10 modals: 訂單匯出、訂單匯入、預購匯出、預購匯入、搬家確認
 ═════════════════════════════════════════════════════════════ -->
 
-<!-- fix18-10-hotfix26-F5：取餐座標手動校正 Modal -->
+<!-- fix18-10-hotfix26-F5：取餐座標手動校正 Modal（fix18-10-hotfix26-F6：新增地點搜尋區） -->
 <div class="modal-overlay" id="pickupMapModal" style="display:none" onclick="if(event.target===this)closePickupMapModal()">
   <div class="modal" style="max-width:520px">
     <div class="modal-header">
-      <h3>🗺 校正實際取餐位置</h3>
+      <h3 id="pickupMapModalTitle">🗺 校正實際取餐位置</h3>
       <button class="modal-close" onclick="closePickupMapModal()">✕</button>
     </div>
     <div class="modal-body">
-      <p style="font-size:13px;color:#888;margin-bottom:10px">請將地圖上的定位點拖曳到實際取餐入口。</p>
+      <p id="pickupMapModalDesc" style="font-size:13px;color:#888;margin-bottom:10px">請先搜尋店家、地址或地標，再拖曳定位點微調實際取餐入口。</p>
+
+      <!-- fix18-10-hotfix26-F6：🔍 搜尋店家、地址或地標 -->
+      <div style="font-size:13px;font-weight:600;margin-bottom:6px">🔍 搜尋店家、地址或地標</div>
+      <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+        <input type="text" id="pickupSearchInput" placeholder="例如：脆豬腰、龍東路130號、忠貞市場"
+          style="flex:1;min-width:160px;padding:8px;border:1px solid #ddd;border-radius:6px"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();searchPickupPlace();}">
+        <button type="button" class="btn-secondary" id="pickupSearchBtn" onclick="searchPickupPlace()" style="min-width:72px">搜尋</button>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+        <button type="button" class="btn-secondary" id="pickupSearchUseAddrBtn" onclick="usePickupAddressAsSearch()" style="flex:1;font-size:12px">帶入目前取餐地址</button>
+        <button type="button" class="btn-secondary" id="pickupSearchUseNameBtn" onclick="useStoreNameAsSearch()" style="flex:1;font-size:12px">帶入店家名稱</button>
+      </div>
+      <div id="pickup-search-status" style="font-size:12px;color:#888;margin-bottom:8px;min-height:16px"></div>
+      <div id="pickupSearchResultsList" style="display:none;margin-bottom:10px;border:1px solid #eee;border-radius:8px;max-height:180px;overflow-y:auto"></div>
+      <div id="pickupSearchSummary" style="display:none;font-size:13px;color:#333;background:#f2f7ff;border-radius:8px;padding:8px 10px;margin-bottom:10px"></div>
+
       <div id="pickupMapCanvas" style="width:100%;height:280px;border-radius:8px;background:#e0e0e0"></div>
       <div style="display:flex;gap:8px;margin:10px 0">
         <button class="btn-secondary" onclick="setPickupMapType('roadmap')" style="flex:1">🗺 地圖</button>
@@ -2100,7 +2258,7 @@
       <div id="pickup-map-status" style="font-size:12px;color:#888;margin-top:6px;min-height:18px"></div>
     </div>
     <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end;padding:16px;flex-wrap:wrap">
-      <button class="btn-secondary" onclick="pickupMapRelocateFromAddress()">重新定位取餐地址</button>
+      <button class="btn-secondary" id="pickupMapRelocateBtn" onclick="pickupMapRelocateFromAddress()">重新定位取餐地址</button>
       <button class="btn-secondary" onclick="pickupMapUseCurrentLocation()">使用目前位置</button>
       <button class="btn-secondary" onclick="closePickupMapModal()">取消</button>
       <button class="btn-primary" onclick="confirmPickupMapPin()">使用此座標</button>

@@ -67,6 +67,31 @@ const EVENT_WHITELIST = [
   'line_login_external_guide_closed',
   'line_login_external_return_detected',
   'line_login_external_retry_clicked',
+  // fix18-10-hotfix26-F8（需求文件三十一）× F8-B（需求文件十七）：
+  // Messenger →「到 LINE 完成結帳」與好友 webhook 事件，皆由後端（webhook
+  // handler／checkout-handoff route／line-orders 送單成功後）寫入，真實性
+  // 不依賴前端回報，列在白名單只是讓 logServerEvent() 可合法寫入。
+  'line_checkout_handoff',
+  'line_checkout_message_sent',
+  'line_checkout_liff_opened',
+  'line_friend_follow',
+  'line_friend_unfollow',
+  'line_friend_refollow',
+  'crm_member_created_manual',
+  'crm_member_imported',
+  'crm_member_archived',
+  'crm_member_restored',
+  'crm_member_merged',
+  'line_checkout_handoff_created',
+  'line_checkout_handoff_opened',
+  'line_checkout_cart_restored',
+  'line_checkout_handoff_expired',
+  'line_checkout_handoff_consumed',
+  // fix18-10-hotfix29-B（需求文件三～五）：Messenger Handoff 階段診斷事件。
+  // 只允許由 routes/line-checkout-handoff.js 的 /diagnostics 端點寫入
+  // （該端點已對 payload 做過白名單過濾，不含 token／完整 UID／購物車內容），
+  // 供 LINE Integration Center 的「Messenger Handoff 診斷」面板讀取。
+  'line_checkout_handoff_diagnostics',
 ];
 
 const MAX_METADATA_BYTES = 4 * 1024; // 4KB

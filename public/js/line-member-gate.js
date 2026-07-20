@@ -812,7 +812,331 @@
     externalGuideVisible = false;
   }
 
-  // options: { storeId, config, gateStage, environment, onEvent, onClose }
+  // ══════════════════════════════════════════════════════════════════
+  // fix18-10-hotfix26-F8-B（需求文件三～七）：Messenger →「到 LINE 完成結帳」。
+  // 讀取既有 ORDER_CART_KEY（line-order.html 既有購物車 localStorage 機制，見
+  // persistCart()），組成後端 /api/line-checkout-handoff/create 需要的
+  // cart.items + checkout_context，不重寫購物車邏輯、不新增第二套購物車儲存。
+  // 非 line-order.html 頁面（完全沒有這個 key）會安全回傳 null，呼叫端 fallback
+  // 到舊有「嘗試使用 LINE 開啟」流程。
+  //
+  // fix18-10-hotfix29-C（需求文件三／十）：原本「解析出 0 個有效商品」時也會
+  // 回傳 null，導致 createLineCheckoutHandoff() 直接在前端猜測是 empty_cart、
+  // 完全不呼叫 create API——後台診斷因此永遠看不到真正的 http_status（沒有
+  // 送出過請求，本來就不會有），也讓「使用者手機上明明看到購物車有商品，
+  // 但 Handoff 卻回報 empty_cart」這種矛盾無法被診斷出來。現在只有「完全沒有
+  // ORDER_CART_KEY 這個 key」（代表這個頁面根本沒有購物車機制）才回傳 null；
+  // key 存在但商品數為 0，一律照樣送到 create API，讓後端用同一套
+  // HANDOFF_EMPTY_CART 分類回應（真正的 http_status + error_code），不再由
+  // 前端自己短路猜測。
+  function _readStoredCartForHandoff(storeId) {
+    try {
+      const raw = global.localStorage.getItem('line_order_cart_' + storeId);
+      if (!raw) return null; // 這個頁面完全沒有購物車機制，Handoff 不適用
+      const data = JSON.parse(raw);
+      if (!data || !data.cart || typeof data.cart !== 'object') return null;
+      const items = Object.entries(data.cart)
+        .map(([pid, qty]) => ({ product_id: Number(pid), qty: Number(qty) }))
+        .filter(i => i.product_id && i.qty > 0);
+      // 需求文件十：items 可能是空陣列（購物車真的是空的）——不在這裡短路，
+      // 讓 create API 用一致的錯誤分類回應，前端才能拿到真正的 http_status。
+      let url;
+      try { url = new URL(global.location.href); } catch (e) { url = null; }
+      const attribution = {
+        utm_source: url ? (url.searchParams.get('utm_source') || '') : '',
+        utm_medium: url ? (url.searchParams.get('utm_medium') || '') : '',
+        utm_campaign: url ? (url.searchParams.get('utm_campaign') || '') : '',
+        utm_content: url ? (url.searchParams.get('utm_content') || '') : '',
+        fbclid: url ? (url.searchParams.get('fbclid') || '') : '',
+        referrer: (global.document && global.document.referrer) || '',
+        landing_url: getSafeCurrentPageUrl(),
+        source_platform: detectBrowserEnvironment().browser,
+      };
+      return {
+        cart: { items },
+        checkout_context: {
+          order_type: data.order_mode || '',
+          pickup_date: data.pickup_date || '',
+          pickup_time: data.pickup_time || '',
+          delivery_address: (data.customer && data.customer.delivery_address) || '',
+          delivery_note: (data.customer && data.customer.delivery_address_note) || '',
+          payment_method: data.payment_method || '',
+          coupon_code: data.coupon_code || '',
+          customer_phone: (data.customer && data.customer.phone) || '',
+        },
+        attribution,
+        // 需求文件三：安全前端診斷欄位（不含完整商品明細／電話／地址／token）。
+        _diag: {
+          cart_item_count: items.length,
+          has_store_id: !!storeId,
+          has_valid_product_id: items.every((i) => Number.isFinite(i.product_id) && i.product_id > 0),
+          has_positive_quantity: items.every((i) => Number.isFinite(i.qty) && i.qty > 0),
+        },
+      };
+    } catch (e) { return null; }
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // fix18-10-hotfix29-B（需求文件三～八）：Handoff 診斷 × Response Normalize
+  // × Timeout × 有限重試。目標——精確區分 iPhone 13 Pro／17 在 Messenger
+  // WebView 到底卡在哪個階段失敗，不再只有籠統的「無法準備 LINE 結帳」。
+  // ══════════════════════════════════════════════════════════════════
+
+  // 需求文件五：正式環境預設關閉逐階段 verbose console log，只在明確開啟時
+  // 輸出（由呼叫端依 config.line_handoff_debug 設定）。錯誤摘要本身已經過
+  // 遮罩，不受這個開關限制。
+  let _handoffDebugEnabled = false;
+  function setHandoffDebugEnabled(v) { _handoffDebugEnabled = !!v; }
+
+  function _handoffLog(stage, extra) {
+    try {
+      if (!_handoffDebugEnabled) return;
+      console.info('[LINE_HANDOFF]', Object.assign({ stage }, extra || {}));
+    } catch (e) { /* log 失敗不得影響流程 */ }
+  }
+
+  // 需求文件六：後端目前一律回傳 snake_case（見 routes/line-checkout-handoff.js），
+  // 但前端不假設永遠如此——未來欄位命名調整、或新舊後端並存時仍要能解析，
+  // 兩種命名都接受，缺欄位時明確回傳 null（不是 undefined，方便判斷）。
+  function normalizeHandoffResponse(raw) {
+    const r = raw || {};
+    return {
+      ok: r.ok === true,
+      cartCode: r.cart_code || r.cartCode || null,
+      lineOaMessageUrl: r.line_oa_message_url || r.lineOaMessageUrl || null,
+      lineOaConfigured: !!(r.line_oa_configured !== undefined ? r.line_oa_configured : r.lineOaConfigured),
+      // fix18-10-hotfix29-C（需求文件九）：add_friend_url 一併 normalize，讓
+      // create API 的回應成為前端唯一的、最新鮮的 add_friend_url 來源。
+      addFriendUrl: r.add_friend_url || r.addFriendUrl || null,
+      expiresAt: r.expires_at || r.expiresAt || null,
+      errorCode: r.error_code || r.errorCode || null,
+      message: r.message || null,
+    };
+  }
+
+  // 需求文件七：不讓 Messenger WebView 無限 pending。AbortController 在極舊
+  // WebView 若不存在，安全退化成「不加 timeout」，不拋例外中斷流程。
+  async function fetchWithTimeout(url, options, timeoutMs) {
+    const ms = timeoutMs || 8000;
+    if (typeof global.AbortController !== 'function') {
+      return global.fetch(url, options);
+    }
+    const controller = new global.AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    try {
+      return await global.fetch(url, Object.assign({}, options, { signal: controller.signal }));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // 需求文件八：只有這幾類錯誤可自動重試，最多重試一次（共兩次嘗試）。
+  // store setting missing／Basic ID missing／invalid cart／empty cart／
+  // HTTP 400／401／403 都不重試（重試也不會成功，只會拖長等待）。
+  // 需求文件八：只有暫時性錯誤可重試——網路/timeout/5xx／DB 暫時失敗／內部
+  // 錯誤都可能只是瞬時問題；購物車資料本身有問題（empty/invalid/缺商品ID/
+  // 數量不合法）或 store 設定問題重試也不會變好，不重試。
+  const HANDOFF_RETRYABLE_CODES = {
+    HANDOFF_TIMEOUT: 1, HANDOFF_NETWORK: 1, HANDOFF_HTTP_5XX: 1, HANDOFF_INVALID_JSON: 1,
+    HANDOFF_CREATE_DB_FAILED: 1, HANDOFF_CREATE_INTERNAL_ERROR: 1,
+  };
+  // 需求文件八／十一：獨立成小函式方便 smoke test 直接驗證分類規則，不用
+  // 每次都跑一整輪 fetch mock。
+  function shouldRetryHandoff(errorCode) { return !!HANDOFF_RETRYABLE_CODES[errorCode]; }
+
+  // 需求文件十五：使用者可截圖回報的簡短代碼，不顯示技術堆疊。
+  const HANDOFF_ERROR_DISPLAY_MAP = {
+    HANDOFF_TIMEOUT: 'HOF-TIMEOUT',
+    HANDOFF_NETWORK: 'HOF-NETWORK',
+    HANDOFF_HTTP_4XX: 'HOF-HTTP-4XX',
+    HANDOFF_HTTP_5XX: 'HOF-HTTP-5XX',
+    HANDOFF_INVALID_JSON: 'HOF-INVALID-JSON',
+    HANDOFF_MISSING_CART_CODE: 'HOF-MISSING-CODE',
+    HANDOFF_MISSING_LINE_URL: 'HOF-MISSING-URL',
+    HANDOFF_UI_APPLY_FAILED: 'HOF-UI',
+    // fix18-10-hotfix29-C（需求文件五）：後端 create API 明確錯誤分類，對應
+    // 顯示碼，讓顧客回報的不再只是「HOF-UNKNOWN」。
+    HANDOFF_EMPTY_CART: 'HOF-EMPTY-CART',
+    HANDOFF_INVALID_CART: 'HOF-INVALID-CART',
+    HANDOFF_PRODUCT_ID_MISSING: 'HOF-BAD-PRODUCT',
+    HANDOFF_QUANTITY_INVALID: 'HOF-BAD-QTY',
+    HANDOFF_STORE_ID_MISSING: 'HOF-NO-STORE',
+    HANDOFF_STORE_NOT_FOUND: 'HOF-STORE-404',
+    HANDOFF_BASIC_ID_MISSING: 'HOF-NO-BASIC-ID',
+    HANDOFF_ADD_FRIEND_URL_MISSING: 'HOF-NO-ADD-FRIEND',
+    HANDOFF_CREATE_DB_FAILED: 'HOF-DB',
+    HANDOFF_CREATE_INTERNAL_ERROR: 'HOF-INTERNAL',
+  };
+  function handoffErrorCodeToDisplay(code) { return HANDOFF_ERROR_DISPLAY_MAP[code] || 'HOF-UNKNOWN'; }
+
+  function classifyHandoffDeviceBrowser(environment) {
+    const device = environment.isIOS ? 'iphone' : (environment.isAndroid ? 'android' : 'other');
+    const browser = environment.isLine ? 'line_liff'
+      : (environment.isFacebook ? 'messenger_webview' : (environment.isInstagram ? 'instagram_webview' : 'other'));
+    return { device, browser };
+  }
+
+  // 需求文件五：回報安全診斷摘要給後端（fire-and-forget，絕不 await、絕不
+  // 因為失敗而擋住結帳主流程；payload 只放白名單欄位，見後端
+  // routes/line-checkout-handoff.js 的 /diagnostics 端點）。
+  function reportHandoffDiagnostics(storeId, fields) {
+    try {
+      if (!global.fetch) return;
+      const p = global.fetch(`/api/line-checkout-handoff/diagnostics?store_id=${encodeURIComponent(storeId)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(fields || {}),
+      });
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } catch (e) { /* 診斷回報失敗不得影響結帳主流程 */ }
+  }
+
+  // 需求文件五～八：呼叫後端建立 cart token。內建 timeout／錯誤分類／有限
+  // 重試／診斷回報，回傳值一律經過 normalizeHandoffResponse()，並附上
+  // errorCode 讓呼叫端能顯示需求文件十五的 HOF-* 代碼。
+  async function createLineCheckoutHandoff(storeId, diagCtx) {
+    const ctx = diagCtx || { device: 'other', browser: 'other' };
+
+    const payload = _readStoredCartForHandoff(storeId);
+    if (!payload) {
+      // 需求文件三：這個頁面完全沒有 ORDER_CART_KEY（沒有購物車機制），Handoff
+      // 真的不適用，不送出任何請求——但仍回報一次診斷（帶真正的錯誤碼，不再是
+      // null），避免後台完全看不到發生過什麼（fix18-10-hotfix29-C 根因修正）。
+      reportHandoffDiagnostics(storeId, {
+        device: ctx.device, browser: ctx.browser,
+        stage: 'request_started', attempt: 1, error_code: 'HANDOFF_EMPTY_CART',
+        has_cart_code: false, has_line_oa_message_url: false, fallback_reason: 'no_cart_storage_key',
+        response_ok: false, ui_cart_count: 0, payload_cart_count: 0,
+        has_add_friend_url: !!ctx.hasAddFriendUrl,
+      });
+      return { ok: false, reason: 'empty_cart', errorCode: 'HANDOFF_EMPTY_CART', httpStatus: null, uiCartCount: 0, payloadCartCount: 0 };
+    }
+
+    // 需求文件十：這個專案的購物車只有一份權威來源——line-order.html／
+    // line-shipping.html 的 in-memory cart 物件在每次變動時同步 persistCart()
+    // 寫入 localStorage（見 public/line-order.html persistCart()），
+    // _readStoredCartForHandoff() 讀的正是同一份資料，因此「畫面顯示的購物車
+    // 件數」與「送進 create API 的件數」在這個架構下永遠是同一個數字，不存在
+    // 兩個分岔來源。這裡誠實回報同一個數字給 ui_cart_count／payload_cart_count
+    // （不偽造一個不會發生的「不一致」），HANDOFF_CART_SNAPSHOT_MISMATCH 這個
+    // 錯誤碼已加入白名單，保留給未來若真的出現第二個購物車來源時使用。
+    const diagCartCount = (payload._diag && payload._diag.cart_item_count) || 0;
+    // 需求文件三：只送 create API 需要的欄位，_diag 是純前端安全診斷用途，
+    // 不隨 payload 送出（不送完整商品明細以外的東西，也不重複塞進 request body）。
+    const requestPayload = { cart: payload.cart, checkout_context: payload.checkout_context, attribution: payload.attribution };
+
+    const report = (fields) => reportHandoffDiagnostics(storeId, Object.assign({
+      device: ctx.device, browser: ctx.browser,
+      ui_cart_count: diagCartCount, payload_cart_count: diagCartCount,
+      has_add_friend_url: !!ctx.hasAddFriendUrl,
+    }, fields));
+
+    let lastResult = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      if (attempt > 1) {
+        _handoffLog('retry_started', { attempt });
+        report({ stage: 'retry_started', attempt });
+        await new Promise((r) => setTimeout(r, 500 + Math.floor(Math.random() * 300))); // 需求文件八：500~800ms
+      }
+      _handoffLog('request_started', { attempt });
+      report({ stage: 'request_started', attempt });
+
+      let resp = null;
+      let httpStatus = null;
+      try {
+        resp = await fetchWithTimeout(`/api/line-checkout-handoff/create?store_id=${encodeURIComponent(storeId)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestPayload),
+        }, 8000);
+        httpStatus = resp.status;
+      } catch (e) {
+        // 需求文件二／三：這個 catch 分支代表 fetch 真的沒有拿到任何 HTTP
+        // response（timeout 被 AbortController 中止，或連線層網路錯誤）——
+        // 這是「HTTP status 為 - 」唯一合理、誠實的情況（可能①②），一定要
+        // 明確標記 response_ok:false，不能讓這筆記錄的其他欄位看起來像是
+        // 「正常收到回應但缺欄位」（那才是可能③：reportDiagnostics 沒帶好）。
+        const errorCode = (e && e.name === 'AbortError') ? 'HANDOFF_TIMEOUT' : 'HANDOFF_NETWORK';
+        _handoffLog('request_completed', { attempt, error_code: errorCode });
+        report({ stage: 'request_completed', attempt, error_code: errorCode, http_status: null, response_ok: false, has_cart_code: false, has_line_oa_message_url: false });
+        lastResult = { ok: false, reason: errorCode === 'HANDOFF_TIMEOUT' ? 'timeout' : 'network_error', errorCode, httpStatus: null, uiCartCount: diagCartCount, payloadCartCount: diagCartCount };
+        if (shouldRetryHandoff(errorCode) && attempt < 2) continue;
+        break;
+      }
+
+      // 需求文件二：這裡代表 fetch 真的送出去、也真的收到 HTTP response 了
+      // （排除了①②）——response_received 階段，httpStatus 從此以後在這次
+      // attempt 的每一筆 report() 都會帶著，不會再變成 null／"-"。
+      _handoffLog('request_completed', { attempt, http_status: httpStatus });
+      report({ stage: 'request_completed', attempt, http_status: httpStatus, response_ok: resp.ok });
+
+      // 需求文件九：不論 HTTP 狀態碼是否為 2xx，後端一律回 JSON body（含
+      // error_code／message，見 routes/line-checkout-handoff.js），一律先嘗試
+      // 解析，不再只憑 http status 猜錯誤碼。
+      let raw = null;
+      let parseFailed = false;
+      try { raw = await resp.json(); } catch (e) { parseFailed = true; }
+
+      if (parseFailed) {
+        _handoffLog('response_parsed', { attempt, error_code: 'HANDOFF_INVALID_JSON' });
+        report({ stage: 'response_parsed', attempt, http_status: httpStatus, response_ok: false, error_code: 'HANDOFF_INVALID_JSON', has_cart_code: false, has_line_oa_message_url: false });
+        lastResult = { ok: false, reason: 'invalid_json', errorCode: 'HANDOFF_INVALID_JSON', httpStatus, uiCartCount: diagCartCount, payloadCartCount: diagCartCount };
+        if (attempt < 2) continue;
+        break;
+      }
+
+      const normalized = normalizeHandoffResponse(raw);
+      _handoffLog('response_parsed', { attempt, has_cart_code: !!normalized.cartCode });
+      // 需求文件二：response_parsed 階段本身也上報一次（之前只有 console log，
+      // 從未送到後端），確保五個階段 request_started／request_completed
+      // （＝request_sent+response_received）／response_parsed／response_validated
+      // 在後台都能看到，不再「中間憑空消失」。
+      report({ stage: 'response_parsed', attempt, http_status: httpStatus, response_ok: resp.ok, has_cart_code: !!normalized.cartCode, has_line_oa_message_url: !!normalized.lineOaMessageUrl });
+
+      if (!resp.ok || !normalized.ok) {
+        // 需求文件九：優先用後端明確給的 error_code（例如 HANDOFF_EMPTY_CART／
+        // HANDOFF_INVALID_CART），只有後端真的沒給時才退回用 HTTP 狀態碼粗略
+        // 分類——這是本版修正「後台永遠只看到 HOF-UNKNOWN／全部空白」的根因。
+        const errorCode = normalized.errorCode || (httpStatus >= 500 ? 'HANDOFF_HTTP_5XX' : 'HANDOFF_HTTP_4XX');
+        report({ stage: 'response_validated', attempt, http_status: httpStatus, response_ok: false, error_code: errorCode, has_cart_code: false, has_line_oa_message_url: false, fallback_reason: normalized.message ? 'server_message' : null });
+        lastResult = { ok: false, reason: normalized.message || 'create_failed', errorCode, httpStatus, uiCartCount: diagCartCount, payloadCartCount: diagCartCount };
+        if (shouldRetryHandoff(errorCode) && attempt < 2) continue;
+        break;
+      }
+      if (!normalized.cartCode) {
+        report({ stage: 'response_validated', attempt, http_status: httpStatus, response_ok: true, error_code: 'HANDOFF_MISSING_CART_CODE', has_cart_code: false, has_line_oa_message_url: !!normalized.lineOaMessageUrl });
+        lastResult = { ok: false, reason: 'missing_cart_code', errorCode: 'HANDOFF_MISSING_CART_CODE', httpStatus, uiCartCount: diagCartCount, payloadCartCount: diagCartCount };
+        break;
+      }
+
+      report({ stage: 'response_validated', attempt, http_status: httpStatus, response_ok: true, has_cart_code: true, has_line_oa_message_url: !!normalized.lineOaMessageUrl });
+      // 需求文件九：addFriendUrl 一併帶回——這是後端用同一套 resolveAddFriendUrl()
+      // 解析出來的正式值，取代前端舊有只讀 config.add_friend_url（可能來自
+      // 另一個舊欄位）的做法，修正「後台明明有設定，畫面卻顯示未設定」。
+      return {
+        ok: true,
+        cartCode: normalized.cartCode,
+        lineOaMessageUrl: normalized.lineOaMessageUrl,
+        lineOaConfigured: normalized.lineOaConfigured,
+        addFriendUrl: normalized.addFriendUrl,
+        httpStatus, uiCartCount: diagCartCount, payloadCartCount: diagCartCount,
+      };
+    }
+
+    return lastResult || { ok: false, reason: 'create_failed', errorCode: 'HANDOFF_UNKNOWN', httpStatus: null, uiCartCount: diagCartCount, payloadCartCount: diagCartCount };
+  }
+
+  async function copyToClipboard(text) {
+    try {
+      if (global.navigator && global.navigator.clipboard && global.navigator.clipboard.writeText) {
+        await global.navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+
   function showExternalBrowserLoginGuide(config, options) {
     const storeId = options && options.storeId;
     const gateStage = (options && options.gateStage) || '';
@@ -836,44 +1160,107 @@
     const osHintLabel = environment.isIOS ? '如何使用 Safari 開啟'
       : (environment.isAndroid ? '使用 Chrome 開啟' : '如何用瀏覽器開啟');
 
-    // fix18-10-hotfix26-F2（需求文件一）：iOS 上 Messenger/Instagram WebView 對外部
-    // App 喚醒本來就有官方限制，不宜再引導使用者「直接嘗試用 LINE 開啟」當作首選——
-    // 改成官方建議流程（提示改用 Safari 開啟 → 在 Safari 內完成 LINE 登入）。Android
-    // 維持原本文案與流程完全不動（Messenger→Chrome→LINE Login 本來就能自動登入）。
-    const introHtmlLegacy = environment.isIOS
-      ? `您目前正在 Facebook／Instagram 內建瀏覽器中。<br><br>iOS 上的內建瀏覽器可能無法直接完成 LINE 自動登入。<br><br>請點右上角「⋯」，選擇「在 Safari 中開啟」，即可直接使用 LINE 登入。<br><br>購物車內容會為您保留。`
-      : `您目前正在 Facebook／Instagram 內建瀏覽器中。<br><br>直接登入可能會要求輸入 LINE 電子郵件與密碼。<br><br>建議改用 LINE App 開啟，即可更安全、快速地完成會員登入，購物車內容會為您保留。`;
+    // fix18-10-hotfix27（需求文件九）：文案改版——強調「購物車已保留，不需要
+    // 重新選購」，不再出現「商家尚未設定官方帳號…」這種曝露內部設定狀態的
+    // 字樣（改成引導動作：加入官方 LINE＋貼結帳代碼）。
+    // fix18-10-hotfix29（需求文件二）：真機測試證實 Messenger WebView 上
+    // 「到 LINE 完成結帳」（<a href> 開 oaMessage 連結）常常沒有反應，真正
+    // 能成功的是「開啟 LINE 官方帳號」（純加好友連結，較不受 WebView 的
+    // scheme/redirect 限制）。iPhone＋Messenger/Instagram 時，把這個方法
+    // 放第一順位、預設展開，不要求顧客自己發現「還有其他辦法」。Android
+    // 「到 LINE 完成結帳」成功率仍高，維持原順位（需求文件六）。
+    const isIphoneMessenger = environment.isIOS && environment.isInAppBrowser;
 
-    // fix18-10-hotfix26-F3（Fix-2）：iOS 專用引導畫面——標題／文案／按鈕改採需求文件
-    // 指定的 Chrome 優先版型（使用 Chrome 開啟／如何使用 Safari 開啟／複製點餐連結），
-    // 不再把「嘗試使用 LINE 開啟」當 iOS 的主要按鈕（LINE / iOS / Messenger WebView
-    // 官方本來就有限制，不宜宣稱這個按鈕會成功）。Android／其他瀏覽器分支完全維持
-    // hotfix26-F2 原本的標題／文案／四個按鈕不變，一個字都不動。
-    const headingText = environment.isIOS ? '請改用外部瀏覽器完成 LINE 登入' : '請使用 LINE 完成會員登入';
-    const introHtml = environment.isIOS
-      ? `目前 Facebook／Messenger／Instagram 內建瀏覽器限制，可能要求重新輸入 LINE 帳號密碼。<br><br>建議改用 Chrome 或 Safari 開啟。<br><br>購物車內容會保留。`
-      : introHtmlLegacy;
+    const headingText = 'LINE 完成結帳';
+    const introHtml = `目前使用 Facebook／Messenger 內建瀏覽器。<br><br>請到 LINE 繼續完成結帳。<br><br>您的購物車已保留，不需要重新選購。`;
 
-    const iosButtonsHtml = `
-        <button id="lmgChromeBtn" style="width:100%;padding:12px;border:0;border-radius:10px;background:#06C755;color:#fff;font-size:15px;font-weight:600;margin-bottom:8px;cursor:pointer">使用 Chrome 開啟</button>
-        <div style="font-size:12px;color:#888;text-align:center;margin-bottom:6px">若 Chrome 仍無法完成登入，請使用 Safari。</div>
-        <button id="lmgSafariBtn" style="width:100%;padding:12px;border:1px solid #06C755;border-radius:10px;background:#fff;color:#06C755;font-size:14px;font-weight:600;cursor:pointer;margin-bottom:8px">如何使用 Safari 開啟</button>
-        <button id="lmgCopyLinkBtn" style="width:100%;padding:12px;border:1px solid #ccc;border-radius:10px;background:#fff;color:#333;font-size:14px;font-weight:600;cursor:pointer;margin-bottom:8px">複製點餐連結</button>
-        <button id="lmgExternalBackBtn" style="width:100%;padding:10px;border:0;background:transparent;color:#999;font-size:13px;cursor:pointer;text-align:center">返回購物車</button>`;
-    // fix18-10-hotfix26-F2 原始版型（Android／其他瀏覽器維持不變，逐字未改）：
-    const legacyButtonsHtml = `
-        <button id="lmgOpenLineBtn" style="width:100%;padding:12px;border:0;border-radius:10px;background:#06C755;color:#fff;font-size:15px;font-weight:600;margin-bottom:8px;cursor:pointer">嘗試使用 LINE 開啟</button>
-        <button id="lmgOsHintBtn" style="width:100%;padding:12px;border:1px solid #06C755;border-radius:10px;background:#fff;color:#06C755;font-size:14px;font-weight:600;cursor:pointer;margin-bottom:8px">${escapeHtml(osHintLabel)}</button>
-        <button id="lmgCopyLinkBtn" style="width:100%;padding:12px;border:1px solid #ccc;border-radius:10px;background:#fff;color:#333;font-size:14px;font-weight:600;cursor:pointer;margin-bottom:8px">複製點餐連結</button>
-        <button id="lmgExternalBackBtn" style="width:100%;padding:10px;border:0;background:transparent;color:#999;font-size:13px;cursor:pointer;text-align:center">返回購物車</button>`;
+    // 需求文件四：Chrome／Safari 收合在「其他登入方式 ▼」內，用原生 <details>
+    // 實作（不需額外 JS 控制展開/收合狀態，預設收合＝沒有 open 屬性）。這個
+    // 收合區塊是既有「登入方式」選項，與本次要拆掉的「無法開啟 LINE？」
+    // 結帳 fallback 是不同東西，不受本次需求文件三影響。
+    const otherLoginInnerHtml = environment.isIOS
+      ? `<button id="lmgChromeBtn" style="width:100%;padding:12px;border:0;border-radius:10px;background:#06C755;color:#fff;font-size:15px;font-weight:600;margin-bottom:8px;cursor:pointer">使用 Chrome 開啟</button>
+         <div style="font-size:12px;color:#888;text-align:center;margin-bottom:6px">若 Chrome 仍無法完成登入，請使用 Safari。</div>
+         <button id="lmgSafariBtn" style="width:100%;padding:12px;border:1px solid #06C755;border-radius:10px;background:#fff;color:#06C755;font-size:14px;font-weight:600;cursor:pointer">如何使用 Safari 開啟</button>`
+      : `<button id="lmgOpenLineBtn" style="width:100%;padding:12px;border:0;border-radius:10px;background:#06C755;color:#fff;font-size:15px;font-weight:600;margin-bottom:8px;cursor:pointer">嘗試使用 LINE 開啟</button>
+         <button id="lmgOsHintBtn" style="width:100%;padding:12px;border:1px solid #06C755;border-radius:10px;background:#fff;color:#06C755;font-size:14px;font-weight:600;cursor:pointer">${escapeHtml(osHintLabel)}</button>`;
+
+    // 需求文件七／十二：Icon 靠左、文字靠右，56px 高、12px 圓角、32px icon、
+    // 100% 寬——所有按鈕統一用這個 helper 產生，不再各寫各的樣式。
+    function iconButtonHtml(id, tag, icon, text, opts) {
+      const o = opts || {};
+      const bg = o.bg || '#fff';
+      const color = o.color || '#111';
+      const border = o.border || '1px solid #ddd';
+      const fontWeight = o.fontWeight || '600';
+      const extraAttrs = o.extraAttrs || '';
+      return `<${tag} id="${id}" ${tag === 'a' ? 'href="#" rel="noopener noreferrer"' : ''} ${extraAttrs}
+        style="display:flex;align-items:center;gap:12px;width:100%;height:56px;padding:0 18px;border-radius:12px;border:${border};background:${bg};color:${color};font-size:16px;font-weight:${fontWeight};text-decoration:none;cursor:pointer;box-sizing:border-box;text-align:left">
+        <span style="font-size:28px;line-height:1;flex-shrink:0;width:32px;text-align:center">${icon}</span>
+        <span style="flex:1">${text}</span>
+      </${tag}>`;
+    }
+
+    // 需求文件四／六：「立即開啟 LINE 官方帳號」是本版真正要推的按鈕（加入
+    // 好友連結，不是 oaMessage 連結），與既有「到 LINE 完成結帳」（Cart Token
+    // 的 <a href>）並列，不互相取代——iPhone+Messenger 時前者排第一。
+    const openOaHtml = iconButtonHtml('lmgOpenOaBtn', 'a', '<span style="color:#06C755;font-weight:900">L</span>', '立即開啟 LINE 官方帳號', { bg: '#06C755', color: '#fff', border: '0', fontWeight: '700' });
+    const goCheckoutHtml = `<a id="lmgGoLineCheckoutBtn" href="#" rel="noopener noreferrer" aria-disabled="true"
+        style="display:flex;align-items:center;gap:12px;width:100%;height:56px;padding:0 18px;border-radius:12px;border:0;background:#06C755;color:#fff;font-size:16px;font-weight:700;text-decoration:none;cursor:pointer;box-sizing:border-box;text-align:left;opacity:.55;pointer-events:none">
+        <span style="font-size:28px;line-height:1;flex-shrink:0;width:32px;text-align:center">💬</span>
+        <span id="lmgGoLineCheckoutBtnText" style="flex:1">到 LINE 完成結帳</span>
+      </a>`;
+    const copyCodeHtml = iconButtonHtml('lmgCopyCartCodeBtn', 'button', '📋', '複製結帳代碼', {});
+    const externalBrowserLabel = environment.isIOS ? '在 Safari 開啟' : '在外部瀏覽器開啟';
+    const externalBrowserHtml = iconButtonHtml('lmgExternalBrowserBtn', 'button', '🌐', externalBrowserLabel, {});
+
+    // 需求文件三／十：拿掉 <details>/<summary> 收合，永遠展開；需求文件五：
+    // 紅色警示區塊放在按鈕上方，第一眼就看到「如果沒反應，點哪一個」。
+    const warningBannerHtml = `
+      <div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:10px;padding:12px;margin-bottom:14px;font-size:13px;color:#991b1b;line-height:1.6">
+        ⚠️ Messenger 可能限制直接開啟 LINE。<br>如果上方按鈕沒有反應，請直接點「立即開啟 LINE 官方帳號」即可完成結帳。
+      </div>`;
+    const fallbackSectionHtml = `
+      <div id="lmgCantOpenSection" style="margin-top:14px">
+        <div style="text-align:center;font-weight:700;font-size:14px;color:#991b1b;margin-bottom:4px">⚠️ Messenger 無法開啟 LINE？</div>
+        <div style="text-align:center;font-size:13px;color:#666;margin-bottom:12px">請直接使用下面的方法完成結帳</div>
+        <div style="display:flex;flex-direction:column;gap:16px">
+          ${isIphoneMessenger ? '' : openOaHtml}
+          ${copyCodeHtml}
+          ${externalBrowserHtml}
+        </div>
+        <div style="margin-top:12px;font-size:12px;color:#888;line-height:1.6;text-align:center">
+          💡 若 Messenger 無法直接開啟 LINE，請直接點【立即開啟 LINE 官方帳號】成功率最高。${environment.isIOS ? '<br>iPhone：建議使用 Safari。' : ''}
+        </div>
+      </div>`;
+
+    // 需求文件六／最後建議：iPhone＋Messenger 時，「立即開啟 LINE 官方帳號」
+    // 排第一順位、最醒目；「到 LINE 完成結帳」仍保留（次要位置）。其他環境
+    // （Android 等）維持「到 LINE 完成結帳」在前，因為那裡成功率仍然最高。
+    const primaryButtonsHtml = isIphoneMessenger
+      ? `<div style="display:flex;flex-direction:column;gap:16px;margin-bottom:14px">${openOaHtml}${goCheckoutHtml}</div>`
+      : `<div style="display:flex;flex-direction:column;gap:16px;margin-bottom:14px">${goCheckoutHtml}</div>`;
 
     externalGuideEl.innerHTML = `
-      <div style="background:#fff;border-radius:16px;max-width:380px;width:100%;padding:24px;text-align:left;font-family:inherit">
+      <div style="background:#fff;border-radius:16px;max-width:380px;width:100%;padding:24px;text-align:left;font-family:inherit;max-height:90vh;overflow-y:auto">
         <div style="font-size:40px;line-height:1;margin-bottom:8px;text-align:center">📲</div>
-        <h3 style="margin:0 0 8px;font-size:18px;text-align:center">${escapeHtml(headingText)}</h3>
-        <p style="margin:0 0 12px;color:#666;font-size:14px;line-height:1.6">${introHtml}</p>
-        <div style="background:#fff7e6;border:1px solid #ffd580;border-radius:8px;padding:8px 10px;margin-bottom:14px;font-size:13px;color:#a15c00">⚠ 不需要在此頁輸入 LINE 帳號密碼。</div>
-        <div id="lmgExternalStatus" style="font-size:13px;color:#888;margin-bottom:10px;text-align:center"></div>${environment.isIOS ? iosButtonsHtml : legacyButtonsHtml}
+        <h3 id="lmgGuideHeading" style="margin:0 0 8px;font-size:18px;text-align:center">${escapeHtml(headingText)}</h3>
+        <p id="lmgGuideIntro" style="margin:0 0 12px;color:#666;font-size:14px;line-height:1.6">${introHtml}</p>
+        <div id="lmgExternalStatus" style="font-size:13px;color:#888;margin-bottom:10px;text-align:center"></div>
+        <div id="lmgCartCodeBlock" style="display:none;text-align:center;border:1px dashed #06C755;border-radius:10px;padding:12px;margin-bottom:12px;background:#f4fdf8">
+          <div style="font-size:12px;color:#888;margin-bottom:4px">您的結帳代碼</div>
+          <div id="lmgCartCodeText" style="font-size:20px;font-weight:700;letter-spacing:1px;color:#06C755;font-family:monospace"></div>
+        </div>
+        <div id="lmgHandoffErrorCode" style="display:none;text-align:center;font-size:12px;color:#991b1b;margin-bottom:10px;font-family:monospace"></div>
+        ${warningBannerHtml}
+        ${primaryButtonsHtml}
+        ${fallbackSectionHtml}
+        <button id="lmgRegenerateTokenBtn" style="display:none;width:100%;padding:12px;border:1px solid #06C755;border-radius:10px;background:#fff;color:#06C755;font-size:14px;font-weight:600;cursor:pointer;margin-top:14px">🔁 重新產生結帳代碼</button>
+        <button id="lmgExternalBackBtn" style="width:100%;padding:10px;border:0;background:transparent;color:#999;font-size:13px;cursor:pointer;text-align:center;margin-top:10px">返回購物車</button>
+        <details id="lmgOtherLoginDetails" style="margin-top:8px">
+          <summary style="cursor:pointer;color:#666;font-size:13px;padding:6px 0;list-style:none;text-align:center">其他登入方式 ▾</summary>
+          <div style="margin-top:10px">${otherLoginInnerHtml}</div>
+        </details>
       </div>`;
     document.body.appendChild(externalGuideEl);
     externalGuideVisible = true;
@@ -951,8 +1338,450 @@
     const osHintBtn = externalGuideEl.querySelector('#lmgOsHintBtn');
     const chromeBtn = externalGuideEl.querySelector('#lmgChromeBtn');
     const safariBtn = externalGuideEl.querySelector('#lmgSafariBtn');
-    const copyBtn = externalGuideEl.querySelector('#lmgCopyLinkBtn');
     const backBtn = externalGuideEl.querySelector('#lmgExternalBackBtn');
+    const goLineCheckoutBtn = externalGuideEl.querySelector('#lmgGoLineCheckoutBtn');
+    const cartCodeBlock = externalGuideEl.querySelector('#lmgCartCodeBlock');
+    const cartCodeText = externalGuideEl.querySelector('#lmgCartCodeText');
+    const headingEl = externalGuideEl.querySelector('#lmgGuideHeading');
+    const introEl = externalGuideEl.querySelector('#lmgGuideIntro');
+
+    function showCartCode(code) {
+      if (!cartCodeBlock || !cartCodeText || !code) return;
+      cartCodeText.textContent = code;
+      cartCodeBlock.style.display = 'block';
+      const copyCodeBtn = externalGuideEl.querySelector('#lmgCopyCartCodeBtn');
+      if (copyCodeBtn && !copyCodeBtn._wired) {
+        copyCodeBtn._wired = true; // 需求文件九：只綁一次，重新產生代碼時沿用同一個 handler，不重複綁定
+        copyCodeBtn.addEventListener('click', async () => {
+          if (copyCodeBtn.disabled) return;
+          const codeNow = currentHandoff && currentHandoff.cartCode ? currentHandoff.cartCode : code;
+          const copied = await copyToClipboard(codeNow);
+          setExternalStatus(copied ? `已複製結帳代碼：${escapeHtml(codeNow)}` : `請手動複製：${escapeHtml(codeNow)}`, false);
+        });
+      }
+    }
+
+    // 需求文件四：failed／preparing 狀態不得顯示舊／過期的 Cart Code。
+    function hideCartCode() {
+      if (cartCodeBlock) cartCodeBlock.style.display = 'none';
+      if (cartCodeText) cartCodeText.textContent = '';
+    }
+
+    // 需求文件五：接上 #lmgHandoffErrorCode——只顯示 HOF-* 短碼，不顯示技術堆疊。
+    function showHandoffErrorCode(errorCode) {
+      const codeEl = externalGuideEl.querySelector('#lmgHandoffErrorCode');
+      if (!codeEl) return;
+      if (!errorCode) {
+        codeEl.hidden = true;
+        codeEl.style.display = 'none';
+        codeEl.textContent = '';
+        return;
+      }
+      codeEl.hidden = false;
+      codeEl.style.display = 'block';
+      codeEl.textContent = `錯誤代碼：${handoffErrorCodeToDisplay(errorCode)}`;
+    }
+
+    function setCopyButtonEnabled(enabled) {
+      const copyCodeBtn = externalGuideEl.querySelector('#lmgCopyCartCodeBtn');
+      if (!copyCodeBtn) return;
+      copyCodeBtn.disabled = !enabled;
+      copyCodeBtn.style.opacity = enabled ? '' : '.55';
+      copyCodeBtn.style.pointerEvents = enabled ? '' : 'none';
+    }
+
+    function disableGoLineCheckoutBtn() {
+      if (!goLineCheckoutBtn) return;
+      goLineCheckoutBtn.href = '#';
+      goLineCheckoutBtn.setAttribute('aria-disabled', 'true');
+      goLineCheckoutBtn.style.opacity = '.55';
+      goLineCheckoutBtn.style.pointerEvents = 'none';
+    }
+    function enableGoLineCheckoutBtn(href) {
+      if (!goLineCheckoutBtn) return;
+      const textEl = externalGuideEl.querySelector('#lmgGoLineCheckoutBtnText');
+      if (textEl) textEl.textContent = '到 LINE 完成結帳';
+      goLineCheckoutBtn.href = href;
+      goLineCheckoutBtn.removeAttribute('aria-disabled');
+      goLineCheckoutBtn.style.opacity = '';
+      goLineCheckoutBtn.style.pointerEvents = '';
+    }
+
+    // 需求文件九／十：店家尚未完成一鍵結帳設定（result.ok===true 但沒有
+    // line_oa_configured）時，整個 Dialog 換一套文案／主按鈕；只有這種情境
+    // 或真正的 failed 狀態才會呼叫這個函式。需求文件三：ready 狀態不得被
+    // 覆蓋——一旦已經 ready，這個函式直接是 no-op。
+    function switchToAddFriendFallback(cartCode) {
+      if (handoffState === 'ready') return;
+      if (headingEl) headingEl.textContent = '請加入官方 LINE 完成結帳';
+      if (introEl) {
+        introEl.innerHTML = '目前商家尚未完成 LINE 一鍵結帳設定。<br><br>請加入官方 LINE，並將下方結帳代碼貼到聊天室即可繼續完成結帳。';
+      }
+      if (goLineCheckoutBtn) {
+        const goLineCheckoutBtnText = externalGuideEl.querySelector('#lmgGoLineCheckoutBtnText');
+        if (goLineCheckoutBtnText) goLineCheckoutBtnText.textContent = '➕ 加入官方 LINE';
+        const addFriendUrl = resolvedAddFriendUrl || (config && config.add_friend_url) || '';
+        if (addFriendUrl) {
+          goLineCheckoutBtn.href = addFriendUrl;
+          goLineCheckoutBtn.removeAttribute('aria-disabled');
+          goLineCheckoutBtn.style.opacity = '';
+          goLineCheckoutBtn.style.pointerEvents = '';
+        }
+      }
+      if (cartCode) showCartCode(cartCode);
+      setExternalStatus('請加入官方 LINE，並將結帳代碼貼到聊天室即可繼續完成結帳。', false);
+    }
+
+    // fix18-10-hotfix29-C（需求文件十二）：setExternalStatus() 會把每個 '<' 都
+    // escape 掉（避免任何動態／伺服器文字被誤判成 HTML），這對一般文字是對的，
+    // 但也代表它不能拿來顯示我們自己寫的 <br> 換行——那樣 <br> 會變成畫面上的
+    // 逐字文字（真機截圖就是這個症狀）。這個 helper 只能傳入「完全固定、不含
+    // 任何動態內插」的程式碼字串（方式 A），絕不可用來顯示使用者輸入或後端
+    // 回傳訊息——那些必須繼續走 setExternalStatus() 的 escaping。
+    function setExternalStatusFixedHtml(fixedHtml) {
+      const el = externalGuideEl.querySelector('#lmgExternalStatus');
+      if (!el) return;
+      el.innerHTML = fixedHtml;
+    }
+
+    // 需求文件十：Handoff 兩次建立都失敗時的官方 LINE 引導文案——沒有可用
+    // Token 時不得宣稱「購物車已保留，可直接繼續結帳」。
+    function showHandoffFailedGuideText() {
+      setExternalStatusFixedHtml('暫時無法建立本次結帳代碼。<br><br>請先加入官方 LINE，<br>再從 LINE 圖文選單重新進入線上點餐。');
+    }
+
+    // 需求文件十三：若確認真的沒有 add_friend_url（後端 resolveAddFriendUrl()
+    // 兩個來源都是空的），不得再顯示會誤導的「商家尚未設定加入好友網址」小提示
+    // 而已——要整個停用「立即開啟 LINE 官方帳號」按鈕，並給更明確的說明。
+    function showAddFriendUrlTrulyMissingGuide() {
+      setExternalStatusFixedHtml('商家尚未完成官方 LINE 加入好友網址設定。<br><br>請聯絡商家協助完成訂購。');
+    }
+
+    // 需求文件十五：偵測「使用者是否真的離開了這個分頁」（切去 LINE），
+    // 藉此判斷自動跳轉「大概有沒有成功」——無法 100% 準確，所以文案只說
+    // 「未能自動開啟」，不宣稱「LINE 未安裝」（那個結論無法可靠判斷）。
+    let launchLikelySucceeded = false;
+    const _markLaunchLikelySucceeded = () => { launchLikelySucceeded = true; };
+    document.addEventListener('visibilitychange', () => { if (document.hidden) _markLaunchLikelySucceeded(); });
+    global.addEventListener('pagehide', _markLaunchLikelySucceeded);
+    global.addEventListener('blur', _markLaunchLikelySucceeded);
+
+    // 需求文件十二：Analytics 用 sendBeacon（頁面即將被原生 <a href> 導航離開時，
+    // 一般 fetch 不保證送得出去，sendBeacon 是為了這種情境設計的）。同步呼叫、
+    // 零 await，不會拖住原生連結的預設行為。
+    function sendBeaconEvent(eventName, extra) {
+      try {
+        if (!global.navigator || !global.navigator.sendBeacon) { onEvent && onEvent(eventName, extra); return; }
+        const payload = new Blob([JSON.stringify({ event_name: eventName, ...(extra || {}) })], { type: 'application/json' });
+        global.navigator.sendBeacon(`/api/analytics/events?store_id=${encodeURIComponent(storeId)}`, payload);
+      } catch (e) { /* Analytics 失敗不影響主流程 */ }
+    }
+
+    // 需求文件四／六／九／十三：「立即開啟 LINE 官方帳號」——真機測試證實這個
+    // 純加好友連結（不是 oaMessage 連結）在 Messenger WebView 的成功率最高。
+    // fix18-10-hotfix29-C：href 來源不再只認 config.add_friend_url（那是舊有
+    // line-order.html 設定管道，可能是另一個已經沒在用的欄位）——一開始先用
+    // config 裡的值頂著，但 create API 回應帶回 add_friend_url（後端
+    // resolveAddFriendUrl() 解析出來的正式值）之後，會用同一個函式覆蓋成
+    // 最新鮮的值，兩者共用同一個 click handler，不重複綁定。
+    //
+    // fix18-10-hotfix29-C Final：這個宣告必須放在下面的狀態機 IIFE 之前——
+    // IIFE 會同步呼叫 prepareHandoff()，而 prepareHandoff() 在第一個 await
+    // 之前就會同步讀取 resolvedAddFriendUrl，若宣告寫在 IIFE 後面，會在真實
+    // 瀏覽器與 Node 測試環境兩邊都直接丟出「Cannot access before
+    // initialization」的 TDZ 例外，讓整個 Dialog 初始化中斷（真機上會表現成
+    // 「Messenger Dialog 完全沒有反應」）。
+    const openOaBtn = externalGuideEl.querySelector('#lmgOpenOaBtn');
+    let resolvedAddFriendUrl = (config && config.add_friend_url) || '';
+
+    function applyAddFriendUrlToOpenOaBtn() {
+      if (!openOaBtn) return;
+      if (resolvedAddFriendUrl) {
+        openOaBtn.href = resolvedAddFriendUrl;
+        openOaBtn.removeAttribute('aria-disabled');
+        openOaBtn.style.opacity = '';
+        openOaBtn.style.pointerEvents = '';
+      } else {
+        openOaBtn.href = '#';
+        openOaBtn.setAttribute('aria-disabled', 'true');
+        openOaBtn.style.opacity = '.55';
+        openOaBtn.style.pointerEvents = 'none';
+      }
+    }
+
+    if (openOaBtn) {
+      applyAddFriendUrlToOpenOaBtn();
+      openOaBtn.addEventListener('click', (ev) => {
+        if (!resolvedAddFriendUrl) {
+          // 需求文件十三：真的沒有設定時整個停用（pointer-events:none 已擋大部分
+          // 情況），這裡是鍵盤操作等邊界情況的最後一道防線，不誤導成「請改用複製代碼」。
+          ev.preventDefault();
+          showAddFriendUrlTrulyMissingGuide();
+          return;
+        }
+        sendBeaconEvent('line_login_open_line_clicked', { trigger: 'open_oa_button' });
+      });
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // fix18-10-hotfix29-B（需求文件一～十）：Handoff 狀態機——idle／preparing／
+    // ready／failed，配合 requestId 防止舊請求覆蓋新結果，是這次要修正
+    // iPhone 13 Pro／17 沒有 CART Code 的核心防護。
+    // ══════════════════════════════════════════════════════════════════
+    let currentHandoff = null; // { cartCode, lineOaMessageUrl, lineOaConfigured, expiresAt }
+    let autoLaunchAttempted = false;
+    let manualClicked = false;
+    let handoffState = 'idle'; // idle | preparing | ready | failed
+    let handoffRequestId = 0;
+    const handoffDiagCtx = classifyHandoffDeviceBrowser(environment);
+    setHandoffDebugEnabled(!!(config && config.line_handoff_debug));
+
+    function setHandoffState(nextState) { handoffState = nextState; }
+
+    // 需求文件四：preparing——保留官方 LINE 大按鈕可見，但停用複製/到LINE按鈕，
+    // 不顯示 HOF 錯誤碼，也不顯示舊 Cart Code（避免看起來像「還能用」）。
+    function renderPreparingState() {
+      hideCartCode();
+      showHandoffErrorCode(null);
+      setCopyButtonEnabled(false);
+      disableGoLineCheckoutBtn();
+      const regenBtn = externalGuideEl.querySelector('#lmgRegenerateTokenBtn');
+      if (regenBtn) regenBtn.style.display = 'none';
+      setExternalStatus('正在準備 LINE 結帳代碼…', false);
+    }
+
+    // 需求文件四：ready——啟用複製/到LINE按鈕、設定真正的 <a href>、清除錯誤碼
+    // 與 failed 文案，保留 Hotfix29 既有 UI（官方 LINE 大按鈕維持原順位規則）。
+    function applyHandoffToUi(result) {
+      // fix18-10-hotfix29-C（需求文件九）：create API 回應是 add_friend_url
+      // 最新鮮的來源，只要有給值就採用並重新套用到按鈕（同一函式，不重複綁定）。
+      if (result && result.addFriendUrl) {
+        resolvedAddFriendUrl = result.addFriendUrl;
+        applyAddFriendUrlToOpenOaBtn();
+      }
+      showHandoffErrorCode(null);
+      const regenBtn = externalGuideEl.querySelector('#lmgRegenerateTokenBtn');
+      if (regenBtn) regenBtn.style.display = 'none';
+      setCopyButtonEnabled(true);
+      showCartCode(result.cartCode);
+      if (result.lineOaConfigured && result.lineOaMessageUrl) {
+        enableGoLineCheckoutBtn(result.lineOaMessageUrl);
+        setExternalStatus('若沒有自動跳轉，請點下方按鈕。', false);
+      } else {
+        // 需求文件九：ok:true 但店家尚未設定 Basic ID——這不是失敗，是既有的
+        // 「尚未完成一鍵結帳設定」情境，維持原有 fallback 文案／按鈕配置。
+        switchToAddFriendFallback(result.cartCode);
+      }
+    }
+
+    // 需求文件四／十五：failed——清空舊 Cart Code、停用複製/到LINE按鈕、
+    // 顯示 HOF-* 錯誤碼、啟用「立即開啟 LINE 官方帳號」與「重新產生結帳代碼」。
+    function applyHandoffFailureToUi(result) {
+      if (result && result.addFriendUrl) {
+        resolvedAddFriendUrl = result.addFriendUrl;
+        applyAddFriendUrlToOpenOaBtn();
+      }
+      hideCartCode();
+      setCopyButtonEnabled(false);
+      disableGoLineCheckoutBtn();
+      showHandoffErrorCode(result && result.errorCode ? result.errorCode : null);
+      const regenBtn = externalGuideEl.querySelector('#lmgRegenerateTokenBtn');
+      if (regenBtn) regenBtn.style.display = 'block';
+      // 需求文件十三：Handoff 失敗時，若確認兩個來源都真的沒有 add_friend_url，
+      // 顯示更明確的「請聯絡商家」文案，而不是誤導性的一般失敗訊息。
+      if (!resolvedAddFriendUrl) {
+        showAddFriendUrlTrulyMissingGuide();
+      } else {
+        showHandoffFailedGuideText();
+      }
+    }
+
+    // 需求文件二：idle/failed → preparing → createLineCheckoutHandoff() →
+    // normalize（已在 createLineCheckoutHandoff 內完成）→ requestId 檢查 →
+    // ready 或 failed。這是修正 iPhone 沒有 CART Code 的核心流程。
+    async function prepareHandoff() {
+      const requestId = ++handoffRequestId;
+      setHandoffState('preparing');
+      if (externalGuideVisible) renderPreparingState();
+      _handoffLog('prepare_started', { attempt: requestId });
+      reportHandoffDiagnostics(storeId, Object.assign({ stage: 'prepare_started' }, handoffDiagCtx));
+
+      // 需求文件一：has_add_friend_url 一律用目前已知最新鮮的 resolvedAddFriendUrl
+      // （create API 回應會再更新它，但呼叫當下先用現有值），讓每一筆 report()
+      // 都能帶著這個欄位，不再是 null。
+      const result = await createLineCheckoutHandoff(storeId, Object.assign({ hasAddFriendUrl: !!resolvedAddFriendUrl }, handoffDiagCtx));
+
+      // 需求文件三：Race Condition 防護——舊請求（例如第一次逾時很晚才回來）
+      // 不得覆蓋「重新產生結帳代碼」之後的新結果。
+      if (requestId !== handoffRequestId) {
+        reportHandoffDiagnostics(storeId, Object.assign({ stage: 'fallback_entered', fallback_reason: 'request_id_mismatch' }, handoffDiagCtx));
+        return result;
+      }
+      if (!externalGuideVisible) return result;
+
+      if (result && result.ok && result.cartCode) {
+        currentHandoff = result;
+        setHandoffState('ready');
+        _handoffLog('ui_applied', { has_cart_code: true });
+        // 需求文件二：這裡之前只有 console log（_handoffLog），從未真正回報給
+        // 後端——Integration Center「最近成功時間」的查詢條件是
+        // stage='ui_applied' AND error_code IS NULL，缺了這筆事件，該查詢
+        // 永遠找不到資料，導致成功後台也顯示不出正確狀態。
+        reportHandoffDiagnostics(storeId, Object.assign({
+          stage: 'ui_applied', error_code: null, fallback_reason: null,
+          has_cart_code: true, has_line_oa_message_url: !!result.lineOaMessageUrl,
+          response_ok: true,
+          http_status: (result.httpStatus === undefined ? null : result.httpStatus),
+          ui_cart_count: (result.uiCartCount === undefined ? null : result.uiCartCount),
+          payload_cart_count: (result.payloadCartCount === undefined ? null : result.payloadCartCount),
+          has_add_friend_url: !!(result.addFriendUrl || resolvedAddFriendUrl),
+        }, handoffDiagCtx));
+        applyHandoffToUi(result);
+      } else {
+        currentHandoff = null;
+        setHandoffState('failed');
+        _handoffLog('ui_applied', { error_code: result && result.errorCode });
+        // 需求文件一／三：這筆 fallback_entered 診斷是 Integration Center「最近
+        // 失敗時間／最近錯誤碼／最近 HTTP status」直接讀取的來源——之前這裡
+        // 完全沒有帶 http_status／response_ok／ui_cart_count／payload_cart_count，
+        // 即使 createLineCheckoutHandoff() 內部其實已經知道真正的 http_status，
+        // 也從未傳到這裡，才會讓後台永遠顯示「HTTP status: -」。現在一律從
+        // result 帶出來（result 本身在每個失敗分支都已經附上這些欄位）。
+        reportHandoffDiagnostics(storeId, Object.assign({
+          stage: 'fallback_entered',
+          error_code: (result && result.errorCode) || null,
+          fallback_reason: (result && result.reason) || 'handoff_failed',
+          has_cart_code: false,
+          has_line_oa_message_url: false,
+          response_ok: false,
+          http_status: (result && result.httpStatus !== undefined) ? result.httpStatus : null,
+          ui_cart_count: (result && result.uiCartCount !== undefined) ? result.uiCartCount : null,
+          payload_cart_count: (result && result.payloadCartCount !== undefined) ? result.payloadCartCount : null,
+          has_add_friend_url: !!resolvedAddFriendUrl,
+        }, handoffDiagCtx));
+        applyHandoffFailureToUi(result);
+        scheduleAddFriendFallback(requestId);
+      }
+      return result;
+    }
+
+    // 需求文件六：自動開啟——同一個 store_id+cart_code 只嘗試一次（用
+    // sessionStorage，不是記憶體變數，才能跨「Dialog 被重新 build」仍然有效）。
+    // 只有 handoffState === 'ready' 才可能被呼叫到這裡（由 prepareHandoff 保證）。
+    function scheduleAutoLaunch(result) {
+      if (handoffState !== 'ready' || !result || !result.cartCode || !result.lineOaMessageUrl) return;
+      if (autoLaunchAttempted || manualClicked) return;
+      const autoLaunchKey = `line_checkout_auto_launch:${storeId}:${result.cartCode}`;
+      let already = false;
+      try { already = global.sessionStorage.getItem(autoLaunchKey) === '1'; } catch (e) {}
+      if (already) {
+        setExternalStatus('若沒有自動跳轉，請點下方按鈕。', false);
+        return;
+      }
+      _handoffLog('auto_launch_scheduled', {});
+      reportHandoffDiagnostics(storeId, Object.assign({ stage: 'auto_launch_scheduled', has_cart_code: true, has_line_oa_message_url: true }, handoffDiagCtx));
+      setTimeout(() => {
+        if (!externalGuideVisible || handoffState !== 'ready' || autoLaunchAttempted || manualClicked) return;
+        autoLaunchAttempted = true;
+        try { global.sessionStorage.setItem(autoLaunchKey, '1'); } catch (e) {}
+        _handoffLog('auto_launch_attempted', {});
+        reportHandoffDiagnostics(storeId, Object.assign({ stage: 'auto_launch_attempted', has_cart_code: true, has_line_oa_message_url: true }, handoffDiagCtx));
+        sendBeaconEvent('line_checkout_handoff_opened', { cart_code_masked: result.cartCode ? result.cartCode.slice(0, 8) + '***' : '', trigger: 'auto' });
+        persistBeforeExternalLogin(storeId, { gate_stage: gateStage });
+        launchLikelySucceeded = false;
+        // 需求文件六：Auto Launch 失敗（同步 assign 本身丟例外）絕不能把狀態
+        // 改成 failed、不清除 Cart Code、不停用按鈕——只保留 Dialog 讓使用者
+        // 自己點手動按鈕。
+        try { global.location.assign(result.lineOaMessageUrl); } catch (e) { /* 保留 Dialog 與所有手動按鈕 */ }
+        // 需求文件七：1500~2000ms 後頁面仍可見 → 判斷自動開啟大概沒成功。
+        // 不隱藏 Dialog、不鎖住手動連結、不清 Cart Code、不切 failed，只更新提示文字。
+        setTimeout(() => {
+          if (!externalGuideVisible || handoffState !== 'ready') return;
+          if (!launchLikelySucceeded && !document.hidden) {
+            setExternalStatus('Messenger 未能自動開啟 LINE。<br>請直接點「立即開啟 LINE 官方帳號」，或使用「複製結帳代碼」。', false);
+          } else {
+            setExternalStatus('若沒有自動跳轉，請點下方按鈕。', false);
+          }
+        }, 1800);
+      }, 1000); // 需求文件六：800~1200ms，固定 1000ms
+    }
+
+    // 需求文件八：兩次建立都失敗後，自動嘗試開啟加好友連結——同一次失敗
+    // request 只嘗試一次（用 requestId 當 key 的一部分，不會無限跳轉）；
+    // 且執行前必須再次確認仍然是 failed，避免使用者這段時間內已經按了
+    // 「重新產生結帳代碼」成功轉為 ready。
+    function scheduleAddFriendFallback(requestIdAtFailure) {
+      // 需求文件一：統一用 resolvedAddFriendUrl（create API 回應優先，config
+      // 只是初值），不再散落多個來源各自判斷。
+      const targetUrl = resolvedAddFriendUrl || (config && config.add_friend_url) || '';
+      if (!targetUrl) return;
+      const attemptKey = `line_add_friend_fallback:${storeId}:${requestIdAtFailure}`;
+      let already = false;
+      try { already = global.sessionStorage.getItem(attemptKey) === '1'; } catch (e) {}
+      if (already) return;
+      setTimeout(() => {
+        if (!externalGuideVisible || handoffState !== 'failed' || requestIdAtFailure !== handoffRequestId) return;
+        try { global.sessionStorage.setItem(attemptKey, '1'); } catch (e) {}
+        _handoffLog('auto_launch_attempted', { fallback_reason: 'add_friend_fallback' });
+        try { global.location.assign(targetUrl); } catch (e) { /* 保留手動大按鈕 */ }
+      }, 1000);
+    }
+
+    // 需求文件二：Dialog 一開啟就背景建立 Token，不等使用者點擊。
+    (async () => {
+      const result = await prepareHandoff();
+      if (!externalGuideVisible || handoffState !== 'ready') return;
+      scheduleAutoLaunch(result);
+    })();
+
+    // 需求文件十二／十八：手動 <a> 的 click handler 完全同步、不含 await／fetch／
+    // 建立 Token／延遲 timer，也不被 sessionStorage 鎖住——即使自動跳轉已經
+    // 嘗試過，使用者仍然可以重複點擊這個原生連結（href 早就準備好了）。
+    if (goLineCheckoutBtn) {
+      goLineCheckoutBtn.addEventListener('click', (ev) => {
+        if (goLineCheckoutBtn.getAttribute('aria-disabled') === 'true') { ev.preventDefault(); return; }
+        manualClicked = true; // 純粹用來讓「還沒開始跑」的自動開啟 timer 提早放棄，不影響這次點擊本身
+        launchLikelySucceeded = false;
+        persistBeforeExternalLogin(storeId, { gate_stage: gateStage });
+        const isFallback = !(currentHandoff && currentHandoff.lineOaConfigured);
+        sendBeaconEvent(isFallback ? 'line_login_open_line_clicked' : 'line_checkout_handoff_opened', {
+          cart_code_masked: currentHandoff && currentHandoff.cartCode ? currentHandoff.cartCode.slice(0, 8) + '***' : '', trigger: 'manual',
+        });
+        // 不 preventDefault，讓瀏覽器用原生方式開啟 <a href>（保留使用者手勢，
+        // 這正是 iOS Messenger 能不能喚起 LINE 的關鍵）。
+      });
+    }
+
+    // 需求文件九：Token 建立失敗時的「重新產生結帳代碼」。requestId 遞增在
+    // prepareHandoff() 內完成，這裡只需要重置 auto-launch 旗標；不重複綁定
+    // click handler（這個 addEventListener 只在 Dialog 建立時執行一次）。
+    const regenerateBtn = externalGuideEl.querySelector('#lmgRegenerateTokenBtn');
+    if (regenerateBtn) {
+      regenerateBtn.addEventListener('click', async () => {
+        regenerateBtn.disabled = true;
+        autoLaunchAttempted = false; // 新 Token、新 cart_code，允許重新自動嘗試一次
+        manualClicked = false;
+        try {
+          const result = await prepareHandoff();
+          if (result && result.ok && handoffState === 'ready') scheduleAutoLaunch(result);
+        } finally {
+          regenerateBtn.disabled = false;
+        }
+      });
+    }
+
+    // 需求文件十一：「在 Safari 開啟／在外部瀏覽器開啟」——複製目前網址，
+    // 提示貼到外部瀏覽器（無法從 Messenger WebView 用程式強制切換瀏覽器，
+    // 只能靠使用者自己貼上，這裡把「複製」這個唯一能做的動作做到最方便）。
+    const externalBrowserBtn = externalGuideEl.querySelector('#lmgExternalBrowserBtn');
+    if (externalBrowserBtn) {
+      externalBrowserBtn.addEventListener('click', async () => {
+        const url = getSafeCurrentPageUrl();
+        const copied = await copyToClipboard(url);
+        const tip = environment.isIOS ? '請貼到 Safari 開啟。' : '請貼到外部瀏覽器開啟。';
+        setExternalStatus(copied ? `已複製目前網址。${tip}` : `請手動複製此網址：${url}`, false);
+      });
+    }
 
     // Android／其他瀏覽器（legacyButtonsHtml）才會有這兩個元素；iOS 版型
     // （iosButtonsHtml）沒有 lmgOpenLineBtn／lmgOsHintBtn，以下沿用 hotfix26-F2
@@ -991,27 +1820,6 @@
         setExternalStatus('請點右上角「⋯」，選擇「在 Safari 中開啟」，回到點餐頁後再按 LINE 登入。', false);
       });
     }
-
-    copyBtn.addEventListener('click', async () => {
-      trackLineEnvironmentEvent(onEvent, 'line_login_copy_link_clicked', environment, gateStage, storeId);
-      const url = getSafeCurrentPageUrl();
-      // fix18-10-hotfix26-F3（Fix-2 Copy Link）：iOS 版複製成功文案改用需求文件
-      // 指定的「貼到 LINE 聊天室／官方帳號圖文選單」說明；Android／其他瀏覽器
-      // 維持 hotfix26-F2 原本的文案不變。
-      const copiedMsg = environment.isIOS
-        ? '已複製點餐連結。若仍無法登入，請將連結貼到 LINE 聊天室或官方帳號圖文選單，重新開啟即可完成 LINE 登入。'
-        : '已複製點餐連結，請貼到瀏覽器開啟。';
-      try {
-        if (global.navigator && global.navigator.clipboard && global.navigator.clipboard.writeText) {
-          await global.navigator.clipboard.writeText(url);
-          setExternalStatus(copiedMsg, false);
-        } else {
-          setExternalStatus('請手動複製此連結：' + url, false);
-        }
-      } catch (e) {
-        setExternalStatus('請手動複製此連結：' + url, false);
-      }
-    });
 
     backBtn.addEventListener('click', () => {
       // 需求文件二十一：返回購物車——關閉引導、不清購物車、不清 pending、
@@ -1342,6 +2150,12 @@
     getSafeCurrentPageUrl, persistBeforeExternalLogin, readExternalLoginPending,
     clearExternalLoginPending, showExternalBrowserLoginGuide, closeExternalBrowserLoginGuide,
     trackLineEnvironmentEvent,
+    // fix18-10-hotfix26-F8-B 新增：Messenger →「到 LINE 完成結帳」
+    createLineCheckoutHandoff, copyToClipboard,
+    // fix18-10-hotfix29-B 新增（需求文件十一，僅供 Node 測試環境使用）：
+    // Response Normalize／Timeout／Retry／錯誤碼顯示 helper。
+    normalizeHandoffResponse, fetchWithTimeout, handoffErrorCodeToDisplay,
+    classifyHandoffDeviceBrowser, setHandoffDebugEnabled, shouldRetryHandoff,
   };
 
 })(window);
